@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# venv
+.venv/
+venv/
+
+# OS/IDE
+.vscode/
+.DS_Store
+
+# Logs / results / local data
+logs/
+results/
+*.log
+
+# Local DB / caches (אם אצלך זה קבצים מקומיים ולא רוצים בגיט)
+*.duckdb
+*.sqlite
+*.db
