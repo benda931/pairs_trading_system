@@ -1,0 +1,111 @@
+# 📄 utils.py – ניהול קונפיגים, טעינת נתונים מ-Yahoo, חישובים סטטיסטיים
+
+import os
+import json
+import numpy as np
+import pandas as pd
+import yfinance as yf
+from datetime import datetime
+
+# === קונפיג ===
+def load_config():
+    with open("config.json", "r", encoding="utf-8") as f:
+        return json.load(f)
+
+# === טעינה + הורדה אוטומטית מ-Yahoo ===
+def load_price_data(symbol, folder="data", period="6mo", force_refresh=False):
+    """
+    טוען נתוני מחיר: מ-Yahoo Finance אם צריך, או מ-CSV אם כבר קיים.
+    """
+    filename = os.path.join(folder, f"{symbol}.csv")
+
+    if force_refresh or not os.path.exists(filename):
+        print(f"🔄 הורדת נתונים מ-Yahoo: {symbol}")
+        try:
+            df = yf.download(symbol, period=period)
+        except Exception as e:
+            raise RuntimeError(f"שגיאה ב-Yahoo עבור {symbol}: {e}")
+        if df.empty:
+            raise ValueError(f"⚠️ אין נתונים זמינים עבור {symbol}")
+
+        df = df.reset_index()
+        df = df[["Date", "Open", "High", "Low", "Close", "Volume"]]
+        df.columns = ["date", "open", "high", "low", "close", "volume"]
+        os.makedirs(folder, exist_ok=True)
+        df.to_csv(filename, index=False)
+    else:
+        df = pd.read_csv(filename)
+
+    df["date"] = pd.to_datetime(df["date"])
+    df.columns = df.columns.str.lower()
+    return df
+
+# === חישובי מסחר סטטיסטיים ===
+def calculate_zscore(series_x, series_y, window):
+    spread = series_x - series_y
+    mean = spread.rolling(window=window).mean()
+    std = spread.rolling(window=window).std()
+    zscore = (spread - mean) / std
+    return zscore.iloc[-1]
+
+def calculate_correlation(series_x, series_y):
+    return series_x.corr(series_y)
+
+def calculate_half_life(spread):
+    spread_lag = spread.shift(1).fillna(method="bfill")
+    delta = spread - spread_lag
+    beta = np.polyfit(spread_lag, delta, 1)[0]
+    half_life = -np.log(2) / beta if beta != 0 else np.nan
+    return np.clip(half_life, 0, 1000)
+
+def calculate_volatility_zscore(series, window=20):
+    rolling_std = series.rolling(window=window).std()
+    mean_std = rolling_std.rolling(window=window).mean()
+    std_std = rolling_std.rolling(window=window).std()
+    try:
+        last_std = rolling_std.iloc[-1]
+        last_mean = mean_std.iloc[-1]
+        last_std_std = std_std.iloc[-1]
+        if pd.isna(last_std_std) or last_std_std == 0:
+            return 0.0
+        return (last_std - last_mean) / last_std_std
+    except:
+        return 0.0
+
+def get_implied_volatility(symbol):
+    return 0.25  # placeholder
+
+def calculate_historical_volatility(prices):
+    log_returns = np.log(prices / prices.shift(1)).dropna()
+    return log_returns.std() * np.sqrt(252)
+
+def calculate_beta(prices, market=None):
+    if market is None:
+        market = prices
+    log_ret = np.log(prices / prices.shift(1)).dropna()
+    market_ret = np.log(market / market.shift(1)).dropna()
+    beta = np.cov(log_ret, market_ret)[0, 1] / np.var(market_ret)
+    return beta
+
+def evaluate_pair_quality(z, corr, hl, volz):
+    score = 0
+    if abs(z) > 1: score += 1
+    if corr > 0.7: score += 1
+    if hl < 20: score += 1
+    if abs(volz) < 1.5: score += 1
+    if score == 4: return "⭐⭐⭐⭐ מצוין"
+    elif score == 3: return "⭐⭐⭐ טוב"
+    elif score == 2: return "⭐⭐ בינוני"
+    else: return "⭐ חלש"
+
+# === הורדת כל הנתונים מראש לפי זוגות מהקונפיג ===
+def download_all_data_from_config(period="6mo"):
+    from pairs import load_pairs  # חייב להישאר בפנים כדי למנוע מעגליות
+    pairs = load_pairs()
+    symbols = sorted({sym.upper() for pair in pairs for sym in pair["symbols"]})
+    print(f"⬇️ מוריד נתונים עבור {len(symbols)} סימבולים...")
+    for symbol in symbols:
+        try:
+            load_price_data(symbol, period=period, force_refresh=True)
+        except Exception as e:
+            print(f"❌ {symbol}: {e}")

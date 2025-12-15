@@ -1,0 +1,144 @@
+# 📊 Backtest Tab – גרסה מלאה עם אופטימיזציה, ניתוח רגרסיה, בקרת פרמטרים והצגת לונג/שורט
+
+import streamlit as st
+import pandas as pd
+import numpy as np
+import os
+from datetime import datetime, timedelta
+from sklearn.linear_model import LinearRegression
+from data_loader import load_price_data
+from volatility import calculate_atr
+from utils import (
+    calculate_zscore, calculate_historical_volatility,
+    get_implied_volatility, calculate_beta
+)
+
+def render_backtest_tab():
+    st.header("🔁 Backtest מתקדם עם שליטה מלאה וניתוח עומק")
+
+    with st.container():
+        col1, col2 = st.columns([1.2, 1])
+        with col1:
+            sym_x = st.text_input("נייר X", "SPY")
+        with col2:
+            sym_y = st.text_input("נייר Y", "VOO")
+
+    col3, col4, col5 = st.columns(3)
+    with col3:
+        z_entry = st.slider("📐 רמת Z לכניסה", 0.5, 3.5, 1.5, 0.1)
+    with col4:
+        z_exit = st.slider("📤 רמת Z ליציאה", 0.0, 3.0, 0.5, 0.1)
+    with col5:
+        years_back = st.number_input("📅 שנים אחורה", min_value=1, max_value=20, value=5)
+
+    with st.expander("⚙️ שליטה על משקלי תנודתיות"):
+        atr_weight = st.slider("משקל ATR", 0.0, 1.0, 0.4)
+        iv_weight = st.slider("משקל IV", 0.0, 1.0, 0.3)
+        hv_weight = st.slider("משקל HV", 0.0, 1.0, 0.2)
+        beta_weight = st.slider("משקל Beta", 0.0, 1.0, 0.1)
+
+        total = atr_weight + iv_weight + hv_weight + beta_weight
+        if not np.isclose(total, 1.0):
+            st.warning("💡 סכום המשקלים אינו בדיוק 1 – שקול לאזן את התרומה של כל רכיב.")
+
+    if st.button("🚀 הרץ סימולציה"):
+        try:
+            end = datetime.today()
+            start = end - timedelta(days=years_back * 365)
+            df_x = load_price_data(sym_x, start=start)
+            df_y = load_price_data(sym_y, start=start)
+
+            spread = df_x['close'] - df_y['close']
+            z = (spread - spread.rolling(20).mean()) / spread.rolling(20).std()
+            z = z.dropna()
+
+            # חישובי תנודתיות
+            atr_x = calculate_atr(df_x, 14).iloc[-1]
+            atr_y = calculate_atr(df_y, 14).iloc[-1]
+            iv_x = get_implied_volatility(sym_x)
+            iv_y = get_implied_volatility(sym_y)
+            hv_x = calculate_historical_volatility(df_x['close'])
+            hv_y = calculate_historical_volatility(df_y['close'])
+            beta_x = calculate_beta(df_x['close'])
+            beta_y = calculate_beta(df_y['close'])
+
+            vol_x = atr_weight * atr_x + iv_weight * iv_x + hv_weight * hv_x + beta_weight * beta_x
+            vol_y = atr_weight * atr_y + iv_weight * iv_y + hv_weight * hv_y + beta_weight * beta_y
+            ratio = vol_y / vol_x if vol_x != 0 else 1
+
+            capital = 50000
+            size_x = capital * ratio / (1 + ratio)
+            size_y = capital / (1 + ratio)
+            shares_x = size_x / df_x['close'].iloc[-1]
+            shares_y = size_y / df_y['close'].iloc[-1]
+
+            df_bt = pd.DataFrame({
+                "date": df_x['date'],
+                "z": z,
+                "px": df_x['close'],
+                "py": df_y['close'],
+                "spread": spread
+            }).dropna().reset_index(drop=True)
+
+            trades, pnl = [], []
+            in_trade = False
+            peak = 0
+            drawdowns = []
+
+            for i in range(len(df_bt)):
+                row = df_bt.iloc[i]
+                if not in_trade and abs(row['z']) > z_entry:
+                    entry = row
+                    direction = -1 if row['z'] > 0 else 1
+                    in_trade = True
+                elif in_trade and abs(row['z']) < z_exit:
+                    exit = row
+                    profit = direction * ((entry['px'] - exit['px']) * shares_x +
+                                          (exit['py'] - entry['py']) * shares_y)
+                    pnl.append(profit)
+                    peak = max(peak, sum(pnl))
+                    drawdowns.append(peak - sum(pnl))
+                    trades.append({
+                        "תאריך כניסה": entry['date'],
+                        "תאריך יציאה": exit['date'],
+                        "רווח ($)": round(profit, 2),
+                        "לונג": sym_y if direction == 1 else sym_x,
+                        "שורט": sym_x if direction == 1 else sym_y,
+                        "כמות לונג": round(shares_y if direction == 1 else shares_x, 2),
+                        "כמות שורט": round(shares_x if direction == 1 else shares_y, 2),
+                        "שווי לונג ($)": round(size_y if direction == 1 else size_x, 2),
+                        "שווי שורט ($)": round(size_x if direction == 1 else size_y, 2),
+                        "Z כניסה": round(z_entry, 2),
+                        "Z יציאה": round(z_exit, 2)
+                    })
+                    in_trade = False
+
+            if pnl:
+                df_trades = pd.DataFrame(trades)
+                df_trades["משך ימים"] = (pd.to_datetime(df_trades["תאריך יציאה"]) -
+                                          pd.to_datetime(df_trades["תאריך כניסה"])).dt.days
+
+                st.subheader("📋 טבלת עסקאות מפורטת")
+                st.dataframe(df_trades, use_container_width=True)
+
+                st.subheader("📈 רווח מצטבר")
+                st.line_chart(pd.Series(pnl).cumsum(), use_container_width=True)
+
+                model = LinearRegression().fit(df_trades[["משך ימים"]], df_trades["רווח ($)"])
+                pred = model.predict(df_trades[["משך ימים"]])
+
+                st.subheader("🔍 רגרסיה בין משך העסקה לרווח")
+                st.line_chart(pd.DataFrame({"Actual": df_trades["רווח ($)"], "Predicted": pred}), use_container_width=True)
+
+                st.success(f"""
+                ✅ מספר עסקאות: {len(pnl)} |
+                💰 ממוצע רווח לעסקה: ${np.mean(pnl):.2f} |
+                📉 מקסימום Drawdown: ${max(drawdowns):.2f}
+                """)
+
+                st.download_button("📥 הורד CSV", df_trades.to_csv(index=False), "trades.csv", "text/csv")
+            else:
+                st.warning("⚠️ לא נמצאו עסקאות בתנאים שנבחרו.")
+
+        except Exception as e:
+            st.error(f"שגיאה: {e}")

@@ -1,0 +1,15 @@
+# === תנאים לפתיחת וסגירת פוזיציה לפי Z-Score ===
+
+def should_open_trade(zscore, threshold):
+    return abs(zscore) >= threshold
+
+
+def should_close_trade(zscore, close_level):
+    return abs(zscore) <= close_level
+
+
+# === הערכת Edge במסחר לפי Z ורמת תנודתיות יחסית ===
+def evaluate_edge(zscore, volatility_ratio):
+    # רעיון: ככל שה-Z גבוה יותר מהרגיל והיחס תנודתיות סביר, יש יתרון
+    edge = abs(zscore) / volatility_ratio if volatility_ratio > 0 else 0
+    return round(edge, 2)

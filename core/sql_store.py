@@ -1,0 +1,2941 @@
+# -*- coding: utf-8 -*-
+"""
+core/sql_store.py — SQL Persistence Layer (HF-grade, Fund-Level, v2)
+=====================================================================
+
+שכבת Persist מרכזית לכל המודולים במערכת:
+
+תומך ב:
+    - Data Quality (symbols / pairs)
+    - Signals (universe signals + summaries)
+    - Risk (risk_state / risk_timeline)
+    - Experiments & Backtests (optional hooks)
+    - Context snapshots (ctx, run metadata)
+    - Dashboard snapshots (DashboardSnapshot)
+    - Key-Value JSON store (user prefs, views, misc dashboards)
+    - Price History (EOD / OHLCV) ממקור אמת אחד לטווח הארוך.
+
+מבנה הקובץ (v2):
+----------------
+חלק 1/3 — Core Infra & Engine Wiring (הקובץ הזה):
+    * Header, imports, קבועים (PROJECT_ROOT / LOGS_DIR).
+    * SqlStore.__init__ עם יצירת Engine חכמה (DuckDB/SQLite/Postgres).
+    * from_settings מקצועי עם:
+        - תמיכה ב־AppContext.settings, dict, env vars.
+        - ברירת מחדל: DuckDB ב-logs/pairs_trading_<env>.duckdb.
+    * פונקציות עזר:
+        - _now_utc_iso
+        - _tbl (ניהול table_prefix)
+        - list_tables / get_engine_info / describe_engine
+        - raw_query / read_table
+        - _ensure_* schema:
+            kv_store, dashboard_snapshots, prices.
+        - _ensure_writable + get_last_error.
+
+חלק 2/3 — Data Persistence Layers (ייבנה בהמשך):
+    * Data Quality / Signals / Smart Scan / Fair Value / Fundamentals / Metrics.
+    * Universe loaders מתקדמים (latest_only, profile/env aware).
+    * Backtest metrics flattening, experiment_runs וכו'.
+
+חלק 3/3 — Risk / Snapshots / KV / Prices API מתקדם (ייבנה בהמשך):
+    * RiskState / RiskLimits persist.
+    * Context snapshots, DashboardSnapshot typed + generic.
+    * KV JSON store (prefs/views/other) עם ניהול גרסאות.
+    * Price history API מורחב (rollups, sanity checks, health summaries).
+
+עקרונות:
+    1. מחלקת SqlStore אחת שמנהלת Engine + קונבנציית טבלאות.
+    2. כל שמירה מקבלת:
+        - run_id (אופציונלי)
+        - section/profile/env (labels)
+        - ts_utc אחיד ב-UTC.
+    3. API ידידותי ל־pandas / dicts / מודולים אחרים ב-core.
+    4. מתאים ל-SQLAlchemy engines: SQLite / DuckDB / Postgres / וכו'.
+"""
+
+from __future__ import annotations
+
+from dataclasses import asdict, is_dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Dict, Optional, List, Mapping, Sequence
+
+import json
+import logging
+import os
+
+import pandas as pd
+from sqlalchemy import create_engine, text, inspect
+from sqlalchemy.engine import Engine
+from common.json_safe import make_json_safe
+from core.data_quality import (
+    data_quality_symbols_to_sql_ready,
+    data_quality_pairs_to_sql_ready,
+)
+from core.risk_engine import RiskState, RiskLimits
+from core.signals_engine import summarize_universe_signals
+from core.dashboard_models import DashboardSnapshot
+
+logger = logging.getLogger(__name__)
+
+JSONDict = Dict[str, Any]
+
+# שורש הפרויקט (בהנחה שהקובץ תחת core/)
+PROJECT_ROOT: Path = Path(__file__).resolve().parent.parent
+LOGS_DIR: Path = PROJECT_ROOT / "logs"
+LOGS_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _now_utc_iso() -> str:
+    """
+    מחזיר timestamp ב-UTC בפורמט ISO סטנדרטי עם 'Z' (ללא timezone offset).
+
+    זהו format אחיד לכל ה-ts_utc במערכת.
+    """
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _safe_json_dumps(obj: Any) -> str:
+    """
+    המרה בטוחה ל-JSON עם fallback ל-str.
+
+    שימושי ל-payloadים מורכבים (metrics_json, config_json וכו').
+    """
+    try:
+        return json.dumps(obj, default=str)
+    except TypeError:
+        return json.dumps(str(obj))
+
+
+class SqlStore:
+    """
+    SqlStore — שכבת Persist ברמת קרן.
+
+    מאפיינים:
+    ----------
+    - engine_url: מחרוזת SQLAlchemy, למשל:
+        * "sqlite:///pairs_trading.db"
+        * "duckdb:///C:/.../logs/pairs_trading_dev.duckdb"
+        * "postgresql+psycopg2://user:pass@host:port/dbname"
+
+    - table_prefix: קידומת לטבלאות (למשל "pt_" לקרן שלך)
+    - default_env: סימון environment ("dev" / "paper" / "live")
+    - read_only: מצב "קריאה בלבד" (ל-Health / Dashboard)
+
+    תוספות v2 (חלק 1):
+    -------------------
+    * from_settings חכם:
+        - קורא מה־env vars, attributes, config dict.
+        - ברירת מחדל: DuckDB ב-logs/pairs_trading_<env>.duckdb.
+    * describe_engine / get_engine_info להנדסת מערכת ו-AI Agents.
+    * _ensure_prices_schema כדי למנוע שגיאות "table does not exist" עבור prices.
+    * last_error מנוהל ברמת מחלקה (לשימוש בדשבורד / SystemHealthSnapshot).
+    """
+
+    def __init__(
+        self,
+        engine_url: str,
+        *,
+        echo: bool = False,
+        table_prefix: str = "",
+        default_env: str = "default",
+        read_only: bool = False,
+    ) -> None:
+        self.engine_url = engine_url
+        self.table_prefix = table_prefix.strip()
+        self.default_env = default_env.strip() or "default"
+        self.read_only: bool = bool(read_only)
+
+        # יצירת Engine (HF-grade: future=True + echo לפי settings)
+        self.engine: Engine = create_engine(
+            engine_url,
+            echo=echo,
+            future=True,
+        )
+        # sanitation בסיסי ל-prefix כדי למנוע טייפו מוזר שיזרוק SQL
+        if self.table_prefix:
+            safe_prefix = "".join(
+                ch for ch in self.table_prefix if ch.isalnum() or ch == "_"
+            )
+            if safe_prefix != self.table_prefix:
+                logger.warning(
+                    "SqlStore: sanitized table_prefix from %r to %r",
+                    self.table_prefix,
+                    safe_prefix,
+                )
+            self.table_prefix = safe_prefix
+
+        self._dialect = self.engine.dialect.name.lower()
+        self._last_error: Optional[str] = None  # שגיאה אחרונה (לבריאות מערכת)
+        logger.info(
+            "SqlStore initialized (url=%s, dialect=%s, prefix=%s, env=%s, read_only=%s)",
+            self.engine_url,
+            self._dialect,
+            self.table_prefix,
+            self.default_env,
+            self.read_only,
+        )
+
+        # סכמות בסיסיות — חשוב שיהיו קיימות לפני שימוש
+        # במצב read_only *לא* מריצים שום migrate/CREATE TABLE כדי להימנע מקונפליקטים
+        if not self.read_only:
+            try:
+                self._ensure_dashboard_schema()
+            except Exception as e:
+                logger.warning("Failed to ensure dashboard_snapshots schema: %s", e)
+
+            try:
+                self._ensure_kv_schema()
+            except Exception as e:
+                logger.warning("Failed to ensure kv_store schema: %s", e)
+
+            try:
+                self._ensure_prices_schema()
+            except Exception as e:
+                logger.warning("Failed to ensure prices schema: %s", e)
+
+            # אינדקסים בסיסיים לטבלאות כבדות (HF-grade)
+            try:
+                existing_tables = set(self.list_tables())
+            except Exception:
+                existing_tables = set()
+
+            prices_tbl = self._tbl("prices")
+            if prices_tbl in existing_tables:
+                try:
+                    self._ensure_index(
+                        prices_tbl,
+                        f"{prices_tbl}_sym_date_idx",
+                        ["symbol", "date"],
+                    )
+                except Exception as e:
+                    logger.warning("Failed to ensure index on prices: %s", e)
+
+            dq_tbl = self._tbl("dq_pairs")
+            if dq_tbl in existing_tables:
+                try:
+                    self._ensure_index(
+                        dq_tbl,
+                        f"{dq_tbl}_pair_idx",
+                        ["sym_x", "sym_y"],
+                    )
+                except Exception as e:
+                    logger.warning("Failed to ensure index on dq_pairs: %s", e)
+
+            sig_tbl = self._tbl("signals_universe")
+            if sig_tbl in existing_tables:
+                try:
+                    self._ensure_index(
+                        sig_tbl,
+                        f"{sig_tbl}_pair_ts_idx",
+                        ["pair", "ts_utc"],
+                    )
+                except Exception as e:
+                    logger.warning("Failed to ensure index on signals_universe: %s", e)
+
+            risk_tbl = self._tbl("risk_state")
+            if risk_tbl in existing_tables:
+                try:
+                    self._ensure_index(
+                        risk_tbl,
+                        f"{risk_tbl}_ts_idx",
+                        ["ts_utc"],
+                    )
+                except Exception as e:
+                    logger.warning("Failed to ensure index on risk_state: %s", e)
+                    
+            rt_tbl = self._tbl("risk_timeline")
+            if rt_tbl in existing_tables:
+                try:
+                    self._ensure_index(
+                        rt_tbl,
+                        f"{rt_tbl}_ts_env_idx",
+                        ["ts", "env"],
+                    )
+                except Exception as e:
+                    logger.warning("Failed to ensure index on risk_timeline: %s", e)
+
+        else:
+            logger.info("SqlStore in read_only=True — skipping schema ensure/_migrate calls.")
+
+
+
+    # ------------------------------------------------------------------
+    # Factory מ-App settings (חיבור לדשבורד / AppContext)
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def from_settings(
+        cls,
+        settings: Any,
+        *,
+        env: Optional[str] = None,
+        table_prefix: str = "",
+        echo: Optional[bool] = None,
+        read_only: bool = False,
+    ) -> "SqlStore":
+        """
+        Factory מקצועי שיודע להקים SqlStore מתוך AppContext.settings או dict.
+
+        סדר החיפוש ל-engine_url (מותאם ל-config v2.2.0 + תאימות לאחור):
+
+        1. Environment variables (אם מוגדרים):
+           - SQL_STORE_URL
+           - PAIRS_SQL_STORE_URL
+
+        2. attributes על settings (אם זה אובייקט):
+           - settings.sql_store.engine_url / settings.sql_store.url
+           - settings.engine_url
+           - settings.sql_store_url / settings.SQL_STORE_URL
+           - settings.db_url / settings.DB_URL
+           - settings.sqlalchemy_url / settings.SQLALCHEMY_URL
+
+        3. settings.config או settings עצמו אם הוא Mapping:
+           לפי סדר:
+             - config["sql_store"]["engine_url"] / ["url"]
+             - config["data"]["sql_store"]["engine_url"] / ["url"]
+             - config["paths"]["sql_store_url"]
+             - config["paths"]["duckdb_cache_path"]  → duckdb:///<path>
+             - config["data"]["duckdb_cache"]["path"] → duckdb:///<path>
+             - config["engine_url"]
+             - וגם המפתחות הישנים ברוט:
+               "sql_store_url", "SQL_STORE_URL", "db_url", "DB_URL",
+               "sqlalchemy_url", "SQLALCHEMY_URL"
+
+        4. Fallback ברמת קרן (legacy בלבד אם אין שום רמז מהקונפיג):
+           - DuckDB תחת logs/pairs_trading_<env>.duckdb
+
+        בנוסף:
+        - env_name נגזר מ:
+            env (arg explict) → settings.env/ENV/profile/PROFILE →
+            config["environment"]["default_env"] → "dev"
+        - table_prefix:
+            אם לא הועבר:
+              SQL_TABLE_PREFIX / PAIRS_SQL_TABLE_PREFIX (ENV)
+              settings.sql_table_prefix
+              config["sql_store"]["prefix"]
+        - echo:
+            arg → settings.sql_echo → ENV["SQL_ECHO"] (1/true/on) → False
+        - read_only:
+            arg → settings.sql_read_only → config["sql_store"]["read_only"]
+            → ENV["SQL_READ_ONLY"]/["PAIRS_SQL_READ_ONLY"] → False
+        """
+
+        # ===== 0) להוציא config כ-Mapping (settings או settings.config) =====
+        # אם settings הוא dict / Mapping → זה ה-config.
+        if isinstance(settings, Mapping):
+            cfg: Mapping[str, Any] = settings
+        else:
+            cfg = getattr(settings, "config", {}) or {}
+            if not isinstance(cfg, Mapping):
+                cfg = {}
+
+        # כלי עזר קטן לשאיבה בטוחה מ-nested dict
+        def _get_nested(path: tuple[str, ...]) -> Optional[str]:
+            d: Any = cfg
+            for key in path:
+                if not isinstance(d, Mapping) or key not in d:
+                    return None
+                d = d[key]
+            if isinstance(d, str) and d.strip():
+                return d.strip()
+            return None
+
+        # ===== 1) Env vars – עדיפות עליונה =====
+        url: Optional[str] = None
+        for var in ("SQL_STORE_URL", "PAIRS_SQL_STORE_URL"):
+            val = os.getenv(var)
+            if isinstance(val, str) and val.strip():
+                url = val.strip()
+                logger.info(
+                    "SqlStore.from_settings: using engine_url from env var %s",
+                    var,
+                )
+                break
+
+        # ===== 2) attributes על settings (אם עוד אין url וה-settings הוא אובייקט) =====
+        if url is None and settings is not None and not isinstance(settings, Mapping):
+            # 2.1 settings.sql_store.engine_url / url (typed כמו SqlStoreConfig)
+            sql_store_obj = getattr(settings, "sql_store", None)
+            if sql_store_obj is not None:
+                for attr in ("engine_url", "url"):
+                    val = getattr(sql_store_obj, attr, None)
+                    if isinstance(val, str) and val.strip():
+                        url = val.strip()
+                        logger.info(
+                            "SqlStore.from_settings: using engine_url from settings.sql_store.%s",
+                            attr,
+                        )
+                        break
+
+            # 2.2 settings.engine_url
+            if url is None:
+                engine_attr = getattr(settings, "engine_url", None)
+                if isinstance(engine_attr, str) and engine_attr.strip():
+                    url = engine_attr.strip()
+                    logger.info(
+                        "SqlStore.from_settings: using engine_url from settings.engine_url"
+                    )
+
+            # 2.3 השדות הישנים על settings (sql_store_url / db_url / sqlalchemy_url)
+            if url is None:
+                for attr in (
+                    "sql_store_url",
+                    "SQL_STORE_URL",
+                    "db_url",
+                    "DB_URL",
+                    "sqlalchemy_url",
+                    "SQLALCHEMY_URL",
+                ):
+                    val = getattr(settings, attr, None)
+                    if isinstance(val, str) and val.strip():
+                        url = val.strip()
+                        logger.info(
+                            "SqlStore.from_settings: using engine_url from settings.%s",
+                            attr,
+                        )
+                        break
+
+        # ===== 3) settings.config כ-Mapping (config.json v2.2.0) =====
+        # 3.1 top-level sql_store.engine_url / url
+        if url is None and cfg:
+            url = (
+                _get_nested(("sql_store", "engine_url"))
+                or _get_nested(("sql_store", "url"))
+            )
+            if url:
+                logger.info(
+                    "SqlStore.from_settings: using engine_url from config['sql_store']"
+                )
+
+        # 3.2 data.sql_store.engine_url / url
+        if url is None and cfg:
+            url = (
+                _get_nested(("data", "sql_store", "engine_url"))
+                or _get_nested(("data", "sql_store", "url"))
+            )
+            if url:
+                logger.info(
+                    "SqlStore.from_settings: using engine_url from config['data']['sql_store']"
+                )
+
+        # 3.3 paths.sql_store_url
+        if url is None and cfg:
+            url = _get_nested(("paths", "sql_store_url"))
+            if url:
+                logger.info(
+                    "SqlStore.from_settings: using engine_url from config['paths']['sql_store_url']"
+                )
+
+        # 3.4 paths.duckdb_cache_path → engine_url
+        duckdb_path: Optional[str] = None
+        if cfg:
+            duckdb_path = _get_nested(("paths", "duckdb_cache_path"))
+            if not duckdb_path:
+                duckdb_path = _get_nested(("data", "duckdb_cache", "path"))
+
+        if url is None and duckdb_path:
+            url = f"duckdb:///{duckdb_path}"
+            logger.info(
+                "SqlStore.from_settings: using engine_url from DuckDB cache path %s",
+                duckdb_path,
+            )
+
+        # 3.5 engine_url ברמת root
+        if url is None and cfg:
+            root_engine = _get_nested(("engine_url",))
+            if root_engine:
+                url = root_engine
+                logger.info(
+                    "SqlStore.from_settings: using engine_url from config['engine_url']"
+                )
+
+        # 3.6 המפתחות הישנים ברמת config root
+        if url is None and cfg:
+            for key in (
+                "sql_store_url",
+                "SQL_STORE_URL",
+                "db_url",
+                "DB_URL",
+                "sqlalchemy_url",
+                "SQLALCHEMY_URL",
+            ):
+                val = cfg.get(key)  # type: ignore[arg-type]
+                if isinstance(val, str) and val.strip():
+                    url = val.strip()
+                    logger.info(
+                        "SqlStore.from_settings: using engine_url from config[%r]",
+                        key,
+                    )
+                    break
+
+        # ===== 4) env effective (כולל environment.default_env מה-config) =====
+        # עדיפות: arg env → settings.env/ENV/profile/PROFILE → config["environment"]["default_env"] → "dev"
+        cfg_env_default: Optional[str] = None
+        if isinstance(cfg, Mapping):
+            try:
+                env_block = cfg.get("environment") or {}
+                if isinstance(env_block, Mapping):
+                    val = env_block.get("default_env")
+                    if isinstance(val, str) and val.strip():
+                        cfg_env_default = val.strip()
+            except Exception:
+                cfg_env_default = None
+
+        env_name: str = (
+            env
+            or (getattr(settings, "env", None) if not isinstance(settings, Mapping) else None)
+            or (getattr(settings, "ENV", None) if not isinstance(settings, Mapping) else None)
+            or (getattr(settings, "profile", None) if not isinstance(settings, Mapping) else None)
+            or (getattr(settings, "PROFILE", None) if not isinstance(settings, Mapping) else None)
+            or cfg_env_default
+            or "dev"
+        )
+        env_name = str(env_name).strip() or "dev"
+
+        # ===== 5) Fallback – DuckDB ב-logs/pairs_trading_<env>.duckdb =====
+        if url is None:
+            # אם יש duckdb_path מהקונפיג – נשתמש בו כ-fallback לפני logs/
+            if duckdb_path:
+                url = f"duckdb:///{duckdb_path}"
+                logger.info(
+                    "SqlStore.from_settings: no engine_url provided; "
+                    "falling back to DuckDB cache path %s (env=%s)",
+                    duckdb_path,
+                    env_name,
+                )
+            else:
+                db_path = LOGS_DIR / f"pairs_trading_{env_name}.duckdb"
+                url = f"duckdb:///{db_path}"
+                logger.info(
+                    "SqlStore.from_settings: no engine_url provided; "
+                    "falling back to DuckDB at %s (env=%s)",
+                    db_path,
+                    env_name,
+                )
+        else:
+            logger.info(
+                "SqlStore.from_settings: using engine_url=%s (env=%s)",
+                url,
+                env_name,
+            )
+
+        # ===== 6) table_prefix חכם (אם לא הועבר) =====
+        if not table_prefix:
+            prefix = (
+                os.getenv("SQL_TABLE_PREFIX")
+                or os.getenv("PAIRS_SQL_TABLE_PREFIX")
+                or None
+            )
+            if not prefix and not isinstance(settings, Mapping):
+                prefix = getattr(settings, "sql_table_prefix", "") or None
+            if not prefix and isinstance(cfg, Mapping):
+                try:
+                    sql_store_cfg = cfg.get("sql_store") or {}
+                    if isinstance(sql_store_cfg, Mapping):
+                        prefix_val = sql_store_cfg.get("prefix")
+                        if isinstance(prefix_val, str) and prefix_val.strip():
+                            prefix = prefix_val
+                except Exception:
+                    prefix = None
+
+            table_prefix = (prefix or "").strip()
+
+        # ===== 7) echo – arg → settings.sql_echo → ENV["SQL_ECHO"] → False =====
+        if echo is None:
+            # קודם ENV (SQL_ECHO)
+            env_echo = os.getenv("SQL_ECHO")
+            if env_echo is not None:
+                echo = env_echo.strip().lower() in {"1", "true", "yes", "on"}
+            else:
+                # אחר כך settings.sql_echo אם קיים
+                if not isinstance(settings, Mapping):
+                    echo_val = getattr(settings, "sql_echo", None)
+                    if isinstance(echo_val, bool):
+                        echo = echo_val
+                    else:
+                        echo = False
+                else:
+                    echo = False
+
+        # ===== 8) read_only – arg → settings.sql_read_only → config → ENV =====
+        effective_read_only = bool(read_only)
+
+        if not effective_read_only:
+            # settings.sql_read_only
+            if not isinstance(settings, Mapping):
+                so = getattr(settings, "sql_read_only", None)
+                if isinstance(so, bool) and so:
+                    effective_read_only = True
+
+        if not effective_read_only and isinstance(cfg, Mapping):
+            try:
+                sql_store_cfg = cfg.get("sql_store") or {}
+                if isinstance(sql_store_cfg, Mapping):
+                    so2 = sql_store_cfg.get("read_only")
+                    if isinstance(so2, bool) and so2:
+                        effective_read_only = True
+            except Exception:
+                pass
+
+        if not effective_read_only:
+            # ENV
+            for var in ("SQL_READ_ONLY", "PAIRS_SQL_READ_ONLY"):
+                val = os.getenv(var)
+                if val and val.strip().lower() in {"1", "true", "yes", "on"}:
+                    effective_read_only = True
+                    break
+
+        return cls(
+            url,
+            echo=bool(echo),
+            table_prefix=table_prefix,
+            default_env=env_name,
+            read_only=effective_read_only,
+        )
+
+    def get_opt_trials_summary(self, limit: int = 50) -> "pd.DataFrame":
+        """
+        מחזיר summary של אופטימיזציות לפי pair מתוך טבלת trials.
+
+        עמודות:
+        --------
+        pair              — שם הזוג (למשל "SPY-QQQ")
+        last_study_id     — ה-study האחרון שרץ עבור ה-pair
+        n_trials          — כמה trials נשמרו (סה"כ)
+        n_complete        — כמה מהם state='COMPLETE' (כרגע 0 ל-runs הישנים)
+        best_score        — ה-Score המקסימלי שנשמר בטבלה
+        last_created_at   — זמן ה-trial האחרון שנשמר
+        avg_duration_sec  — משך ממוצע ל-trial (אם שדה duration_sec לא NULL)
+        """
+        try:
+            limit_int = int(limit)
+        except Exception:
+            limit_int = 50
+        if limit_int <= 0:
+            limit_int = 50
+
+        sql = text(
+            """
+            SELECT
+                pair,
+                MAX(study_id)                      AS last_study_id,
+                COUNT(*)                           AS n_trials,
+                COUNT(*) FILTER (WHERE state = 'COMPLETE') AS n_complete,
+                MAX(score)                         AS best_score,
+                MAX(created_at)                    AS last_created_at,
+                AVG(duration_sec)                  AS avg_duration_sec
+            FROM trials
+            GROUP BY pair
+            ORDER BY last_created_at DESC
+            LIMIT :limit
+            """
+        )
+
+        try:
+            with self.engine.connect() as conn:
+                df = pd.read_sql_query(sql, conn, params={"limit": limit_int})
+        except Exception as exc:
+            self._last_error = str(exc)
+            logger.warning("get_opt_trials_summary failed: %s", exc, exc_info=True)
+            return pd.DataFrame()
+
+        return df
+
+    def get_best_trials_for_pair(
+        self,
+        pair: str,
+        *,
+        limit: int = 10,
+        only_complete: bool = True,
+        min_score: Optional[float] = None,
+        with_params: bool = True,
+        with_perf: bool = True,
+        include_study_meta: bool = True,
+    ) -> pd.DataFrame:
+        """
+        get_best_trials_for_pair
+        ========================
+
+        מחזיר את ה-Trials הטובים ביותר (לפי score) עבור זוג מסוים מתוך DuckDB,
+        כולל אפשרות לפענח את ה-JSON לעמודות dict נוחות, ולמשוך מטא-דאטה
+        מהטבלה studies.
+
+        Parameters
+        ----------
+        pair : str
+            שם הזוג, למשל "BITO-BKCH" או "SPY-QQQ".
+        limit : int, optional (default=10)
+            מספר הרשומות המקסימלי להחזרה (TOP N לפי score).
+        only_complete : bool, optional (default=True)
+            אם True → מסנן רק trials במצב COMPLETE, **אבל**
+            עדיין יכלול רשומות שבהן state הוא NULL (תואם למצב
+            ההיסטורי שבו לא שמרנו state).
+        min_score : float, optional
+            אם לא None → מחזיר רק Trials ש-score שלהם גדול/שווה לערך הזה.
+        with_params : bool, optional (default=True)
+            אם True → מוסיף עמודת dict בשם "params" מתוך params_json.
+        with_perf : bool, optional (default=True)
+            אם True → מוסיף עמודת dict בשם "perf" מתוך perf_json.
+        include_study_meta : bool, optional (default=True)
+            אם True → מוסיף מטא-דאטה מהטבלה studies:
+                sampler, n_trials, timeout_sec, weights_json, direction, profile_json.
+
+        Returns
+        -------
+        pd.DataFrame
+            DataFrame עם עמודות (כפוף לפרמטרים שהועברו):
+
+            תמיד:
+                - study_id          (int)
+                - trial_no          (int)
+                - pair              (str)
+                - score             (float / NaN)
+                - state             (str / None)
+                - created_at        (datetime)
+                - datetime_start    (datetime)
+                - datetime_complete (datetime)
+                - duration_sec      (float / NaN)
+                - params_json       (str JSON)
+                - perf_json         (str JSON)
+
+            אם include_study_meta=True:
+                - sampler           (str)
+                - n_trials          (int)
+                - timeout_sec       (int)
+                - weights_json      (str JSON)
+                - direction         (str)
+                - profile_json      (str JSON)
+
+            אם with_params=True:
+                - params            (dict) מפוענח מתוך params_json
+
+            אם with_perf=True:
+                - perf              (dict) מפוענח מתוך perf_json
+
+        הערות עיצוב (HF-grade):
+        ------------------------
+        - אין יצירה/שינוי סכמות – רק קריאה, ולכן בטוח גם במצב read_only=True.
+        - במקרה של שגיאה ב-SQL / DuckDB → לוג אזהרה + החזרת DataFrame ריק
+          (לא מפיל את כל המערכת).
+        - JSON columns מפוענחים בצורה בטוחה (_safe_decode_json).
+        """
+        import json
+        from typing import Any, Dict
+        from sqlalchemy import text
+
+        # --- Sanitization בסיסי לפרמטרים ---
+        pair = str(pair).strip()
+        if not pair:
+            logger.warning("get_best_trials_for_pair called with empty pair string.")
+            return pd.DataFrame()
+
+        if limit <= 0:
+            logger.warning(
+                "get_best_trials_for_pair: received non-positive limit=%s, "
+                "falling back to 10.",
+                limit,
+            )
+            limit = 10
+
+        # --- בניית שאילתת SQL דינמית (רק קריאה) ---
+        # שים לב: לא נוגעים בסכֵמות, אין CREATE / ALTER.
+        base_sql = """
+        SELECT
+            t.study_id,
+            t.trial_no,
+            t.pair,
+            t.score,
+            t.state,
+            t.created_at,
+            t.datetime_start,
+            t.datetime_complete,
+            t.duration_sec,
+            t.params_json,
+            t.perf_json
+        """
+
+        if include_study_meta:
+            base_sql += """
+            , s.sampler
+            , s.n_trials
+            , s.timeout_sec
+            , s.weights_json
+            , s.direction
+            , s.profile_json
+            """
+
+        base_sql += """
+        FROM trials AS t
+        LEFT JOIN studies AS s
+          ON t.study_id = s.study_id
+        WHERE t.pair = :pair
+        """
+
+        # רק COMPLETE, אבל כולל state NULL (לשמור תאימות עם דאטה ישן)
+        if only_complete:
+            base_sql += "  AND (t.state = 'COMPLETE' OR t.state IS NULL)\n"
+
+        if min_score is not None:
+            base_sql += "  AND t.score >= :min_score\n"
+
+        base_sql += """
+        ORDER BY
+            t.score DESC NULLS LAST,
+            t.created_at DESC
+        LIMIT :limit
+        """
+
+        params: Dict[str, Any] = {"pair": pair, "limit": int(limit)}
+        if min_score is not None:
+            params["min_score"] = float(min_score)
+
+        try:
+            with self.engine.connect() as conn:
+                df = pd.read_sql_query(
+                    text(base_sql),
+                    conn,
+                    params=params,
+                )
+        except Exception as e:  # pragma: no cover — הגנה רכה על המערכת
+            logger.warning(
+                "get_best_trials_for_pair failed for pair=%s: %s",
+                pair,
+                e,
+                exc_info=True,
+            )
+            return pd.DataFrame()
+
+        # אם אין נתונים – מחזירים כמו שהוא (DataFrame ריק)
+        if df.empty:
+            logger.info(
+                "get_best_trials_for_pair: no trials found for pair=%s (limit=%s, only_complete=%s, min_score=%s)",
+                pair,
+                limit,
+                only_complete,
+                min_score,
+            )
+            return df
+
+        # --- ניקוי טיפוסי זמנים / score ---
+        for col in ("created_at", "datetime_start", "datetime_complete"):
+            if col in df.columns:
+                df[col] = pd.to_datetime(df[col], errors="coerce")
+
+        if "score" in df.columns:
+            df["score"] = pd.to_numeric(df["score"], errors="coerce")
+
+        # --- דקוד JSON -> dict לעמודות נוחות params / perf ---
+        def _safe_decode_json(raw: Any) -> Dict[str, Any]:
+            if isinstance(raw, dict):
+                return raw
+            if isinstance(raw, str) and raw.strip():
+                try:
+                    return json.loads(raw)
+                except Exception:
+                    return {}
+            return {}
+
+        if with_params and "params_json" in df.columns:
+            df["params"] = df["params_json"].apply(_safe_decode_json)
+
+        if with_perf and "perf_json" in df.columns:
+            df["perf"] = df["perf_json"].apply(_safe_decode_json)
+
+        logger.info(
+            "get_best_trials_for_pair: loaded %s trials for pair=%s (top score=%s)",
+            len(df),
+            pair,
+            df["score"].max() if "score" in df.columns else None,
+        )
+
+        return df
+
+    # ------------------------------------------------------------------
+    # Utility table naming & inspection / Engine Health
+    # ------------------------------------------------------------------
+
+    def _tbl(self, short_name: str) -> str:
+        """מוסיף prefix לטבלת בסיס, אם הוגדר."""
+        if self.table_prefix:
+            return f"{self.table_prefix}{short_name}"
+        return short_name
+
+    def list_tables(self) -> List[str]:
+        """
+        מחזיר רשימת טבלאות בבסיס הנתונים.
+
+        משמש את שכבת ה-Dashboard כדי לגלות האם יש טבלאות היסטוריות (history / pnl),
+        וגם את SystemHealth / Agents לדעת מה קיים בפועל.
+        """
+        try:
+            insp = inspect(self.engine)
+            return insp.get_table_names()
+        except Exception as exc:
+            self._last_error = str(exc)
+            logger.warning("SqlStore.list_tables() failed: %s", exc)
+            return []
+
+    def get_engine_info(self) -> JSONDict:
+        """
+        מחזיר מידע בסיסי על ה-Engine לצרכי Health / Agents / Debug.
+        """
+        return {
+            "engine_url": self.engine_url,
+            "dialect": self._dialect,
+            "default_env": self.default_env,
+            "read_only": self.read_only,
+            "tables": self.list_tables(),
+        }
+
+    def describe_engine(self) -> JSONDict:
+        """
+        תיאור מעט יותר עשיר של ה-Engine, כולל מספר טבלאות ועוד.
+
+        *לא* מריץ COUNT(*) כבד — מתאים ל-health מהיר.
+        """
+        tables = self.list_tables()
+        return {
+            "engine": self.get_engine_info(),
+            "tables_count": len(tables),
+            "has_prices": self._tbl("prices") in tables,
+            "has_dq_pairs": self._tbl("dq_pairs") in tables,
+            "has_kv_store": self._tbl("kv_store") in tables,
+            "has_dashboard_snapshots": self._tbl("dashboard_snapshots") in tables,
+        }
+
+    def _ensure_index(
+        self,
+        table: str,
+        index_name: str,
+        columns: Sequence[str],
+    ) -> None:
+        """
+        יוצר אינדקס אם הוא לא קיים (sqlite / duckdb / postgresql).
+
+        index_name צפוי להיות ייחודי לטבלה/דיאלקט.
+        """
+        if self._dialect not in {"sqlite", "duckdb", "postgresql"}:
+            return
+
+        cols_sql = ", ".join(columns)
+        ddl = f"CREATE INDEX IF NOT EXISTS {index_name} ON {table} ({cols_sql})"
+        try:
+            with self.engine.begin() as conn:
+                conn.execute(text(ddl))
+        except Exception as exc:  # pragma: no cover - הגנה רכה
+            logger.warning(
+                "Failed to ensure index %s on %s: %s",
+                index_name,
+                table,
+                exc,
+                exc_info=True,
+            )
+
+
+    # ------------------------------------------------------------------
+    # Dashboard / KV / Prices Schemas (ensure on init)
+    # ------------------------------------------------------------------
+
+    def _ensure_dashboard_schema(self) -> None:
+        """
+        מוודא שקיימת טבלה לשמירת dashboard_snapshots.
+
+        הטבלה מינימלית ומאוד גמישה:
+            ctx_key      – מפתח לוגי (profile/env וכו')
+            as_of_utc    – טיימסטמפ ISO (string)
+            payload_json – כל ה-Snapshot כ-JSON מלא
+        """
+        tbl = self._tbl("dashboard_snapshots")
+        ddl = f"""
+        CREATE TABLE IF NOT EXISTS {tbl} (
+            ctx_key      TEXT,
+            as_of_utc    TEXT NOT NULL,
+            payload_json TEXT NOT NULL
+        );
+        """
+        try:
+            with self.engine.begin() as conn:
+                conn.execute(text(ddl))
+        except Exception as exc:  # pragma: no cover - הגנה בזמן init
+            self._last_error = str(exc)
+            logger.warning("Failed to ensure dashboard_snapshots schema: %s", exc, exc_info=True)
+
+    def _ensure_kv_schema(self) -> None:
+        """
+        מוודא שקיימת טבלת Key-Value פשוטה ל-JSON:
+
+            namespace    – קבוצה לוגית (למשל "dashboard_prefs", "dashboard_views")
+            key          – מפתח (user_key, view_name וכו')
+            ts_utc       – טיימסטמפ ISO
+            payload_json – JSON מלא של האובייקט
+        """
+        tbl = self._tbl("kv_store")
+        ddl = f"""
+        CREATE TABLE IF NOT EXISTS {tbl} (
+            namespace    TEXT NOT NULL,
+            key          TEXT NOT NULL,
+            ts_utc       TEXT NOT NULL,
+            payload_json TEXT NOT NULL
+        );
+        """
+        try:
+            with self.engine.begin() as conn:
+                conn.execute(text(ddl))
+        except Exception as exc:  # pragma: no cover
+            self._last_error = str(exc)
+            logger.warning("Failed to ensure kv_store schema: %s", exc, exc_info=True)
+
+    def _ensure_prices_schema(self) -> None:
+        """
+        מוודא שקיימת טבלת prices בסיסית.
+
+        זה מגן מפני שגיאות מסוג:
+            Catalog Error: Table with name prices does not exist!
+
+        המבנה מספיק גמיש כדי לקבל df.to_sql(..., if_exists='append') בלי בעיה.
+        """
+        tbl = self._tbl("prices")
+        ddl = f"""
+        CREATE TABLE IF NOT EXISTS {tbl} (
+            symbol      TEXT NOT NULL,
+            date        TIMESTAMP NOT NULL,
+            open        DOUBLE,
+            high        DOUBLE,
+            low         DOUBLE,
+            close       DOUBLE,
+            adj_close   DOUBLE,
+            volume      DOUBLE,
+            env         TEXT,
+            ts_utc      TEXT,
+            run_id      TEXT,
+            section     TEXT
+        );
+        """
+        try:
+            with self.engine.begin() as conn:
+                conn.execute(text(ddl))
+        except Exception as exc:  # pragma: no cover
+            # לא נכשיל את האפליקציה על זה, רק נתריע.
+            self._last_error = str(exc)
+            logger.warning("Failed to ensure prices schema: %s", exc, exc_info=True)
+
+    # ------------------------------------------------------------------
+    # Generic helpers (metadata, read/write gating, raw query)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _add_common_metadata(
+        df: pd.DataFrame,
+        *,
+        run_id: Optional[str],
+        section: Optional[str],
+        env: Optional[str],
+    ) -> pd.DataFrame:
+        """
+        מוסיף עמודות ts_utc/run_id/section/env ל-DataFrame.
+        """
+        out = df.copy()
+        out["ts_utc"] = _now_utc_iso()
+        out["run_id"] = run_id
+        out["section"] = section
+        out["env"] = env
+        return out
+
+    def raw_query(self, sql: str, params: Optional[Dict[str, Any]] = None) -> pd.DataFrame:
+        """
+        מריץ שאילתה חופשית ומחזיר DataFrame (לצורך BI/Debug/Agents).
+
+        ⚠️ לשימוש מבוקר בלבד — עדיף לחשוף בפלטפורמה רק למודולים אמינים.
+        במצב read_only=True נחסום פעולות כתיבה בוטות (INSERT/UPDATE/DELETE/DDL).
+        """
+        normalized = sql.lstrip().lower()
+        if self.read_only and normalized.startswith(
+            ("insert", "update", "delete", "create", "alter", "drop", "truncate")
+        ):
+            msg = (
+                "raw_query in read_only SqlStore does not allow write DDL/DML statements"
+            )
+            self._last_error = msg
+            logger.warning(msg)
+            return pd.DataFrame()
+
+        with self.engine.connect() as conn:
+            res = conn.execute(text(sql), params or {})
+            df = pd.DataFrame(res.fetchall(), columns=res.keys())
+        return df
+
+    def read_table(self, short_table_name: str) -> pd.DataFrame:
+        """
+        קורא טבלה מלאה (לשימוש פנימי / בדיקות / Health).
+
+        מחזיר DataFrame; אם יש שגיאה או הטבלה לא קיימת → DataFrame ריק.
+        """
+        tbl = self._tbl(short_table_name)
+        try:
+            df = pd.read_sql_table(tbl, self.engine)
+            return df
+        except Exception as exc:
+            self._last_error = str(exc)
+            logger.warning("read_table('%s') failed: %s", tbl, exc)
+            return pd.DataFrame()
+
+    # ------------------------------------------------------------------
+    # Error API קטן (תוספת) — ישמש גם בהמשך בחלקים 2–3
+    # ------------------------------------------------------------------
+
+    def get_last_error(self) -> Optional[str]:
+        """
+        מחזיר את השגיאה האחרונה שנרשמה בשכבת ה-SQL.
+
+        זה מה ש- DashboardService / Logs Tab יכולים להשתמש בו ל-SystemHealthSnapshot.
+        """
+        return self._last_error
+
+    # ===== END OF PART 1/3 =====
+       # ==================================================================
+    # Part 2/3 — Data Quality / Signals / Smart Scan / Metrics Universe
+    # ==================================================================
+
+    # ------------------------------------------------------------------
+    # Data Quality Persistence (symbols / pairs)
+    # ------------------------------------------------------------------
+
+    def save_pair_quality(
+        self,
+        pairs_df: pd.DataFrame,
+        *,
+        table_name: Optional[str] = None,
+        run_id: Optional[str] = None,
+        section: str = "data_quality",
+        env: Optional[str] = None,
+        if_exists: str = "append",
+    ) -> None:
+        """
+        שומר DataFrame של PairDataQuality לטבלת SQL.
+
+        כולל Harmonization לסכמה קיימת:
+        - ממפה symbol_1/symbol_2 → sym_x/sym_y אם צריך.
+        - אם הטבלה כבר קיימת — משאיר רק עמודות שקיימות בה (שאר העמודות נזרקות).
+        """
+        if not self._ensure_writable("save_pair_quality"):
+            return
+        if pairs_df is None or pairs_df.empty:
+            logger.info("save_pair_quality: empty DataFrame — nothing to save.")
+            return
+
+        tbl = self._tbl(table_name or "dq_pairs")
+
+        # 1) המרה לפורמט "DataQuality" סטנדרטי
+        df_sql = data_quality_pairs_to_sql_ready(pairs_df)
+        df_sql = self._add_common_metadata(
+            df_sql,
+            run_id=run_id,
+            section=section,
+            env=env or self.default_env,
+        )
+
+        # 2) יישור סכמה לטבלה קיימת (אם כבר קיימת dq_pairs)
+        try:
+            insp = inspect(self.engine)
+            existing_tables = insp.get_table_names()
+            if tbl in existing_tables:
+                existing_cols = {col["name"] for col in insp.get_columns(tbl)}
+
+                # מיפוי symbol_1/symbol_2 → sym_x/sym_y אם בטבלה יש sym_x/sym_y
+                rename_map: Dict[str, str] = {}
+                if "symbol_1" in df_sql.columns and "sym_x" in existing_cols:
+                    rename_map["symbol_1"] = "sym_x"
+                if "symbol_2" in df_sql.columns and "sym_y" in existing_cols:
+                    rename_map["symbol_2"] = "sym_y"
+                if rename_map:
+                    df_sql = df_sql.rename(columns=rename_map)
+
+                # להשאיר רק עמודות שקיימות בטבלה (עמודות "חדשות" יזרקו)
+                keep_cols = [c for c in df_sql.columns if c in existing_cols]
+                if keep_cols:
+                    df_sql = df_sql[keep_cols]
+                else:
+                    logger.warning(
+                        "save_pair_quality: after schema harmonization no columns "
+                        "matched existing table '%s' — skipping write.",
+                        tbl,
+                    )
+                    return
+        except Exception as exc:
+            # לא נכשלים על יישור סכמה – רק מזהירים וממשיכים
+            logger.warning(
+                "save_pair_quality: schema harmonization failed for table '%s': %s",
+                tbl,
+                exc,
+            )
+
+        # 3) כתיבה ל-SQL
+        df_sql.to_sql(
+            tbl,
+            self.engine,
+            if_exists=if_exists,
+            index=False,
+        )
+        logger.info("Saved %d pair-quality rows into table '%s'", len(df_sql), tbl)
+
+
+
+    # ------------------------------------------------------------------
+    # Signals Persistence (universe + summaries)
+    # ------------------------------------------------------------------
+
+    def save_signals(
+        self,
+        signals_df: pd.DataFrame,
+        *,
+        profile_name: str = "mean_reversion",
+        run_id: Optional[str] = None,
+        section: str = "signals",
+        env: Optional[str] = None,
+        table_name: Optional[str] = None,
+        if_exists: str = "append",
+        flatten_meta: bool = True,
+    ) -> None:
+        """
+        שומר signals_df לטבלאת SQL.
+
+        מוסיף:
+            - profile_name
+            - run_id, section, env, ts_utc
+
+        אם flatten_meta=True:
+            - מוציא שדות חשובים מ-meta (dict) לעמודות שטוחות:
+              meta_z_consistency_score, meta_stationarity_strength, ...
+
+        זה ה-API המרכזי לשמירת output של signals_engine.
+        """
+        if not self._ensure_writable("save_signals"):
+            return
+        if signals_df is None or signals_df.empty:
+            logger.info("save_signals: empty DataFrame — nothing to save.")
+            return
+
+        tbl = self._tbl(table_name or "signals_universe")
+        df = signals_df.copy()
+
+        # flatten meta (subset של פיצ'רים)
+        if flatten_meta and "meta" in df.columns:
+            meta_rows = df["meta"].apply(lambda x: x if isinstance(x, dict) else {})
+            meta_df = pd.json_normalize(meta_rows)
+            keep_cols = [
+                "z_consistency_score",
+                "stationarity_strength",
+                "cointegration_strength",
+                "beta_stability",
+                "signal_density_252",
+                "edge_hint",
+                "deploy_tier",
+                "fragility_flags",
+            ]
+            for c in keep_cols:
+                if c in meta_df.columns:
+                    df[f"meta_{c}"] = meta_df[c]
+
+            df = df.drop(columns=["meta"])
+
+        df["profile_name"] = profile_name
+        df = self._add_common_metadata(
+            df,
+            run_id=run_id,
+            section=section,
+            env=env or self.default_env,
+        )
+
+        df.to_sql(
+            tbl,
+            self.engine,
+            if_exists=if_exists,
+            index=False,
+        )
+        logger.info("Saved %d signal rows into table '%s'", len(df), tbl)
+
+    def save_signals_summary(
+        self,
+        signals_df: pd.DataFrame,
+        *,
+        profile_name: str = "mean_reversion",
+        run_id: Optional[str] = None,
+        section: str = "signals",
+        env: Optional[str] = None,
+        table_name: Optional[str] = None,
+        if_exists: str = "append",
+    ) -> None:
+        """
+        שומר Summary לריצה אחת של signals:
+
+        שדות דומים ל-summarize_universe_signals:
+            - count_ok, avg_abs_z, max_abs_z, avg_corr, hl_median,
+              avg_score, וכו'.
+
+        זה כלי חשוב ל:
+            - Smart Scan Summary Row
+            - System Health (כמה הזדמנויות יש כרגע)
+        """
+        if not self._ensure_writable("save_signals_summary"):
+            return
+        if signals_df is None or signals_df.empty:
+            logger.info("save_signals_summary: empty signals_df — nothing to summarize.")
+            return
+
+        tbl = self._tbl(table_name or "signals_summary")
+        summary = summarize_universe_signals(signals_df)
+        payload: JSONDict = dict(summary)
+        payload["profile_name"] = profile_name
+
+        df = pd.DataFrame([payload])
+        df = self._add_common_metadata(
+            df,
+            run_id=run_id,
+            section=section,
+            env=env or self.default_env,
+        )
+
+        df.to_sql(
+            tbl,
+            self.engine,
+            if_exists=if_exists,
+            index=False,
+        )
+        logger.info("Saved signals summary row into table '%s'", tbl)
+
+    # ------------------------------------------------------------------
+    # Opt / Live Params — best params per pair/env/profile
+    # ------------------------------------------------------------------
+    def _opt_best_params_table_name(self) -> str:
+        """
+        שם טבלה ל-'live params' של אופטימיזציה.
+
+        אם self.table_prefix קיים → <prefix>_opt_best_params
+        אחרת → opt_best_params
+        """
+        base = "opt_best_params"
+        return f"{self.table_prefix}_{base}" if self.table_prefix else base
+
+    def save_opt_best_params(
+        self,
+        *,
+        pair: str,
+        env: str,
+        profile: str,
+        params: Dict[str, Any],
+        score: Optional[float],
+        source: str = "optimization_tab",
+        study_id: Optional[int] = None,
+        run_id: Optional[str] = None,
+        manifest_json: Optional[str] = None,
+        opt_run_cfg_json: Optional[str] = None,
+    ) -> None:
+        """
+        שומר סט "best params" עבור זוג מסוים ב-SqlStore, ברמת env/profile.
+
+        עקרונות:
+        ---------
+        - מתאים לכל מנוע נתמך ע"י SqlStore (DuckDB/SQLite/Postgres/...).
+        - משתמש ב-pandas.to_sql ליצירת הטבלה אם לא קיימת.
+        - שומר רק שורה אחת לכל קריאה; ניתן לנהל היסטוריה לאורך זמן.
+
+        טבלת opt_best_params (סקיצה):
+        ------------------------------
+        pair             VARCHAR
+        env              VARCHAR
+        profile          VARCHAR
+        source           VARCHAR          -- "optimization_tab" / "agent" / ...
+        score            DOUBLE           -- best_score
+        score_ts_utc     TIMESTAMP        -- מתי חושב ה-score (UTC)
+        study_id         BIGINT NULL      -- אם הופקה מריצת Optuna (DuckDB)
+        run_id           VARCHAR NULL     -- opt_run_id / run_id מהמערכת
+        params_json      TEXT             -- best_params (JSON)
+        manifest_json    TEXT NULL        -- manifest מלא (אופציונלי)
+        opt_run_cfg_json TEXT NULL        -- snapshot של opt_run_cfg
+        created_at_utc   TIMESTAMP        -- מתי נוצרה השורה
+        updated_at_utc   TIMESTAMP        -- מתי עודכנה השורה
+        app_version      VARCHAR NULL     -- גרסת הטאב/מערכת
+        engine_url       VARCHAR NULL     -- engine_url (לוג/אודיט)
+        """
+        if self.read_only:
+            logger.info(
+                "SqlStore.save_opt_best_params: read_only=True, skipping write for pair=%s.",
+                pair,
+            )
+            return
+
+        pair = str(pair).strip()
+        env = str(env or "local").strip()
+        profile = str(profile or "default").strip()
+        source = str(source or "optimization_tab").strip()
+
+        # נורמליזציה של score
+        try:
+            score_val: Optional[float] = float(score) if score is not None else None
+        except Exception:
+            score_val = None
+
+        # זמנים
+        now = datetime.now(timezone.utc)
+        ts_iso = now.isoformat(timespec="seconds").replace("+00:00", "Z")
+
+        # JSON params (אם הגיע dict, נעשה make_json_safe)
+        if isinstance(params, dict):
+            try:
+                params_json = json.dumps(make_json_safe(params), ensure_ascii=False)
+            except Exception:
+                params_json = json.dumps(params, ensure_ascii=False)
+        else:
+            params_json = json.dumps(params, ensure_ascii=False)
+
+        # manifest / opt_run_cfg כבר אמורים להיות מחרוזות JSON; אם לא – נעשה normalize
+        if manifest_json is not None and not isinstance(manifest_json, str):
+            try:
+                manifest_json = json.dumps(make_json_safe(manifest_json), ensure_ascii=False)
+            except Exception:
+                manifest_json = str(manifest_json)
+
+        if opt_run_cfg_json is not None and not isinstance(opt_run_cfg_json, str):
+            try:
+                opt_run_cfg_json = json.dumps(make_json_safe(opt_run_cfg_json), ensure_ascii=False)
+            except Exception:
+                opt_run_cfg_json = str(opt_run_cfg_json)
+
+        row: Dict[str, Any] = {
+            "pair": pair,
+            "env": env,
+            "profile": profile,
+            "source": source,
+            "score": score_val,
+            "score_ts_utc": ts_iso,
+            "study_id": study_id,
+            "run_id": run_id,
+            "params_json": params_json,
+            "manifest_json": manifest_json,
+            "opt_run_cfg_json": opt_run_cfg_json,
+            "created_at_utc": ts_iso,
+            "updated_at_utc": ts_iso,
+            "app_version": getattr(self, "app_version", None),
+            "engine_url": getattr(self, "engine_url", None),
+        }
+
+        df = pd.DataFrame([row])
+
+        table_name = self._opt_best_params_table_name()
+
+        try:
+            # if_exists="append" ייצור את הטבלה אם היא לא קיימת.
+            df.to_sql(
+                table_name,
+                self.engine,
+                if_exists="append",
+                index=False,
+                method="multi",
+            )
+            logger.info(
+                "SqlStore.save_opt_best_params: saved best params for pair=%s env=%s profile=%s table=%s",
+                pair,
+                env,
+                profile,
+                table_name,
+            )
+        except Exception as e:
+            logger.warning(
+                "SqlStore.save_opt_best_params: to_sql failed for pair=%s env=%s profile=%s: %s",
+                pair,
+                env,
+                profile,
+                e,
+            )
+
+    # ------------------------------------------------------------------
+    # Signals Readers (Universe / Summary History) — חדשים
+    # ------------------------------------------------------------------
+
+    def load_opt_best_params(
+        self,
+        pair: str,
+        *,
+        env: Optional[str] = None,
+        profile: Optional[str] = None,
+        fallback_env: str = "local",
+        fallback_profile: str = "default",
+    ) -> Optional[Dict[str, Any]]:
+        """
+        טוען רשומת 'best params' אחת עבור pair/env/profile מהטבלה opt_best_params.
+
+        סדר עדיפויות:
+        1. pair + env + profile המדויקים (אם נמסרו).
+        2. pair + fallback_env + fallback_profile (למשל local/default).
+
+        החזרה:
+            dict עם:
+                {
+                  "pair": ...,
+                  "env": ...,
+                  "profile": ...,
+                  "params": {...},
+                  "score": float|None,
+                  "score_ts_utc": str|None,
+                  "study_id": int|None,
+                  "run_id": str|None,
+                  "source": str|None,
+                  "updated_at_utc": str|None,
+                }
+            או None אם לא נמצא כלום.
+        """
+        pair = str(pair).strip()
+        if not pair:
+            return None
+
+        table = self._opt_best_params_table_name()
+
+        # קביעת env/profile לוגיים
+        env_eff = (env or self.default_env or "local").strip()
+        profile_eff = (profile or "default").strip()
+        fallback_env = (fallback_env or "local").strip()
+        fallback_profile = (fallback_profile or "default").strip()
+
+        def _run_query(env_q: str, profile_q: str) -> Optional[pd.Series]:
+            sql = f"""
+                SELECT
+                    pair,
+                    env,
+                    profile,
+                    source,
+                    score,
+                    score_ts_utc,
+                    study_id,
+                    run_id,
+                    params_json,
+                    manifest_json,
+                    opt_run_cfg_json,
+                    created_at_utc,
+                    updated_at_utc
+                FROM {table}
+                WHERE pair = :pair AND env = :env AND profile = :profile
+                ORDER BY score_ts_utc DESC
+                LIMIT 1
+            """
+            try:
+                df = pd.read_sql_query(
+                    sql,
+                    self.engine,
+                    params={"pair": pair, "env": env_q, "profile": profile_q},
+                )
+            except Exception as e:
+                logger.debug(
+                    "SqlStore.load_opt_best_params: query failed for pair=%s env=%s profile=%s: %s",
+                    pair,
+                    env_q,
+                    profile_q,
+                    e,
+                )
+                return None
+
+            if df.empty:
+                return None
+            return df.iloc[0]
+
+        # 1) ניסיון מדויק: env/profile
+        row = _run_query(env_eff, profile_eff)
+        # 2) fallback ל-local/default אם לא נמצא
+        if row is None and (env_eff != fallback_env or profile_eff != fallback_profile):
+            row = _run_query(fallback_env, fallback_profile)
+
+        if row is None:
+            return None
+
+        # פירוק params_json / manifest_json / opt_run_cfg_json
+        try:
+            params = json.loads(row["params_json"]) if isinstance(row.get("params_json"), str) else {}
+        except Exception:
+            params = {}
+        try:
+            manifest = json.loads(row["manifest_json"]) if isinstance(row.get("manifest_json"), str) else None
+        except Exception:
+            manifest = None
+        try:
+            opt_run_cfg = json.loads(row["opt_run_cfg_json"]) if isinstance(row.get("opt_run_cfg_json"), str) else None
+        except Exception:
+            opt_run_cfg = None
+
+        result: Dict[str, Any] = {
+            "pair": str(row.get("pair")),
+            "env": str(row.get("env")),
+            "profile": str(row.get("profile")),
+            "source": row.get("source"),
+            "score": float(row["score"]) if row.get("score") is not None else None,
+            "score_ts_utc": row.get("score_ts_utc"),
+            "study_id": int(row["study_id"]) if row.get("study_id") is not None else None,
+            "run_id": row.get("run_id"),
+            "params": params or {},
+            "manifest": manifest,
+            "opt_run_cfg": opt_run_cfg,
+            "created_at_utc": row.get("created_at_utc"),
+            "updated_at_utc": row.get("updated_at_utc"),
+        }
+        return result
+
+    def load_signals_universe(
+        self,
+        *,
+        profile_name: Optional[str] = None,
+        env: Optional[str] = None,
+        latest_only: bool = False,
+        limit: Optional[int] = None,
+        table_name: Optional[str] = None,
+    ) -> pd.DataFrame:
+        """
+        טוען טבלת signals_universe לצורכי Dashboard / Research.
+
+        פרמטרים:
+        ---------
+        profile_name:
+            אם מוגדר → סינון לפי profile_name.
+        env:
+            סינון לפי עמודת env (אם קיימת).
+        latest_only:
+            אם True → מחזיר לכל pair את השורה האחרונה לפי ts_utc.
+        limit:
+            מגביל מספר רשומות אחרי המיון (ts_utc DESC).
+        """
+        tbl = self._tbl(table_name or "signals_universe")
+        try:
+            with self.engine.connect() as conn:
+                sql = f"SELECT * FROM {tbl}"
+                filters: list[str] = []
+                params: Dict[str, Any] = {}
+
+                if profile_name is not None:
+                    filters.append("profile_name = :profile_name")
+                    params["profile_name"] = profile_name
+                if env is not None:
+                    filters.append("env = :env")
+                    params["env"] = env
+
+                if filters:
+                    sql += " WHERE " + " AND ".join(filters)
+
+                sql += " ORDER BY ts_utc DESC"
+
+                if limit is not None:
+                    sql += " LIMIT :limit"
+                    params["limit"] = int(limit)
+
+                res = conn.execute(text(sql), params)
+                df = pd.DataFrame(res.fetchall(), columns=res.keys())
+        except Exception as exc:
+            self._last_error = str(exc)
+            logger.warning("load_signals_universe failed from table '%s': %s", tbl, exc)
+            return pd.DataFrame()
+
+        if df.empty or not latest_only or "ts_utc" not in df.columns:
+            return df
+
+        # latest_only לפי pair (אם קיימת) או sym_x/sym_y
+        try:
+            if "pair" in df.columns:
+                df = (
+                    df.sort_values("ts_utc")
+                    .groupby("pair", as_index=False)
+                    .tail(1)
+                )
+            elif {"sym_x", "sym_y"} <= set(df.columns):
+                df = (
+                    df.sort_values("ts_utc")
+                    .groupby(["sym_x", "sym_y"], as_index=False)
+                    .tail(1)
+                )
+        except Exception:
+            # fallback — רק לוקח את הרשומה האחרונה
+            df = df.sort_values("ts_utc").tail(1)
+
+        return df
+
+    def load_signals_summary_history(
+        self,
+        *,
+        profile_name: Optional[str] = None,
+        env: Optional[str] = None,
+        limit: Optional[int] = 200,
+        table_name: Optional[str] = None,
+    ) -> pd.DataFrame:
+        """
+        מחזיר היסטוריית summaries מהטבלה signals_summary.
+
+        שימושים:
+        ---------
+        - גרף "היכן נמצאת מערכת האותות" בזמן.
+        - ניתוח שינויים בעומק הזדמנויות (count_ok, avg_abs_z וכו').
+        """
+        tbl = self._tbl(table_name or "signals_summary")
+        try:
+            with self.engine.connect() as conn:
+                sql = f"SELECT * FROM {tbl}"
+                filters: list[str] = []
+                params: Dict[str, Any] = {}
+
+                if profile_name is not None:
+                    filters.append("profile_name = :profile_name")
+                    params["profile_name"] = profile_name
+                if env is not None:
+                    filters.append("env = :env")
+                    params["env"] = env
+
+                if filters:
+                    sql += " WHERE " + " AND ".join(filters)
+
+                sql += " ORDER BY ts_utc DESC"
+
+                if limit is not None:
+                    sql += " LIMIT :limit"
+                    params["limit"] = int(limit)
+
+                res = conn.execute(text(sql), params)
+                df = pd.DataFrame(res.fetchall(), columns=res.keys())
+        except Exception as exc:
+            self._last_error = str(exc)
+            logger.warning("load_signals_summary_history failed from table '%s': %s", tbl, exc)
+            return pd.DataFrame()
+
+        return df
+
+    # ------------------------------------------------------------------
+    # Smart Scan / Universe Helpers (HF-grade, Fund-level)
+    # ------------------------------------------------------------------
+
+    def _find_first_existing_table(self, candidates: Sequence[str]) -> Optional[str]:
+        """
+        מחפש את הטבלה הראשונה שקיימת מתוך רשימת שמות מועמדים.
+        משתמש ב-prefix המוגדר ב-SqlStore (self._tbl).
+
+        לדוגמה:
+            _find_first_existing_table(["dq_pairs", "pairs_quality"])
+        """
+        existing = set(self.list_tables())
+        for short_name in candidates:
+            tbl = self._tbl(short_name)
+            if tbl in existing:
+                return tbl
+        return None
+
+    # ---------- 1) Pair Quality / Param Universe ----------
+
+    def load_pair_quality(
+        self,
+        *,
+        table_candidates: Sequence[str] = ("dq_pairs", "pairs_quality"),
+        table_name: Optional[str] = None,
+        env: Optional[str] = None,
+        section: Optional[str] = None,
+        profile: Optional[str] = None,
+        latest_only: bool = False,
+        limit: Optional[int] = None,
+    ) -> pd.DataFrame:
+        """
+        טוען DataFrame של איכות זוגות / universe pairs לטובת Smart Scan ו-API כללי.
+
+        תומך בשני סגנונות שימוש (תאימות לאחור):
+        ---------------------------------------
+        1) Smart Scan:
+            load_pair_quality(env="dev", section="data_quality", latest_only=True)
+
+        2) Read API ישן:
+            load_pair_quality(table_name="dq_pairs", env="dev", profile="X", limit=200)
+        """
+        # בחירת טבלה: אם table_name ניתן – עדיף על table_candidates
+        if table_name is not None:
+            tbl = self._tbl(table_name)
+            if tbl not in self.list_tables():
+                logger.info("load_pair_quality: table '%s' not found.", tbl)
+                return pd.DataFrame()
+        else:
+            tbl = self._find_first_existing_table(table_candidates)
+            if not tbl:
+                logger.info("load_pair_quality: no dq_pairs / pairs_quality table found.")
+                return pd.DataFrame()
+
+        try:
+            df = pd.read_sql_table(tbl, self.engine)
+        except Exception as exc:
+            self._last_error = str(exc)
+            logger.warning("load_pair_quality.read_sql_table('%s') failed: %s", tbl, exc)
+            return pd.DataFrame()
+
+        if df.empty:
+            return df
+
+        # סינון לפי env/section/profile אם ביקשו
+        if env is not None and "env" in df.columns:
+            df = df[df["env"] == env]
+        if section is not None and "section" in df.columns:
+            df = df[df["section"] == section]
+        if profile is not None and "profile" in df.columns:
+            df = df[df["profile"] == profile]
+
+        if df.empty:
+            return df
+
+        # latest_only → לכל זוג השורה האחרונה לפי ts_utc
+        if latest_only and "ts_utc" in df.columns:
+            try:
+                if {"sym_x", "sym_y"} <= set(df.columns):
+                    df = (
+                        df.sort_values("ts_utc")
+                        .groupby(["sym_x", "sym_y"], as_index=False)
+                        .tail(1)
+                    )
+                elif "pair" in df.columns:
+                    df = (
+                        df.sort_values("ts_utc")
+                        .groupby("pair", as_index=False)
+                        .tail(1)
+                    )
+                else:
+                    df = df.sort_values("ts_utc").tail(1)
+            except Exception:
+                key_cols: Optional[List[str]] = None
+                if {"sym_x", "sym_y"} <= set(df.columns):
+                    key_cols = ["sym_x", "sym_y"]
+                elif "pair" in df.columns:
+                    key_cols = ["pair"]
+
+                df = df.sort_values("ts_utc")
+                if key_cols:
+                    df = df.drop_duplicates(key_cols, keep="last")
+                else:
+                    df = df.tail(1)
+
+        # limit בסוף, בסדר יורד בזמן (אם קיים ts_utc)
+        if limit is not None and limit > 0:
+            if "ts_utc" in df.columns:
+                df = df.sort_values("ts_utc", ascending=False).head(limit)
+            else:
+                df = df.head(limit)
+
+        # יצירת pair label אם חסר
+        if "pair" not in df.columns:
+            if {"sym_x", "sym_y"} <= set(df.columns):
+                df["pair"] = df["sym_x"].astype(str) + "-" + df["sym_y"].astype(str)
+            else:
+                # fallback אנונימי
+                df["pair"] = df.index.astype(str)
+
+        return df
+
+    def load_fair_value_pairs(
+        self,
+        *,
+        table_candidates: Sequence[str] = ("fv_pairs", "fair_value_pairs", "fair_value_universe"),
+        table_name: Optional[str] = None,
+        env: Optional[str] = None,
+        profile: Optional[str] = None,
+        latest_only: bool = True,
+        limit: Optional[int] = None,
+    ) -> pd.DataFrame:
+        """
+        טוען DataFrame עם נתוני Fair Value ברמת זוג.
+
+        תומך בשני סגנונות:
+        -------------------
+        - Smart Scan (table_candidates, latest_only)
+        - Read API ישן (table_name, env, profile, limit)
+        """
+        if table_name is not None:
+            tbl = self._tbl(table_name)
+            if tbl not in self.list_tables():
+                logger.info("load_fair_value_pairs: table '%s' not found.", tbl)
+                return pd.DataFrame()
+        else:
+            tbl = self._find_first_existing_table(table_candidates)
+            if not tbl:
+                logger.info(
+                    "load_fair_value_pairs: no FV table found "
+                    "(fv_pairs/fair_value_pairs/fair_value_universe)."
+                )
+                return pd.DataFrame()
+
+        try:
+            df = pd.read_sql_table(tbl, self.engine)
+        except Exception as exc:
+            self._last_error = str(exc)
+            logger.warning("load_fair_value_pairs.read_sql_table('%s') failed: %s", tbl, exc)
+            return pd.DataFrame()
+
+        if df.empty:
+            return df
+
+        # env/profile
+        if env is not None and "env" in df.columns:
+            df = df[df["env"] == env]
+        if profile is not None and "profile" in df.columns:
+            df = df[df["profile"] == profile]
+
+        if df.empty:
+            return df
+
+        if latest_only and "ts_utc" in df.columns:
+            try:
+                if {"sym_x", "sym_y"} <= set(df.columns):
+                    df = (
+                        df.sort_values("ts_utc")
+                        .groupby(["sym_x", "sym_y"], as_index=False)
+                        .tail(1)
+                    )
+                elif "pair" in df.columns:
+                    df = (
+                        df.sort_values("ts_utc")
+                        .groupby("pair", as_index=False)
+                        .tail(1)
+                    )
+                else:
+                    df = df.sort_values("ts_utc").tail(1)
+            except Exception:
+                df = df.sort_values("ts_utc")
+                key_cols: Optional[List[str]] = None
+                if {"sym_x", "sym_y"} <= set(df.columns):
+                    key_cols = ["sym_x", "sym_y"]
+                elif "pair" in df.columns:
+                    key_cols = ["pair"]
+                if key_cols:
+                    df = df.drop_duplicates(key_cols, keep="last")
+                else:
+                    df = df.tail(1)
+
+        # limit
+        if limit is not None and limit > 0:
+            if "ts_utc" in df.columns:
+                df = df.sort_values("ts_utc", ascending=False).head(limit)
+            else:
+                df = df.head(limit)
+
+        # pair label
+        if "pair" not in df.columns:
+            if {"sym_x", "sym_y"} <= set(df.columns):
+                df["pair"] = df["sym_x"].astype(str) + "-" + df["sym_y"].astype(str)
+            else:
+                df["pair"] = df.index.astype(str)
+
+        # לוודא שיש fv_pct_diff
+        if "fv_pct_diff" not in df.columns:
+            for cand in ("fair_value_pct_diff", "fv_diff_pct"):
+                if cand in df.columns:
+                    df["fv_pct_diff"] = df[cand]
+                    break
+
+        return df
+
+    def load_pair_fundamentals(
+        self,
+        *,
+        table_candidates: Sequence[str] = ("fundamentals_pairs", "fundamentals_universe"),
+        table_name: Optional[str] = None,
+        env: Optional[str] = None,
+        profile: Optional[str] = None,
+        latest_only: bool = True,
+        limit: Optional[int] = None,
+    ) -> pd.DataFrame:
+        """
+        טוען פקטורים פנדומנטליים ברמת זוג (Pair-level fundamentals).
+
+        מתאים גם ל-Smart Scan וגם ל-API ישן (table_name/profile/limit).
+        """
+        if table_name is not None:
+            tbl = self._tbl(table_name)
+            if tbl not in self.list_tables():
+                logger.info("load_pair_fundamentals: table '%s' not found.", tbl)
+                return pd.DataFrame()
+        else:
+            tbl = self._find_first_existing_table(table_candidates)
+            if not tbl:
+                logger.info(
+                    "load_pair_fundamentals: no fundamentals_pairs/fundamentals_universe table found."
+                )
+                return pd.DataFrame()
+
+        try:
+            df = pd.read_sql_table(tbl, self.engine)
+        except Exception as exc:
+            self._last_error = str(exc)
+            logger.warning("load_pair_fundamentals.read_sql_table('%s') failed: %s", tbl, exc)
+            return pd.DataFrame()
+
+        if df.empty:
+            return df
+
+        if env is not None and "env" in df.columns:
+            df = df[df["env"] == env]
+        if profile is not None and "profile" in df.columns:
+            df = df[df["profile"] == profile]
+
+        if df.empty:
+            return df
+
+        if latest_only and "ts_utc" in df.columns:
+            try:
+                if {"sym_x", "sym_y"} <= set(df.columns):
+                    df = (
+                        df.sort_values("ts_utc")
+                        .groupby(["sym_x", "sym_y"], as_index=False)
+                        .tail(1)
+                    )
+                elif "pair" in df.columns:
+                    df = (
+                        df.sort_values("ts_utc")
+                        .groupby("pair", as_index=False)
+                        .tail(1)
+                    )
+                else:
+                    df = df.sort_values("ts_utc").tail(1)
+            except Exception:
+                df = df.sort_values("ts_utc")
+                key_cols: Optional[List[str]] = None
+                if {"sym_x", "sym_y"} <= set(df.columns):
+                    key_cols = ["sym_x", "sym_y"]
+                elif "pair" in df.columns:
+                    key_cols = ["pair"]
+                if key_cols:
+                    df = df.drop_duplicates(key_cols, keep="last")
+                else:
+                    df = df.tail(1)
+
+        if limit is not None and limit > 0:
+            if "ts_utc" in df.columns:
+                df = df.sort_values("ts_utc", ascending=False).head(limit)
+            else:
+                df = df.head(limit)
+
+        if "pair" not in df.columns:
+            if {"sym_x", "sym_y"} <= set(df.columns):
+                df["pair"] = df["sym_x"].astype(str) + "-" + df["sym_y"].astype(str)
+            else:
+                df["pair"] = df.index.astype(str)
+
+        return df
+
+    def load_pair_backtest_metrics(
+        self,
+        *,
+        table_candidates: Sequence[str] = ("bt_runs",),
+        table_name: Optional[str] = None,
+        env: Optional[str] = None,
+        profile: Optional[str] = None,
+        latest_only: bool = True,
+        limit: Optional[int] = None,
+    ) -> pd.DataFrame:
+        """
+        טוען מטריקות ביצועים ברמת זוג מתוך bt_runs.
+
+        table_name/profile/limit:
+            נותן תאימות ל-API הישן, מעל המבנה החדש.
+        """
+        if table_name is not None:
+            tbl = self._tbl(table_name)
+            if tbl not in self.list_tables():
+                logger.info("load_pair_backtest_metrics: table '%s' not found.", tbl)
+                return pd.DataFrame()
+        else:
+            tbl = self._find_first_existing_table(table_candidates)
+            if not tbl:
+                logger.info("load_pair_backtest_metrics: no bt_runs table found.")
+                return pd.DataFrame()
+
+        try:
+            df_runs = pd.read_sql_table(tbl, self.engine)
+        except Exception as exc:
+            self._last_error = str(exc)
+            logger.warning("load_pair_backtest_metrics.read_sql_table('%s') failed: %s", tbl, exc)
+            return pd.DataFrame()
+
+        if df_runs.empty:
+            return df_runs
+
+        # env מתוך config_json (אם קיים)
+        if env is not None and "config_json" in df_runs.columns:
+            try:
+                cfg = df_runs["config_json"].apply(
+                    lambda x: json.loads(x) if isinstance(x, str) else {}
+                )
+                env_series = cfg.apply(lambda d: d.get("env") or d.get("ENV"))
+                df_runs = df_runs[env_series == env]
+            except Exception:
+                pass
+
+        # profile מתוך config_json (אם קיים)
+        if profile is not None and "config_json" in df_runs.columns:
+            try:
+                cfg = df_runs["config_json"].apply(
+                    lambda x: json.loads(x) if isinstance(x, str) else {}
+                )
+                prof_series = cfg.apply(lambda d: d.get("profile") or d.get("PROFILE"))
+                df_runs = df_runs[prof_series == profile]
+            except Exception:
+                pass
+
+        if df_runs.empty:
+            return df_runs
+
+        # latest_only – ניקח את הריצה האחרונה לכל זוג לפי ts
+        if latest_only and "ts" in df_runs.columns:
+            try:
+                if {"sym_x", "sym_y"} <= set(df_runs.columns):
+                    df_runs = (
+                        df_runs.sort_values("ts")
+                        .groupby(["sym_x", "sym_y"], as_index=False)
+                        .tail(1)
+                    )
+                elif "pair" in df_runs.columns:
+                    df_runs = (
+                        df_runs.sort_values("ts")
+                        .groupby("pair", as_index=False)
+                        .tail(1)
+                    )
+                else:
+                    df_runs = df_runs.sort_values("ts").tail(1)
+            except Exception:
+                df_runs = df_runs.sort_values("ts")
+                key_cols: Optional[List[str]] = None
+                if {"sym_x", "sym_y"} <= set(df_runs.columns):
+                    key_cols = ["sym_x", "sym_y"]
+                elif "pair" in df_runs.columns:
+                    key_cols = ["pair"]
+                if key_cols:
+                    df_runs = df_runs.drop_duplicates(key_cols, keep="last")
+                else:
+                    df_runs = df_runs.tail(1)
+
+        # limit
+        if limit is not None and limit > 0:
+            if "ts" in df_runs.columns:
+                df_runs = df_runs.sort_values("ts", ascending=False).head(limit)
+            else:
+                df_runs = df_runs.head(limit)
+
+        # pair label
+        if "pair" not in df_runs.columns:
+            if {"sym_x", "sym_y"} <= set(df_runs.columns):
+                df_runs["pair"] = df_runs["sym_x"].astype(str) + "-" + df_runs["sym_y"].astype(str)
+            else:
+                df_runs["pair"] = df_runs.index.astype(str)
+
+        # פירוק metrics_json לעמודות
+        if "metrics_json" in df_runs.columns:
+            try:
+                metrics_series = df_runs["metrics_json"].apply(
+                    lambda x: json.loads(x) if isinstance(x, str) else {}
+                )
+                metrics_df = pd.json_normalize(metrics_series)
+                df_out = pd.concat(
+                    [df_runs.drop(columns=["metrics_json"]), metrics_df],
+                    axis=1,
+                )
+            except Exception as exc:
+                logger.warning("load_pair_backtest_metrics: metrics_json normalize failed: %s", exc)
+                df_out = df_runs.copy()
+        else:
+            df_out = df_runs.copy()
+
+        return df_out
+
+    # ------------------------------------------------------------------
+    # Price Coverage Diagnostics (חדש) — כלי Health ל-Ingestion
+    # ------------------------------------------------------------------
+
+    def load_prices_coverage_summary(
+        self,
+        *,
+        env: Optional[str] = None,
+        table_name: Optional[str] = None,
+    ) -> pd.DataFrame:
+        """
+        מחזיר סיכום כיסוי מחירים לכל symbol/env:
+
+            - n_rows
+            - min_date
+            - max_date
+
+        זה כלי חשוב ל-IB Ingestor / Dashboard Health Tab.
+        """
+        tbl = self._tbl(table_name or "prices")
+        try:
+            with self.engine.connect() as conn:
+                sql = f"""
+                SELECT
+                    symbol,
+                    COALESCE(env, :env_default) AS env,
+                    COUNT(*)          AS n_rows,
+                    MIN(date)         AS min_date,
+                    MAX(date)         AS max_date
+                FROM {tbl}
+                """
+                params: Dict[str, Any] = {"env_default": self.default_env}
+                if env is not None:
+                    sql += " WHERE env = :env"
+                    params["env"] = env
+                sql += " GROUP BY symbol, COALESCE(env, :env_default) ORDER BY symbol"
+                res = conn.execute(text(sql), params)
+                df = pd.DataFrame(res.fetchall(), columns=res.keys())
+        except Exception as exc:
+            self._last_error = str(exc)
+            logger.warning("load_prices_coverage_summary failed from table '%s': %s", tbl, exc)
+            return pd.DataFrame()
+
+        return df
+
+    # ==================================================================
+    # Part 3/3 — Risk / Experiments / Context / Snapshots / KV / Prices
+    # ==================================================================
+
+    # ------------------------------------------------------------------
+    # Risk Persistence (RiskState / RiskLimits)
+    # ------------------------------------------------------------------
+
+    def save_risk_state(
+        self,
+        state: RiskState,
+        limits: RiskLimits,
+        *,
+        run_id: Optional[str] = None,
+        section: str = "risk",
+        env: Optional[str] = None,
+        table_name: Optional[str] = None,
+        if_exists: str = "append",
+        extra_meta: Optional[JSONDict] = None,
+    ) -> None:
+        """
+        שומר שורת RiskState+RiskLimits לתוך SQL:
+
+        שימושים:
+        ---------
+        - לעקוב אחרי מצב הקרן לאורך זמן.
+        - לבנות Dashboard היסטורי של סיכון.
+        - להזין Agents / Kill-Switch logic.
+
+        extra_meta:
+            מאפשר להוסיף שדות נוספים (למשל "risk_profile", "regime_tag").
+        """
+        if not self._ensure_writable("save_risk_state"):
+            return
+
+        tbl = self._tbl(table_name or "risk_state")
+
+        payload: JSONDict = {
+            # from RiskState
+            "equity_today": state.equity_today,
+            "equity_yday": state.equity_yday,
+            "daily_pnl_abs": state.daily_pnl_abs,
+            "daily_pnl_pct": state.daily_pnl_pct,
+            "weekly_pnl_pct": state.weekly_pnl_pct,
+            "monthly_pnl_pct": state.monthly_pnl_pct,
+            "ytd_pnl_pct": state.ytd_pnl_pct,
+            "max_dd_pct": state.max_dd_pct,
+            "gross_leverage": state.gross_leverage,
+            "net_leverage": state.net_leverage,
+            "target_leverage": state.target_leverage,
+            "realized_vol_pct": state.realized_vol_pct,
+            "vix": state.vix,
+            "macro_regime": state.macro_regime,
+            "matrix_crowded_regime": state.matrix_crowded_regime,
+            "anomaly_score": state.anomaly_score,
+            "anomaly_flag": state.anomaly_flag,
+            "tail_risk_score": state.tail_risk_score,
+            "wf_stability_score": state.wf_stability_score,
+            "liquidity_stress_score": state.liquidity_stress_score,
+            # from RiskLimits
+            "limit_max_daily_loss_pct": limits.max_daily_loss_pct,
+            "limit_max_weekly_loss_pct": limits.max_weekly_loss_pct,
+            "limit_max_monthly_loss_pct": limits.max_monthly_loss_pct,
+            "limit_max_intraday_loss_pct": limits.max_intraday_loss_pct,
+            "limit_max_drawdown_pct": limits.max_drawdown_pct,
+            "limit_max_gross_leverage": limits.max_gross_leverage,
+            "limit_max_net_leverage": limits.max_net_leverage,
+            "limit_vix_kill_threshold": limits.vix_kill_threshold,
+            "limit_anomaly_trigger_min_frac": limits.anomaly_trigger_min_frac,
+            "limit_profile_name": limits.profile_name,
+            "limit_target_vol_pct": limits.target_vol_pct,
+            "limit_target_dd_pct": limits.target_dd_pct,
+            "limit_target_sharpe_min": limits.target_sharpe_min,
+            "limit_target_sharpe_max": limits.target_sharpe_max,
+        }
+
+        if extra_meta:
+            for k, v in extra_meta.items():
+                payload[f"meta_{k}"] = v
+
+        df = pd.DataFrame([payload])
+        df = self._add_common_metadata(
+            df,
+            run_id=run_id,
+            section=section,
+            env=env or self.default_env,
+        )
+
+        df.to_sql(
+            tbl,
+            self.engine,
+            if_exists=if_exists,
+            index=False,
+        )
+        logger.info("Saved risk_state row into table '%s'", tbl)
+
+    def save_risk_timeline(
+        self,
+        risk_timeline_df: pd.DataFrame,
+        *,
+        run_id: Optional[str] = None,
+        section: str = "risk",
+        env: Optional[str] = None,
+        table_name: Optional[str] = None,
+        if_exists: str = "append",
+    ) -> None:
+        """
+        שומר Risk Timeline (rolling_vol_pct, rolling_dd_pct, וכו') לטבלה.
+
+        מצפה:
+            index = datetime (אם כן, נשמור כעמודת 'ts').
+        """
+        if not self._ensure_writable("save_risk_timeline"):
+            return
+        if risk_timeline_df is None or risk_timeline_df.empty:
+            logger.info("save_risk_timeline: empty DataFrame — nothing to save.")
+            return
+
+        tbl = self._tbl(table_name or "risk_timeline")
+        df = risk_timeline_df.copy()
+
+        # הבטחת עמודת time
+        if isinstance(df.index, pd.DatetimeIndex):
+            df = df.reset_index().rename(columns={df.index.name or "index": "ts"})
+        else:
+            df = df.reset_index().rename(columns={"index": "ts"})
+
+        df = self._add_common_metadata(
+            df,
+            run_id=run_id,
+            section=section,
+            env=env or self.default_env,
+        )
+
+        df.to_sql(
+            tbl,
+            self.engine,
+            if_exists=if_exists,
+            index=False,
+        )
+        logger.info("Saved %d risk_timeline rows into table '%s'", len(df), tbl)
+
+    # ------------------------------------------------------------------
+    # Experiments / KPI runs
+    # ------------------------------------------------------------------
+
+    def save_experiment_run(
+        self,
+        run_id: Optional[str],
+        experiment_name: str,
+        kpis: JSONDict,
+        meta: Optional[JSONDict] = None,
+        *,
+        section: str = "experiment",
+        env: Optional[str] = None,
+        table_name: Optional[str] = None,
+        if_exists: str = "append",
+    ) -> None:
+        """
+        שומר רשומת Experiment כללית:
+        - experiment_name
+        - kpis (flatten)
+        - meta (flatten)
+
+        מתאים ל:
+        ---------
+        - Optuna / Meta-Optimization מחוץ ל-DuckDB.
+        - ניסויים ב-Execution / Slippage / Fill models.
+        - ניסויי ML (למשל feature-sets שונים).
+        """
+        if not self._ensure_writable("save_experiment_run"):
+            return
+
+        tbl = self._tbl(table_name or "experiment_runs")
+
+        payload: JSONDict = {}
+        payload["experiment_name"] = experiment_name
+        payload["run_id"] = run_id
+
+        # flatten KPIs + meta
+        for k, v in (kpis or {}).items():
+            payload[f"kpi_{k}"] = v
+        for k, v in (meta or {}).items():
+            payload[f"meta_{k}"] = v
+
+        df = pd.DataFrame([payload])
+        df = self._add_common_metadata(
+            df,
+            run_id=run_id,
+            section=section,
+            env=env or self.default_env,
+        )
+
+        df.to_sql(
+            tbl,
+            self.engine,
+            if_exists=if_exists,
+            index=False,
+        )
+        logger.info("Saved experiment_run '%s' into table '%s'", experiment_name, tbl)
+
+    # ------------------------------------------------------------------
+    # Context Snapshots (AppContext / RunContext)
+    # ------------------------------------------------------------------
+
+    def save_context_snapshot(
+        self,
+        ctx: Any,
+        *,
+        section: Optional[str] = None,
+        env: Optional[str] = None,
+        table_name: Optional[str] = None,
+        if_exists: str = "append",
+    ) -> None:
+        """
+        שומר Snapshot של AppContext לטבלה:
+
+        ctx צפוי להיות:
+            - core.app_context.AppContext
+            - או dict דומה
+            - או אובייקט עם to_dict()
+
+        נשמר כ-JSON גולמי (עמודה ctx).
+        """
+        if not self._ensure_writable("save_context_snapshot"):
+            return
+
+        tbl = self._tbl(table_name or "ctx_snapshots")
+
+        if hasattr(ctx, "to_dict"):
+            ctx_dict = ctx.to_dict()  # type: ignore[call-arg]
+        elif hasattr(ctx, "__dict__"):
+            ctx_dict = dict(ctx.__dict__)
+        elif isinstance(ctx, dict):
+            ctx_dict = dict(ctx)
+        else:
+            logger.warning("save_context_snapshot: unsupported ctx type %r", type(ctx))
+            return
+
+        run_id = ctx_dict.get("run_id") if isinstance(ctx_dict, dict) else None
+        payload_json = _safe_json_dumps(ctx_dict)
+
+        df = pd.DataFrame(
+            [
+                {
+                    "ctx_json": payload_json,
+                }
+            ]
+        )
+        df = self._add_common_metadata(
+            df,
+            run_id=run_id,
+            section=section or ctx_dict.get("section", "ctx"),
+            env=env or self.default_env,
+        )
+
+        df.to_sql(
+            tbl,
+            self.engine,
+            if_exists=if_exists,
+            index=False,
+        )
+        logger.info("Saved context snapshot (run_id=%s) into table '%s'", run_id, tbl)
+
+    # ------------------------------------------------------------------
+    # DashboardSnapshot Persistence (typed)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _snapshot_to_json(snapshot: DashboardSnapshot) -> str:
+        """
+        המרה של DashboardSnapshot ל-JSON.
+
+        עובד גם אם זה:
+        - Pydantic v2 (model_dump_json)
+        - Pydantic v1 (json)
+        - dataclass (asdict)
+        """
+        # Pydantic v2
+        if hasattr(snapshot, "model_dump_json"):
+            return snapshot.model_dump_json()  # type: ignore[no-any-return]
+
+        # Pydantic v1
+        if hasattr(snapshot, "json"):
+            return snapshot.json()  # type: ignore[no-any-return]
+
+        # Dataclass
+        if is_dataclass(snapshot):
+            return json.dumps(asdict(snapshot), default=str)
+
+        # Fallback — ננסה להשליך ל-dict
+        if hasattr(snapshot, "dict"):
+            return json.dumps(snapshot.dict(), default=str)
+
+        return json.dumps(snapshot, default=str)
+
+    @staticmethod
+    def _snapshot_from_json(payload: str) -> DashboardSnapshot:
+        """
+        שחזור DashboardSnapshot מ-JSON.
+
+        מנסה Pydantic v2 → v1 → kwargs רגיל.
+        """
+        # Pydantic v2
+        if hasattr(DashboardSnapshot, "model_validate_json"):
+            return DashboardSnapshot.model_validate_json(payload)  # type: ignore[attr-defined]
+
+        data = json.loads(payload)
+
+        # Pydantic v1
+        if hasattr(DashboardSnapshot, "parse_obj"):
+            return DashboardSnapshot.parse_obj(data)  # type: ignore[attr-defined]
+
+        # Dataclass / רגיל
+        return DashboardSnapshot(**data)  # type: ignore[arg-type]
+
+    def save_dashboard_snapshot(
+        self,
+        snapshot: DashboardSnapshot,
+        ctx_key: Optional[str] = None,
+    ) -> None:
+        """
+        שומר Snapshot של הדשבורד לטבלה ייעודית (DashboardSnapshot typed).
+
+        ctx_key:
+            מפתח לוגי (למשל: "live-default", "paper-main", "profile:XYZ").
+            אם לא ניתן — ננסה לקחת מ-snapshot.ctx.profile_name (אם קיים).
+        """
+        if not self._ensure_writable("save_dashboard_snapshot"):
+            return
+
+        tbl = self._tbl("dashboard_snapshots")
+        try:
+            payload = self._snapshot_to_json(snapshot)
+
+            effective_ctx_key: Optional[str] = ctx_key
+            if effective_ctx_key is None:
+                ctx = getattr(snapshot, "ctx", None)
+                if ctx is not None and hasattr(ctx, "profile_name"):
+                    effective_ctx_key = getattr(ctx, "profile_name")  # type: ignore[assignment]
+
+            with self.engine.begin() as conn:
+                conn.execute(
+                    text(
+                        f"""
+                        INSERT INTO {tbl} (ctx_key, as_of_utc, payload_json)
+                        VALUES (:ctx_key, :as_of_utc, :payload_json)
+                        """
+                    ),
+                    {
+                        "ctx_key": effective_ctx_key,
+                        "as_of_utc": snapshot.as_of.isoformat(),
+                        "payload_json": payload,
+                    },
+                )
+
+            self._last_error = None
+
+        except Exception as exc:
+            self._last_error = str(exc)
+            logger.warning(
+                "Failed to save typed dashboard snapshot to SQL: %s", exc, exc_info=True
+            )
+
+    def load_last_dashboard_snapshot(
+        self,
+        ctx_key: Optional[str] = None,
+    ) -> Optional[DashboardSnapshot]:
+        """
+        טוען את ה-Snapshot האחרון מהטבלה (typed DashboardSnapshot).
+
+        ctx_key:
+            אם ניתן — מסנן לפי ctx_key.
+            אם לא — מחזיר את ה-Snapshot האחרון מכל הקונטקסטים.
+        """
+        tbl = self._tbl("dashboard_snapshots")
+        try:
+            with self.engine.connect() as conn:
+                if ctx_key:
+                    res = conn.execute(
+                        text(
+                            f"""
+                            SELECT payload_json
+                            FROM {tbl}
+                            WHERE ctx_key = :ctx_key
+                            ORDER BY as_of_utc DESC
+                            LIMIT 1
+                            """
+                        ),
+                        {"ctx_key": ctx_key},
+                    )
+                else:
+                    res = conn.execute(
+                        text(
+                            f"""
+                            SELECT payload_json
+                            FROM {tbl}
+                            ORDER BY as_of_utc DESC
+                            LIMIT 1
+                            """
+                        )
+                    )
+                row = res.fetchone()
+
+            if not row:
+                return None
+
+            payload = row[0]
+            snap = self._snapshot_from_json(payload)
+            self._last_error = None
+            return snap
+
+        except Exception as exc:
+            self._last_error = str(exc)
+            logger.warning(
+                "Failed to load last dashboard snapshot from SQL: %s",
+                exc,
+                exc_info=True,
+            )
+            return None
+
+    # ------------------------------------------------------------------
+    # Generic dict-based Dashboard snapshot (מתאים ל-dashboard.py)
+    # ------------------------------------------------------------------
+
+    def save_snapshot(
+        self,
+        snapshot: Mapping[str, Any],
+        ctx_key: Optional[str] = None,
+    ) -> None:
+        """
+        גרסה גנרית של Snapshot לדשבורד שנכתבת כ-JSON ללא טיפוס קשיח.
+
+        מותאם במיוחד לזרימה של dashboard.py::_save_snapshot_to_sql_store,
+        שם snapshot הוא dict עם:
+            - ts_utc
+            - env, profile, run_id
+            - app/services/base_context ...
+        """
+        if not self._ensure_writable("save_snapshot"):
+            return
+
+        tbl = self._tbl("dashboard_snapshots")
+        try:
+            snap_dict = dict(snapshot)
+            as_of = str(snap_dict.get("ts_utc") or _now_utc_iso())
+            if ctx_key is None:
+                ctx_key = f"{snap_dict.get('env', self.default_env)}:{snap_dict.get('profile', 'default')}"
+
+            payload_json = _safe_json_dumps(snap_dict)
+
+            with self.engine.begin() as conn:
+                conn.execute(
+                    text(
+                        f"""
+                        INSERT INTO {tbl} (ctx_key, as_of_utc, payload_json)
+                        VALUES (:ctx_key, :as_of_utc, :payload_json)
+                        """
+                    ),
+                    {
+                        "ctx_key": ctx_key,
+                        "as_of_utc": as_of,
+                        "payload_json": payload_json,
+                    },
+                )
+
+            self._last_error = None
+            logger.info(
+                "Generic dashboard snapshot saved (ctx_key=%s, as_of=%s)",
+                ctx_key,
+                as_of,
+            )
+        except Exception as exc:
+            self._last_error = str(exc)
+            logger.warning(
+                "Failed to save generic dashboard snapshot: %s",
+                exc,
+                exc_info=True,
+            )
+
+    # ------------------------------------------------------------------
+    # Generic KV JSON store (prefs/views/other)
+    # ------------------------------------------------------------------
+
+    def save_json(self, namespace: str, key: str, payload: Any) -> None:
+        """
+        שומר אובייקט JSON שרירותי תחת (namespace, key) בטבלת kv_store.
+
+        כל שמירה מוסיפה רשומה חדשה עם ts_utc; הקריאה ל-load_json לוקחת את האחרונה.
+        """
+        if not self._ensure_writable("save_json"):
+            return
+
+        tbl = self._tbl("kv_store")
+        try:
+            payload_json = _safe_json_dumps(payload)
+            ts_utc = _now_utc_iso()
+            with self.engine.begin() as conn:
+                conn.execute(
+                    text(
+                        f"""
+                        INSERT INTO {tbl} (namespace, key, ts_utc, payload_json)
+                        VALUES (:ns, :k, :ts, :payload)
+                        """
+                    ),
+                    {
+                        "ns": namespace,
+                        "k": key,
+                        "ts": ts_utc,
+                        "payload": payload_json,
+                    },
+                )
+            self._last_error = None
+            logger.info(
+                "Saved JSON payload to kv_store (namespace=%s, key=%s)", namespace, key
+            )
+        except Exception as exc:
+            self._last_error = str(exc)
+            logger.warning(
+                "save_json(namespace=%s, key=%s) failed: %s", namespace, key, exc, exc_info=True
+            )
+
+    def load_json(self, namespace: str, key: str) -> Optional[Any]:
+        """
+        טוען את ה-payload האחרון עבור (namespace, key) מתוך kv_store.
+        """
+        tbl = self._tbl("kv_store")
+        try:
+            with self.engine.connect() as conn:
+                res = conn.execute(
+                    text(
+                        f"""
+                        SELECT payload_json
+                        FROM {tbl}
+                        WHERE namespace = :ns AND key = :k
+                        ORDER BY ts_utc DESC
+                        LIMIT 1
+                        """
+                    ),
+                    {"ns": namespace, "k": key},
+                )
+                row = res.fetchone()
+            if not row:
+                return None
+            payload_json = row[0]
+            self._last_error = None
+            return json.loads(payload_json)
+        except Exception as exc:
+            self._last_error = str(exc)
+            logger.warning(
+                "load_json(namespace=%s, key=%s) failed: %s", namespace, key, exc, exc_info=True
+            )
+            return None
+
+    def list_json_keys(self, namespace: str) -> List[str]:
+        """
+        מחזיר רשימת keys עבור namespace מסוים מתוך kv_store.
+        """
+        tbl = self._tbl("kv_store")
+        try:
+            with self.engine.connect() as conn:
+                res = conn.execute(
+                    text(
+                        f"""
+                        SELECT DISTINCT key
+                        FROM {tbl}
+                        WHERE namespace = :ns
+                        ORDER BY key
+                        """
+                    ),
+                    {"ns": namespace},
+                )
+                rows = res.fetchall()
+            return [str(r[0]) for r in rows]
+        except Exception as exc:
+            self._last_error = str(exc)
+            logger.warning(
+                "list_json_keys(namespace=%s) failed: %s", namespace, exc, exc_info=True
+            )
+            return []
+
+    # wrappers ספציפיים לדשבורד/Prefs/Views
+    def save_dashboard_prefs(self, user_key: str, data: JSONDict) -> None:
+        self.save_json("dashboard_prefs", user_key, data)
+
+    def load_dashboard_prefs(self, user_key: str) -> Optional[JSONDict]:
+        obj = self.load_json("dashboard_prefs", user_key)
+        return obj if isinstance(obj, dict) else None
+
+    def save_user_prefs(self, user_key: str, data: JSONDict) -> None:
+        """
+        Alias כללי יותר – לטובת פונקציות שיחפשו save_user_prefs.
+        """
+        self.save_json("user_prefs", user_key, data)
+
+    def load_user_prefs(self, user_key: str) -> Optional[JSONDict]:
+        obj = self.load_json("user_prefs", user_key)
+        return obj if isinstance(obj, dict) else None
+
+    def save_dashboard_views(self, views: Sequence[JSONDict]) -> None:
+        """
+        שומר מערך של Views (למשל SavedDashboardView) תחת namespace "dashboard_views".
+        """
+        self.save_json("dashboard_views", "default", list(views))
+
+    # ------------------------------------------------------------------
+    # Price History Persistence (EOD / OHLCV)
+    # ------------------------------------------------------------------
+
+    def save_price_history(
+        self,
+        symbol: str,
+        df_prices: pd.DataFrame,
+        *,
+        table_name: Optional[str] = None,
+        env: Optional[str] = None,
+        if_exists: str = "append",
+    ) -> None:
+        """
+        שומר היסטוריית מחירים עבור סימבול אחד לטבלה.
+
+        df_prices מצופה להכיל לפחות:
+            index: DatetimeIndex או עמודת 'date'
+            columns: ['open','high','low','close','volume'] (או תת-קבוצה)
+
+        נשמרת טבלה בסגנון:
+            prices: symbol, date, open, high, low, close, volume, env, ts_utc, run_id, section.
+        """
+        if not self._ensure_writable("save_price_history"):
+            return
+        if df_prices is None or df_prices.empty:
+            logger.info("save_price_history(%s): empty df — nothing to save.", symbol)
+            return
+
+        tbl = self._tbl(table_name or "prices")
+        df = df_prices.copy()
+
+        # לוודא שיש עמודת date
+        if isinstance(df.index, pd.DatetimeIndex):
+            df = df.reset_index().rename(columns={df.index.name or "index": "date"})
+        elif "date" not in df.columns:
+            logger.warning("save_price_history(%s): no DatetimeIndex or 'date' column.", symbol)
+            return
+
+        # מיפוי שמות אלטרנטיביים ל-adj_close (למשל מספקי דאטה שונים)
+        if "adj_close" not in df.columns:
+            for alt in ("Adj Close", "adjclose", "adj_close_price"):
+                if alt in df.columns:
+                    df["adj_close"] = df[alt]
+                    break
+
+        # לוודא שכל עמודות המחיר קיימות לפי הסכמה של prices
+        standard_cols = ["open", "high", "low", "close", "adj_close", "volume"]
+        for col in standard_cols:
+            if col not in df.columns:
+                df[col] = None
+
+        df["symbol"] = symbol
+        df = self._add_common_metadata(
+            df,
+            run_id=None,
+            section="prices",
+            env=env or self.default_env,
+        )
+
+        df.to_sql(
+            tbl,
+            self.engine,
+            if_exists=if_exists,
+            index=False,
+        )
+        logger.info("Saved %d price rows for %s into table '%s'", len(df), symbol, tbl)
+
+    def load_price_history(
+        self,
+        symbol: str,
+        *,
+        table_name: Optional[str] = None,
+        env: Optional[str] = None,
+        start: Optional[str] = None,
+        end: Optional[str] = None,
+        columns: Optional[Sequence[str]] = None,
+    ) -> pd.DataFrame:
+        """
+        טוען היסטוריית מחירים לסימבול אחד מהטבלה.
+
+        מחזיר DataFrame עם index=date ועמודות OHLCV (אם קיימות).
+
+        start / end:
+            מחרוזות תאריך ('YYYY-MM-DD') לסינון טווח.
+
+        columns:
+            אם מוגדר — מגביל לעמודות ספציפיות (למשל ['close','volume']).
+        """
+        tbl = self._tbl(table_name or "prices")
+        try:
+            q = f"SELECT * FROM {tbl} WHERE symbol = :sym"
+            params: Dict[str, Any] = {"sym": symbol}
+            if env is not None:
+                q += " AND env = :env"
+                params["env"] = env
+            if start is not None:
+                q += " AND date >= :start"
+                params["start"] = start
+            if end is not None:
+                q += " AND date <= :end"
+                params["end"] = end
+
+            with self.engine.connect() as conn:
+                res = conn.execute(text(q), params)
+                rows = res.fetchall()
+                if not rows:
+                    return pd.DataFrame()
+
+                df = pd.DataFrame(rows, columns=res.keys())
+        except Exception as exc:
+            self._last_error = str(exc)
+            logger.warning("load_price_history(%s) failed: %s", symbol, exc)
+            return pd.DataFrame()
+
+        if "date" in df.columns:
+            df["date"] = pd.to_datetime(df["date"])
+            df = df.set_index("date").sort_index()
+
+        # ברירת מחדל: רק עמודות מחירים רלוונטיות
+        default_cols = ["open", "high", "low", "close", "adj_close", "volume"]
+        if columns is not None:
+            cols_keep = [c for c in columns if c in df.columns]
+        else:
+            cols_keep = [c for c in default_cols if c in df.columns]
+
+        if cols_keep:
+            return df[cols_keep]
+        return df
+
+    # ------------------------------------------------------------------
+    # SQLite Optimization (optional)
+    # ------------------------------------------------------------------
+
+    def optimize_sqlite(self) -> None:
+        """
+        אם dialect הוא sqlite — מריץ VACUUM + ANALYZE.
+
+        לא רלוונטי ל-DuckDB, אבל חשוב אם תחליט להשתמש ב-SQLite למטרות כלשהן.
+        """
+        if "sqlite" not in self.engine_url:
+            return
+        try:
+            with self.engine.begin() as conn:
+                conn.execute(text("VACUUM"))
+                conn.execute(text("ANALYZE"))
+            logger.info("SQLite VACUUM + ANALYZE executed.")
+        except Exception as exc:
+            self._last_error = str(exc)
+            logger.warning("optimize_sqlite failed: %s", exc)

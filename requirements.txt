@@ -1,0 +1,8 @@
+optuna==3.*
+ib_insync
+vectorbt
+yfinance
+pandas>=2
+numpy
+numba
+PyYAML

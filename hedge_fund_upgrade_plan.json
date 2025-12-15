@@ -1,0 +1,3379 @@
+{
+  "project_root": "C:\\Users\\omrib\\OneDrive\\Desktop\\pairs_trading_system",
+  "phases": [
+    {
+      "id": "phase_architecture_env",
+      "name": "Architecture & Environment Modes",
+      "order": 1,
+      "description": "Introduce explicit environment modes (dev/research/paper/live) and centralize upgrade orchestration.",
+      "milestones": [
+        "Define global upgrade phases and stable ids",
+        "Make upgrade commands deterministic and idempotent across runs"
+      ]
+    },
+    {
+      "id": "phase_data_layer",
+      "name": "Data Layer, Backfills & Source-of-Truth",
+      "order": 2,
+      "description": "Harden the data ingestion and storage pipeline so all components share a single, auditable source-of-truth for prices, signals, and metadata.",
+      "milestones": [
+        "Standardize SqlStore schemas for prices, signals, positions, and experiments with explicit versions and indices",
+        "Unify data access via sql_price_loader and market_data_router, deprecating ad-hoc loaders and scripts",
+        "Implement robust backfill and incremental ingestion from IBKR and Yahoo with gap detection and anomaly logging",
+        "Add data quality scoring and freshness checks surfaced through data_quality and dashboard_service",
+        "Define clear history-length and intraday vs EOD retention policies, enforced at the SqlStore level"
+      ]
+    },
+    {
+      "id": "phase_signals_portfolio",
+      "name": "Signals, Portfolio Construction & Risk Overlays",
+      "order": 3,
+      "description": "Separate signal generation, portfolio construction, and risk overlays while ensuring shared parameters across research, backtest, and live.",
+      "milestones": [
+        "Refine signals_engine and signal_generator to expose a clear Signal API (inputs, outputs, metadata, config snapshot)",
+        "Introduce portfolio construction layer that consumes signals_engine outputs and produces target positions with sizing rules",
+        "Integrate risk_engine and risk_parity as overlays on target portfolios (max leverage, exposure caps, kill-switches, drawdown gates)",
+        "Persist signals, portfolios, and risk states in SqlStore with full metadata (env, config, git_rev, data snapshot)",
+        "Ensure optimization_backtester, optimizer, and live flows reuse the same signal and risk parameters with explicit environment overrides only"
+      ]
+    },
+    {
+      "id": "phase_execution_broker",
+      "name": "Execution Router, Broker Abstraction & Safety",
+      "order": 4,
+      "description": "Build a robust execution layer that cleanly separates target intent from fill state, supports paper vs live, and enforces capital safety.",
+      "milestones": [
+        "Harden ib_order_router into a broker-agnostic ExecutionRouter with a single interface for target positions and orders",
+        "Implement explicit paper vs live broker profiles with circuit breakers, rate-limits, and retry/backoff policies",
+        "Model order lifecycle clearly (submitted, partially filled, filled, rejected, cancelled) and persist all events in SqlStore",
+        "Add safeguards for order sizing, price bounds, and slippage controls, including pre-trade risk checks from risk_engine",
+        "Enable deterministic simulation and replay modes that use the same execution logic on historical data"
+      ]
+    },
+    {
+      "id": "phase_web_app_ux",
+      "name": "Unified Web App, Dashboards & Live Controls",
+      "order": 5,
+      "description": "Expose a single, coherent Streamlit-based web app with distinct sections for research, optimization, monitoring, and live trading, all backed by the shared engine.",
+      "milestones": [
+        "Create a unified entry-point dashboard with clear environment indicator and risk status banner",
+        "Split UI into tabs or sections (Universe, Research, Optimization, Backtests, Live, Monitoring) using shared AppContext",
+        "Refactor existing Streamlit tabs to use ui_helpers, dashboard_service, and dashboard_models instead of ad-hoc logic",
+        "Implement live trading control panel (paper/live) that manages strategies, allocations, and kill-switches with explicit confirmations",
+        "Provide stateful session handling and profile switching so users can move between dev/research/paper/live with consistent behaviour"
+      ]
+    },
+    {
+      "id": "phase_observability_ops",
+      "name": "Observability, Operations & Code Quality",
+      "order": 6,
+      "description": "Add observability, health checks, and safety rails around automated upgrades.",
+      "milestones": [
+        "Introduce health checks after major upgrade phases",
+        "Add snapshotting of code/configs prior to applying upgrades"
+      ]
+    },
+    {
+      "id": "phase_testing_deployment_ai",
+      "name": "Testing, Simulation, Deployment & AI Agents",
+      "order": 7,
+      "description": "Build realistic tests, simulation paths, and an upgrade agent workflow that supports safe, incremental deployment from dev to live.",
+      "milestones": [
+        "Add fast, deterministic tests for SqlStore, signals_engine, risk_engine, execution router, and key dashboard flows",
+        "Implement end-to-end simulation and replay pipelines that run live-like flows on historical data with the same configs",
+        "Define deployment profiles and checklists for moving strategies from dev to research to paper to live with health gates",
+        "Integrate AI-based upgrade agents as first-class tools that propose localized, safe refactors using AppContext and shared services",
+        "Persist config and environment snapshots alongside backtests and live runs to guarantee reproducibility and auditability"
+      ]
+    }
+  ],
+  "files": [
+    {
+      "rel_path": "__backup_dupes\\optimization_tab.backup_20251102_131113.py",
+      "role": "legacy backup of the optimization Streamlit tab; reference for migrating to unified research UI",
+      "priority": "medium",
+      "categories": [
+        "web_ui",
+        "research",
+        "backtest",
+        "infra"
+      ],
+      "tasks": [
+        "Audit differences vs active optimization tab and document which behaviours must be preserved",
+        "Extract any non-duplicated logic into shared research/optimization helpers used by the main UI",
+        "Clearly mark this file as deprecated and exclude it from production entry points",
+        "Plan eventual removal once all logic is moved into shared modules and tested"
+      ],
+      "phase_ids": [
+        "phase_web_app_ux",
+        "phase_architecture_env",
+        "phase_testing_deployment_ai"
+      ]
+    },
+    {
+      "rel_path": "__backup_dupes\\optimization_tab.backup_quotes_fix.py",
+      "role": "experimental backup of optimization tab with quote-handling fixes; source for robust data UI",
+      "priority": "medium",
+      "categories": [
+        "web_ui",
+        "research",
+        "backtest",
+        "data_ingest"
+      ],
+      "tasks": [
+        "Identify quote-handling fixes that are missing from the main optimization tab or data loaders",
+        "Move any durable fixes into market_data_router/price_loader instead of keeping UI-specific hacks",
+        "Tag this module as backup-only and remove from Streamlit navigation and imports",
+        "Schedule deletion after confirming functionality is covered by core data layer tests"
+      ],
+      "phase_ids": [
+        "phase_data_layer",
+        "phase_web_app_ux",
+        "phase_testing_deployment_ai"
+      ]
+    },
+    {
+      "rel_path": "check_duckdb.py",
+      "role": "simple DuckDB connectivity and schema smoke-test script",
+      "priority": "medium",
+      "categories": [
+        "infra",
+        "data_ingest",
+        "tests"
+      ],
+      "tasks": [
+        "Refactor into a reusable DuckDB health-check function callable from AppContext",
+        "Extend checks to validate core tables, indices, and recent data freshness",
+        "Integrate with observability layer (logs/health status) instead of ad-hoc stdout prints",
+        "Guard script execution with clear environment/profile selection"
+      ],
+      "phase_ids": [
+        "phase_data_layer",
+        "phase_observability_ops",
+        "phase_testing_deployment_ai"
+      ]
+    },
+    {
+      "rel_path": "common\\__init__.py",
+      "role": "package initializer for shared common utilities used across the system",
+      "priority": "low",
+      "categories": [
+        "infra",
+        "utils"
+      ],
+      "tasks": [
+        "Export only stable public symbols (e.g. helpers, typing_compat) to avoid accidental tight coupling",
+        "Add lightweight package-level docstring describing common module responsibilities",
+        "Ensure no side effects or heavy imports occur at package import time"
+      ],
+      "phase_ids": [
+        "phase_architecture_env"
+      ]
+    },
+    {
+      "rel_path": "common\\advanced_metrics.py",
+      "role": "library of advanced statistical metrics for pairs signals, risk, and analytics",
+      "priority": "high",
+      "categories": [
+        "research",
+        "backtest",
+        "risk",
+        "utils"
+      ],
+      "tasks": [
+        "Identify core metrics used in live signals and expose a stable, typed API for them",
+        "Add deterministic behaviour (e.g. seeds, numerical tolerances) and basic unit-style doctests",
+        "Optimize hot paths with NumPy vectorization and avoid unnecessary copies for large universes",
+        "Tag pure-analytics functions vs ones that depend on live configuration or state",
+        "Improve error handling and input validation for NaNs, missing data, and misaligned indices"
+      ],
+      "phase_ids": [
+        "phase_signals_portfolio",
+        "phase_testing_deployment_ai",
+        "phase_architecture_env"
+      ]
+    },
+    {
+      "rel_path": "common\\automl_tools.py",
+      "role": "AutoML and analytics utilities for model selection, feature ranking, and meta-optimization",
+      "priority": "medium",
+      "categories": [
+        "research",
+        "backtest",
+        "infra"
+      ],
+      "tasks": [
+        "Standardize configuration via central config_manager instead of inline constants",
+        "Ensure all optimization routines use deterministic seeds from a shared seed hub",
+        "Split heavy training functions from lightweight helpers to keep UI responsive",
+        "Add minimal tests covering a representative AutoML workflow on sample data"
+      ],
+      "phase_ids": [
+        "phase_signals_portfolio",
+        "phase_testing_deployment_ai",
+        "phase_architecture_env"
+      ]
+    },
+    {
+      "rel_path": "common\\config_manager.py",
+      "role": "central configuration manager for environments, profiles, and feature flags",
+      "priority": "high",
+      "categories": [
+        "infra",
+        "risk",
+        "live_trading",
+        "web_ui"
+      ],
+      "tasks": [
+        "Define Pydantic v2 models for global, environment, and strategy-level configs with explicit schemas",
+        "Make environment/profile (dev/research/paper/live) explicit and queryable system-wide",
+        "Add support for config snapshots (including git_rev) to be stored alongside results and runs",
+        "Introduce safe defaults and validation for risk-related parameters and broker settings",
+        "Ensure no direct env-var reads outside this module; expose a single AppContext-friendly API"
+      ],
+      "phase_ids": [
+        "phase_architecture_env",
+        "phase_observability_ops",
+        "phase_testing_deployment_ai"
+      ]
+    },
+    {
+      "rel_path": "common\\data_loader.py",
+      "role": "legacy-compatible data loading façade bridging various providers and local storage",
+      "priority": "high",
+      "categories": [
+        "data_ingest",
+        "research",
+        "backtest",
+        "live_trading",
+        "infra"
+      ],
+      "tasks": [
+        "Refactor to delegate actual I/O to market_data_router and sql_price_loader while keeping backward compatibility",
+        "Make history-length, frequency, and asset-universe policies explicit and configurable",
+        "Implement robust gap detection, anomaly logging, and data-quality scoring hooks",
+        "Ensure consistent behaviour across research/backtest/live by parameterizing environment instead of hard-coding",
+        "Add caching and DuckDB/Parquet integration aligned with the central SqlStore"
+      ],
+      "phase_ids": [
+        "phase_data_layer",
+        "phase_architecture_env",
+        "phase_observability_ops"
+      ]
+    },
+    {
+      "rel_path": "common\\data_providers.py",
+      "role": "unified abstraction over external market data vendors and broker feeds",
+      "priority": "high",
+      "categories": [
+        "data_ingest",
+        "live_trading",
+        "research",
+        "infra"
+      ],
+      "tasks": [
+        "Define clear provider interfaces (sync/async) for historical and real-time data retrieval",
+        "Centralize vendor-specific configs and credentials via config_manager and AppContext",
+        "Add retry/backoff and error-classification logic with structured logging",
+        "Expose data freshness and latency metrics for observability dashboards",
+        "Ensure behaviour is deterministic in replay/simulation modes vs true live streaming"
+      ],
+      "phase_ids": [
+        "phase_data_layer",
+        "phase_execution_broker",
+        "phase_observability_ops"
+      ]
+    },
+    {
+      "rel_path": "common\\feature_engineering.py",
+      "role": "feature construction module for signals, clustering, and regime detection",
+      "priority": "medium",
+      "categories": [
+        "research",
+        "backtest",
+        "risk"
+      ],
+      "tasks": [
+        "Group features into reusable, documented pipelines suited for pairs trading and macro overlays",
+        "Standardize feature configurations and random seeds via config_manager",
+        "Optimize rolling-window and cross-sectional operations for large universes",
+        "Add basic tests validating feature outputs on synthetic time series"
+      ],
+      "phase_ids": [
+        "phase_signals_portfolio",
+        "phase_testing_deployment_ai"
+      ]
+    },
+    {
+      "rel_path": "common\\fundamental_loader.py",
+      "role": "fundamental and index/ETF data ingestion module supporting factor and macro-aware signals",
+      "priority": "medium",
+      "categories": [
+        "data_ingest",
+        "research",
+        "backtest"
+      ],
+      "tasks": [
+        "Align schemas and keys with SqlStore and market_data_router for consistent joins with price data",
+        "Make universe selection, point-in-time handling, and history length explicit and configurable",
+        "Add gap and anomaly checks for fundamentals (e.g. stale or missing filings)",
+        "Expose a thin, typed API used by signal_generator and macro modules"
+      ],
+      "phase_ids": [
+        "phase_data_layer",
+        "phase_signals_portfolio",
+        "phase_testing_deployment_ai"
+      ]
+    },
+    {
+      "rel_path": "common\\helpers.py",
+      "role": "shared helper functions used across the codebase (dates, logging glue, small utilities)",
+      "priority": "medium",
+      "categories": [
+        "utils",
+        "infra"
+      ],
+      "tasks": [
+        "Identify frequently used helpers and ensure they are side-effect free and well-typed",
+        "Deprecate or relocate any heavy/duplicated logic to more appropriate dedicated modules",
+        "Add small doctest-style examples for non-trivial helpers",
+        "Ensure no environment-specific behaviour leaks into generic helpers"
+      ],
+      "phase_ids": [
+        "phase_architecture_env",
+        "phase_testing_deployment_ai"
+      ]
+    },
+    {
+      "rel_path": "common\\json_safe.py",
+      "role": "safe JSON encoding utilities for complex objects (e.g. configs, metrics, model params)",
+      "priority": "low",
+      "categories": [
+        "utils",
+        "infra"
+      ],
+      "tasks": [
+        "Guarantee that all core domain objects (configs, signals, portfolios) can be serialized deterministically",
+        "Integrate with logging and artifact-writing helpers for consistent JSON output",
+        "Add small tests for edge cases (NaN, datetimes, decimals)"
+      ],
+      "phase_ids": [
+        "phase_architecture_env",
+        "phase_observability_ops"
+      ]
+    },
+    {
+      "rel_path": "common\\live_pair_store.py",
+      "role": "DuckDB-backed store for live pair profiles, states, and metadata",
+      "priority": "high",
+      "categories": [
+        "live_trading",
+        "risk",
+        "data_ingest",
+        "infra"
+      ],
+      "tasks": [
+        "Define explicit schemas and indices for live pair profiles, including environment and run identifiers",
+        "Implement transactional updates and safe concurrency patterns for live reads/writes",
+        "Persist signal, risk, and execution metadata to make live decisions fully auditable",
+        "Expose simple health and freshness checks for monitoring dashboards",
+        "Align API and models with live_profiles and core.app_context for consistent access"
+      ],
+      "phase_ids": [
+        "phase_data_layer",
+        "phase_signals_portfolio",
+        "phase_execution_broker",
+        "phase_observability_ops"
+      ]
+    },
+    {
+      "rel_path": "common\\live_profiles.py",
+      "role": "typed data models and contracts for live pair profiles and their risk settings",
+      "priority": "high",
+      "categories": [
+        "live_trading",
+        "risk",
+        "infra"
+      ],
+      "tasks": [
+        "Express profiles as Pydantic models with explicit fields for environment, sizing, and risk limits",
+        "Ensure backward-compatible migration paths when models evolve (versioning, defaults)",
+        "Integrate with config_manager and live_pair_store as the single source of truth for live pairs",
+        "Add validation hooks enforcing basic risk constraints at profile load time",
+        "Document how profiles map to signals, portfolios, and execution engines"
+      ],
+      "phase_ids": [
+        "phase_architecture_env",
+        "phase_signals_portfolio",
+        "phase_execution_broker"
+      ]
+    },
+    {
+      "rel_path": "common\\macro_adjustments.py",
+      "role": "module that applies macro-based adjustments to pair signals and exposures",
+      "priority": "medium",
+      "categories": [
+        "research",
+        "risk",
+        "backtest"
+      ],
+      "tasks": [
+        "Clarify and document adjustment rules (e.g. volatility regimes, macro tilts) as configuration",
+        "Decouple pure macro-signal computation from application to pair portfolios",
+        "Ensure adjustments are applied consistently in backtest and live via shared pipelines",
+        "Add diagnostics to explain how macro adjustments impact sizing and risk metrics"
+      ],
+      "phase_ids": [
+        "phase_signals_portfolio",
+        "phase_observability_ops"
+      ]
+    },
+    {
+      "rel_path": "common\\macro_factors.py",
+      "role": "ingestion and representation of macro factor time series",
+      "priority": "medium",
+      "categories": [
+        "data_ingest",
+        "research",
+        "risk"
+      ],
+      "tasks": [
+        "Standardize macro factor identifiers, frequencies, and calendars with the main price database",
+        "Add quality checks and anomaly detection for macro series (e.g. structural breaks)",
+        "Expose a small API for retrieving aligned macro panels for feature_engineering and macro_sensitivity",
+        "Document configuration for data vendors, history length, and update schedules"
+      ],
+      "phase_ids": [
+        "phase_data_layer",
+        "phase_signals_portfolio",
+        "phase_observability_ops"
+      ]
+    },
+    {
+      "rel_path": "common\\macro_sensitivity.py",
+      "role": "compute macro sensitivity of pairs/strategies for risk and regime-aware sizing",
+      "priority": "medium",
+      "categories": [
+        "research",
+        "risk",
+        "backtest"
+      ],
+      "tasks": [
+        "Define robust regression/estimation routines for macro betas with proper diagnostics",
+        "Integrate outputs with risk overlays and reporting (e.g. macro exposure dashboards)",
+        "Ensure sensitivity calculations are reproducible and documented with input configs",
+        "Add tests using synthetic data to validate sign and magnitude of estimated betas"
+      ],
+      "phase_ids": [
+        "phase_signals_portfolio",
+        "phase_observability_ops",
+        "phase_testing_deployment_ai"
+      ]
+    },
+    {
+      "rel_path": "common\\market_data_router.py",
+      "role": "smart router that selects and orchestrates market data sources (SQL, vendors, brokers)",
+      "priority": "high",
+      "categories": [
+        "data_ingest",
+        "live_trading",
+        "infra"
+      ],
+      "tasks": [
+        "Design a pluggable routing policy based on environment, asset class, and latency requirements",
+        "Implement unified interfaces for bars, quotes, and snapshots with consistent schemas",
+        "Add caching, batching, and rate-limiting controls for heavy queries and live streams",
+        "Emit structured logs and metrics about data source selection, latency, and failures",
+        "Integrate with sql_price_loader, data_providers, and data_loader as the central data entry point"
+      ],
+      "phase_ids": [
+        "phase_data_layer",
+        "phase_execution_broker",
+        "phase_observability_ops"
+      ]
+    },
+    {
+      "rel_path": "common\\matrix_helpers.py",
+      "role": "matrix and linear-algebra utilities for correlations, covariance, and risk calculations",
+      "priority": "medium",
+      "categories": [
+        "research",
+        "backtest",
+        "risk",
+        "utils"
+      ],
+      "tasks": [
+        "Profile and optimize core operations (e.g. covariance, inverses) for large universes",
+        "Ensure numerical stability and robust handling of singular or near-singular matrices",
+        "Provide small, well-documented functions instead of monolithic utilities where possible",
+        "Add targeted tests comparing results to reference implementations (e.g. NumPy/ SciPy)"
+      ],
+      "phase_ids": [
+        "phase_signals_portfolio",
+        "phase_testing_deployment_ai"
+      ]
+    },
+    {
+      "rel_path": "common\\portfolio_loader.py",
+      "role": "loader for live portfolios and equity curves from broker or SqlStore",
+      "priority": "medium",
+      "categories": [
+        "data_ingest",
+        "live_trading",
+        "backtest",
+        "risk"
+      ],
+      "tasks": [
+        "Define clear schemas for positions, PnL, and equity curves aligned with dashboard_models",
+        "Support multiple environments (paper/live) and brokers via the central broker abstraction",
+        "Expose convenient accessors for portfolio snapshots used in risk and monitoring UIs",
+        "Add sanity checks for stale or inconsistent portfolio data"
+      ],
+      "phase_ids": [
+        "phase_data_layer",
+        "phase_execution_broker",
+        "phase_observability_ops"
+      ]
+    },
+    {
+      "rel_path": "common\\price_loader.py",
+      "role": "legacy-compatible price loader wrapper that forwards to the new Sql/market data stack",
+      "priority": "high",
+      "categories": [
+        "data_ingest",
+        "research",
+        "backtest",
+        "live_trading"
+      ],
+      "tasks": [
+        "Implement a thin adapter over market_data_router and sql_price_loader to avoid duplicated logic",
+        "Preserve existing public function signatures while internally delegating to the new stack",
+        "Add environment-aware behaviour (e.g. simulation vs live) driven by config_manager",
+        "Introduce basic caching and validation of returned price series"
+      ],
+      "phase_ids": [
+        "phase_data_layer",
+        "phase_architecture_env",
+        "phase_testing_deployment_ai"
+      ]
+    },
+    {
+      "rel_path": "common\\risk_Helpers.py",
+      "role": "risk helpers providing sizing, limits, and overlay plumbing for macro/pairs engines",
+      "priority": "high",
+      "categories": [
+        "risk",
+        "live_trading",
+        "backtest"
+      ],
+      "tasks": [
+        "Clarify and centralize risk constraints (max leverage, exposure per pair, kill-switches)",
+        "Ensure all helpers are parameterized by environment and strategy profile",
+        "Add deterministic risk calculations and unit tests for key sizing and limit functions",
+        "Integrate with live_profiles and dashboard_models to surface risk state in the UI"
+      ],
+      "phase_ids": [
+        "phase_signals_portfolio",
+        "phase_execution_broker",
+        "phase_observability_ops"
+      ]
+    },
+    {
+      "rel_path": "common\\signal_generator.py",
+      "role": "core hedge-fund-grade signal engine for pairs selection, spreads, and trading signals",
+      "priority": "high",
+      "categories": [
+        "research",
+        "backtest",
+        "live_trading",
+        "risk"
+      ],
+      "tasks": [
+        "Separate signal computation, portfolio construction, and risk overlays into clear submodules",
+        "Parameterize all behaviour via config_manager and live_profiles, not global variables",
+        "Ensure identical logic can run in backtest, paper, and live modes with environment-aware overrides only where required",
+        "Persist generated signals and metadata (inputs, configs, git_rev) via live_pair_store/SqlStore",
+        "Add hooks for explainability (e.g. feature attributions or diagnostics) for top signals"
+      ],
+      "phase_ids": [
+        "phase_signals_portfolio",
+        "phase_data_layer",
+        "phase_testing_deployment_ai"
+      ]
+    },
+    {
+      "rel_path": "common\\sql_price_loader.py",
+      "role": "high-performance price loader from SqlStore/DuckDB for all environments",
+      "priority": "high",
+      "categories": [
+        "data_ingest",
+        "research",
+        "backtest",
+        "live_trading"
+      ],
+      "tasks": [
+        "Define canonical price table schemas (fields, indices) and enforce them on read",
+        "Support intraday vs end-of-day modes with explicit parameters and defaults",
+        "Add robust gap detection, anomaly flags, and data-quality scores per time series",
+        "Optimize queries for large universes and integrate with market_data_router",
+        "Expose replay/simulation capabilities over historical data for live-like testing"
+      ],
+      "phase_ids": [
+        "phase_data_layer",
+        "phase_testing_deployment_ai",
+        "phase_observability_ops"
+      ]
+    },
+    {
+      "rel_path": "common\\stat_tests.py",
+      "role": "statistical tests for time-series characteristics (e.g. stationarity, cointegration)",
+      "priority": "high",
+      "categories": [
+        "research",
+        "backtest",
+        "risk"
+      ],
+      "tasks": [
+        "Standardize test interfaces and return types (p-values, diagnostics) with strong typing",
+        "Ensure tests are numerically robust and deterministic with explicit random seeds where used",
+        "Document recommended defaults for pairs-trading workflows (e.g. Engle–Granger settings)",
+        "Add focused tests that validate behaviour on synthetic stationary and non-stationary series"
+      ],
+      "phase_ids": [
+        "phase_signals_portfolio",
+        "phase_testing_deployment_ai"
+      ]
+    },
+    {
+      "rel_path": "common\\test_helpers.py",
+      "role": "shared helpers for unit and integration tests across modules",
+      "priority": "low",
+      "categories": [
+        "tests",
+        "utils"
+      ],
+      "tasks": [
+        "Provide factories for synthetic time series, portfolios, and configs with deterministic seeds",
+        "Avoid any dependency on live external services; use local fixtures or stubs only",
+        "Document usage patterns for new tests to keep them fast and reliable"
+      ],
+      "phase_ids": [
+        "phase_testing_deployment_ai"
+      ]
+    },
+    {
+      "rel_path": "common\\test_matrix_helpers_and_advanced_metrics.py",
+      "role": "test suite covering matrix_helpers and advanced_metrics functionality",
+      "priority": "medium",
+      "categories": [
+        "tests",
+        "research",
+        "backtest"
+      ],
+      "tasks": [
+        "Expand coverage to critical metrics and edge cases relevant for live risk/signals",
+        "Ensure tests run quickly and deterministically with controlled random seeds",
+        "Align assertions with documented contracts in advanced_metrics and matrix_helpers",
+        "Integrate with the central test_helpers for data generation"
+      ],
+      "phase_ids": [
+        "phase_testing_deployment_ai"
+      ]
+    },
+    {
+      "rel_path": "common\\typing_compat.py",
+      "role": "shared typing aliases and compatibility helpers for consistent type hints",
+      "priority": "low",
+      "categories": [
+        "infra",
+        "utils"
+      ],
+      "tasks": [
+        "Consolidate common type aliases (PriceFrame, SignalDF, ProfileID, etc.) used across modules",
+        "Ensure no runtime-heavy imports occur at module import time",
+        "Document which aliases are stable and safe for external modules to depend on"
+      ],
+      "phase_ids": [
+        "phase_architecture_env"
+      ]
+    },
+    {
+      "rel_path": "common\\ui_helpers.py",
+      "role": "unified Streamlit UI helper layer for layout, styling, and state management",
+      "priority": "high",
+      "categories": [
+        "web_ui",
+        "infra"
+      ],
+      "tasks": [
+        "Provide a namespaced key-generation helper to avoid Streamlit key collisions",
+        "Expose standard components for environment banners, risk status, and action confirmations",
+        "Ensure all widgets persist state via st.session_state in a consistent pattern",
+        "Abstract away repetitive layout code (tabs, cards) used across research and live dashboards",
+        "Add lightweight tests or manual check routines for key UI flows"
+      ],
+      "phase_ids": [
+        "phase_web_app_ux",
+        "phase_architecture_env",
+        "phase_observability_ops"
+      ]
+    },
+    {
+      "rel_path": "common\\utils.py",
+      "role": "general-purpose utilities shared across the system (date/time, paths, small math)",
+      "priority": "medium",
+      "categories": [
+        "utils",
+        "infra"
+      ],
+      "tasks": [
+        "Audit and de-duplicate functions that overlap with helpers, matrix_helpers, or json_safe",
+        "Add type hints and docstrings to all public functions used outside this module",
+        "Ensure no environment-specific logic or configuration is hard-coded here",
+        "Introduce small tests for non-trivial utility functions"
+      ],
+      "phase_ids": [
+        "phase_architecture_env",
+        "phase_testing_deployment_ai"
+      ]
+    },
+    {
+      "rel_path": "common\\zoom_storage.py",
+      "role": "shared Optuna storage and configuration layer for optimization studies",
+      "priority": "medium",
+      "categories": [
+        "infra",
+        "research",
+        "backtest"
+      ],
+      "tasks": [
+        "Standardize Optuna study creation with deterministic seeds and common pruner/sampler configs",
+        "Integrate with SqlStore/DuckDB for persistent study storage and metadata",
+        "Attach config snapshots and git_rev to each study for reproducibility",
+        "Provide helpers to summarize and export study results to dashboards"
+      ],
+      "phase_ids": [
+        "phase_signals_portfolio",
+        "phase_testing_deployment_ai"
+      ]
+    },
+    {
+      "rel_path": "configs\\__init__.py",
+      "role": "namespace package for configuration schemas and presets",
+      "priority": "low",
+      "categories": [
+        "infra"
+      ],
+      "tasks": [
+        "Add a short docstring describing configuration package structure and usage",
+        "Ensure it does not perform any imports with side effects",
+        "Optionally expose stable aliases to core config models defined in config_manager"
+      ],
+      "phase_ids": [
+        "phase_architecture_env"
+      ]
+    },
+    {
+      "rel_path": "core\\__init__.py",
+      "role": "namespace for core application modules (AppContext, analytics, dashboard models)",
+      "priority": "low",
+      "categories": [
+        "infra"
+      ],
+      "tasks": [
+        "Provide a docstring outlining the responsibilities of the core package",
+        "Re-export only key entry-point abstractions (e.g. AppContext) if needed",
+        "Ensure no heavy computation runs at import time"
+      ],
+      "phase_ids": [
+        "phase_architecture_env"
+      ]
+    },
+    {
+      "rel_path": "core\\analysis_helpers.py",
+      "role": "advanced analysis utilities for evaluating pairs, strategies, and risk in research/backtests",
+      "priority": "high",
+      "categories": [
+        "research",
+        "backtest",
+        "risk"
+      ],
+      "tasks": [
+        "Align analysis outputs (metrics, tables) with dashboard_models for easy visualization",
+        "Ensure all functions are pure and deterministic given their inputs",
+        "Factor out shared code with advanced_metrics and analytics to avoid duplication",
+        "Add support for environment-aware analysis (e.g. paper vs live history windows)",
+        "Introduce tests for key analysis pipelines using synthetic data"
+      ],
+      "phase_ids": [
+        "phase_signals_portfolio",
+        "phase_testing_deployment_ai"
+      ]
+    },
+    {
+      "rel_path": "core\\analytics.py",
+      "role": "analytics and reporting layer for pairs trading optimization and performance tracking",
+      "priority": "high",
+      "categories": [
+        "research",
+        "backtest",
+        "web_ui"
+      ],
+      "tasks": [
+        "Provide high-level reporting functions consumed by Streamlit dashboards and agents",
+        "Integrate with SqlStore to read/write analytics summaries with explicit schemas",
+        "Ensure metrics are consistent across research, backtest, and live equity curves",
+        "Expose configuration-driven report generation (e.g. top-N pairs, risk metrics)",
+        "Add tests or notebook-style validations for core analytics flows"
+      ],
+      "phase_ids": [
+        "phase_signals_portfolio",
+        "phase_web_app_ux",
+        "phase_testing_deployment_ai"
+      ]
+    },
+    {
+      "rel_path": "core\\anomaly_detection.py",
+      "role": "anomaly detection engine for data, signals, and portfolio behaviour",
+      "priority": "high",
+      "categories": [
+        "risk",
+        "research",
+        "backtest",
+        "infra"
+      ],
+      "tasks": [
+        "Define clear anomaly types (data gaps, outliers, regime breaks, execution issues) with structured outputs",
+        "Integrate anomaly alerts into observability dashboards and logs",
+        "Ensure algorithms run deterministically and are configurable via config_manager",
+        "Provide hooks to tag and persist anomalies in SqlStore for later analysis",
+        "Add tests on synthetic anomalies to validate detection quality and false-positive rates"
+      ],
+      "phase_ids": [
+        "phase_observability_ops",
+        "phase_data_layer",
+        "phase_testing_deployment_ai"
+      ]
+    },
+    {
+      "rel_path": "core\\app_context.py",
+      "role": "central application context wiring together configs, SqlStore, brokers, risk engine, and UI",
+      "priority": "high",
+      "categories": [
+        "infra",
+        "live_trading",
+        "research",
+        "backtest",
+        "web_ui",
+        "risk"
+      ],
+      "tasks": [
+        "Formalize AppContext as the single entry point for environment/profile selection and dependency wiring",
+        "Integrate config_manager, SqlStore connections, broker router, and risk engine behind typed properties",
+        "Ensure context supports dev/research/paper/live modes with explicit, inspectable state",
+        "Add lightweight health-check methods for core subsystems (data, broker, risk, web)",
+        "Minimize global state and side effects; make context construction deterministic and testable",
+        "Document usage patterns for Streamlit apps, agents, and CLI tools to share this context"
+      ],
+      "phase_ids": [
+        "phase_architecture_env",
+        "phase_execution_broker",
+        "phase_observability_ops",
+        "phase_testing_deployment_ai"
+      ]
+    },
+    {
+      "rel_path": "core\\clustering.py",
+      "role": "clustering utilities for pair universe curation and strategy segmentation",
+      "priority": "medium",
+      "categories": [
+        "research",
+        "backtest"
+      ],
+      "tasks": [
+        "Standardize inputs/outputs (feature matrices, cluster labels) for downstream use in signal_generator",
+        "Ensure clustering is reproducible via fixed seeds and deterministic algorithms where possible",
+        "Expose configuration for clustering schemes via config_manager",
+        "Add tests verifying basic clustering behaviour on toy data"
+      ],
+      "phase_ids": [
+        "phase_signals_portfolio",
+        "phase_testing_deployment_ai"
+      ]
+    },
+    {
+      "rel_path": "core\\dashboard_models.py",
+      "role": "data models powering dashboards and web UIs (KPIs, tables, health views)",
+      "priority": "high",
+      "categories": [
+        "web_ui",
+        "infra",
+        "live_trading",
+        "research",
+        "risk"
+      ],
+      "tasks": [
+        "Define Pydantic models for dashboard payloads (pairs, portfolios, risk state, health summaries)",
+        "Ensure models encode environment, timestamps, and run identifiers for auditability",
+        "Align schemas with live_pair_store, portfolio_loader, and analytics outputs",
+        "Provide serialization helpers for Streamlit and any future API endpoints",
+        "Add validation tests to catch breaking schema changes early"
+      ],
+      "phase_ids": [
+        "phase_web_app_ux",
+        "phase_observability_ops",
+        "phase_architecture_env"
+      ]
+    },
+    {
+      "rel_path": "core/dashboard_service.py",
+      "role": "Orchestrator for dashboards and views over research, backtest, and live trading state using shared services.",
+      "priority": "high",
+      "categories": [
+        "web_ui",
+        "api",
+        "research",
+        "backtest",
+        "live_trading",
+        "infra"
+      ],
+      "tasks": [
+        "Unify dashboard endpoints for research, backtest, and live views using AppContext profiles",
+        "Refactor to separate data retrieval from UI rendering, returning pure data models",
+        "Integrate SqlStore, signals_engine, and risk_engine to provide coherent state panels",
+        "Add explicit environment and profile indicators to all views and API methods",
+        "Expose health, data freshness, and risk summary widgets for phase_observability_ops"
+      ],
+      "phase_ids": [
+        "phase_architecture_env",
+        "phase_web_app_ux",
+        "phase_observability_ops"
+      ]
+    },
+    {
+      "rel_path": "core/data_quality.py",
+      "role": "Central data quality engine scoring and monitoring market and macro data across the system.",
+      "priority": "high",
+      "categories": [
+        "data_ingest",
+        "infra",
+        "research",
+        "backtest",
+        "live_trading"
+      ],
+      "tasks": [
+        "Define canonical data quality metrics and scoring for prices, volumes, and macro series",
+        "Integrate with SqlStore to persist data quality snapshots per symbol, timeframe, and environment",
+        "Implement gap/anomaly detection hooks for ib_data_ingestor and yf_loader",
+        "Expose data quality summaries to dashboard_service and risk_engine",
+        "Make thresholds and remediation policies configurable via params and Pydantic models"
+      ],
+      "phase_ids": [
+        "phase_data_layer",
+        "phase_observability_ops",
+        "phase_testing_deployment_ai"
+      ]
+    },
+    {
+      "rel_path": "core/distributions.py",
+      "role": "Central Optuna distribution and search-space factory for optimization pipelines.",
+      "priority": "medium",
+      "categories": [
+        "infra",
+        "research",
+        "backtest",
+        "utils"
+      ],
+      "tasks": [
+        "Standardize distribution creation using ranges and params as single sources of truth",
+        "Ensure deterministic, seeded behavior for all stochastic distributions",
+        "Validate requested ranges and raise structured exceptions for invalid configs",
+        "Expose helper functions used by optimizer, full_parameter_optimization, and meta_optimization"
+      ],
+      "phase_ids": [
+        "phase_architecture_env",
+        "phase_signals_portfolio",
+        "phase_testing_deployment_ai"
+      ]
+    },
+    {
+      "rel_path": "core/exceptions.py",
+      "role": "Shared exception hierarchy for data, optimization, risk, and execution components.",
+      "priority": "medium",
+      "categories": [
+        "infra",
+        "utils"
+      ],
+      "tasks": [
+        "Define clear base exception classes for data, config, risk, optimization, and execution domains",
+        "Map external library and broker errors into structured internal exceptions",
+        "Ensure all core modules import and use these exceptions instead of ad-hoc ones",
+        "Attach environment, profile, and run_id metadata to critical exceptions where possible"
+      ],
+      "phase_ids": [
+        "phase_architecture_env",
+        "phase_observability_ops"
+      ]
+    },
+    {
+      "rel_path": "core/fair_value_advisor.py",
+      "role": "High-level advisor translating fair value outputs into trade recommendations and commentary.",
+      "priority": "medium",
+      "categories": [
+        "research",
+        "backtest",
+        "live_trading",
+        "risk"
+      ],
+      "tasks": [
+        "Normalize advisor interface to consume fair_value_engine outputs and market state",
+        "Log rationale and key drivers behind each recommendation for explainability",
+        "Integrate advisor outputs with signals_engine as one input source",
+        "Persist advisor decisions and configs in SqlStore for audit and replay"
+      ],
+      "phase_ids": [
+        "phase_signals_portfolio",
+        "phase_observability_ops"
+      ]
+    },
+    {
+      "rel_path": "core/fair_value_config.py",
+      "role": "Configuration layer for the fair value engine, with environment-aware profiles.",
+      "priority": "medium",
+      "categories": [
+        "infra",
+        "research",
+        "live_trading"
+      ],
+      "tasks": [
+        "Refactor configs into Pydantic models with validation and helpful error messages",
+        "Centralize fair value defaults and parameter ranges referencing params and ranges",
+        "Support explicit env/profile overrides for research, paper, and live modes",
+        "Add config snapshot helpers for storing fair value settings alongside runs"
+      ],
+      "phase_ids": [
+        "phase_architecture_env",
+        "phase_signals_portfolio"
+      ]
+    },
+    {
+      "rel_path": "core/fair_value_engine.py",
+      "role": "Core fair value computation engine for pairs, feeding signals and risk overlays.",
+      "priority": "high",
+      "categories": [
+        "research",
+        "backtest",
+        "live_trading",
+        "risk"
+      ],
+      "tasks": [
+        "Ensure deterministic fair value calculations given inputs and config snapshots",
+        "Integrate with SqlStore for reading prices and persisting fair value results",
+        "Align parameterization with fair_value_config, params, and ranges",
+        "Expose explainability hooks (decomposition of drivers, sensitivities) for dashboards",
+        "Provide a unified API for use by signals_engine, fair_value_advisor, and backtests"
+      ],
+      "phase_ids": [
+        "phase_signals_portfolio",
+        "phase_data_layer",
+        "phase_testing_deployment_ai"
+      ]
+    },
+    {
+      "rel_path": "core/fair_value_optimizer_v2.py",
+      "role": "Fair value specific optimization routines using Optuna and shared distributions.",
+      "priority": "medium",
+      "categories": [
+        "research",
+        "backtest",
+        "infra"
+      ],
+      "tasks": [
+        "Refactor to use core/distributions for all search spaces and ranges",
+        "Make study seeding and sampler configuration deterministic and profile-driven",
+        "Persist optimization results and configs in SqlStore for later analysis",
+        "Align objective metrics with metrics utilities and optimization_backtester outputs"
+      ],
+      "phase_ids": [
+        "phase_signals_portfolio",
+        "phase_testing_deployment_ai"
+      ]
+    },
+    {
+      "rel_path": "core/feature_selection.py",
+      "role": "Feature selection utilities for ML-based signal and ranking models.",
+      "priority": "medium",
+      "categories": [
+        "research",
+        "backtest",
+        "utils"
+      ],
+      "tasks": [
+        "Ensure feature selection routines are stateless, typed, and reproducible with seeded randomness",
+        "Integrate with ml_analysis for model-based importance and selection",
+        "Persist selected feature sets and metadata to SqlStore for reproducibility",
+        "Expose simple APIs for optimizer and meta_optimization to reuse"
+      ],
+      "phase_ids": [
+        "phase_signals_portfolio",
+        "phase_testing_deployment_ai"
+      ]
+    },
+    {
+      "rel_path": "core/full_parameter_optimization.py",
+      "role": "End-to-end optimization orchestration across signals, risk, and execution parameters.",
+      "priority": "high",
+      "categories": [
+        "research",
+        "backtest",
+        "infra"
+      ],
+      "tasks": [
+        "Unify optimization workflow around AppContext, SqlStore, and shared distributions",
+        "Include risk_engine constraints and capital usage in optimization objectives",
+        "Support multi-env profiles (research, paper, live-sim) with consistent configs",
+        "Persist all results, configs, and git_rev snapshots for audit and replay",
+        "Add fast smoke-test path for CI-style validation of key optimization flows"
+      ],
+      "phase_ids": [
+        "phase_signals_portfolio",
+        "phase_testing_deployment_ai"
+      ]
+    },
+    {
+      "rel_path": "core/fv_extensions.py",
+      "role": "Auxiliary helpers and extensions for the fair value engine and advisor.",
+      "priority": "medium",
+      "categories": [
+        "research",
+        "backtest",
+        "utils"
+      ],
+      "tasks": [
+        "Consolidate fair value helper functions and remove duplicated logic",
+        "Add clear docstrings and type hints for all public helpers",
+        "Guard experimental or heavy features behind explicit feature flags",
+        "Ensure extensions do not bypass core fair_value_engine interfaces"
+      ],
+      "phase_ids": [
+        "phase_signals_portfolio",
+        "phase_testing_deployment_ai"
+      ]
+    },
+    {
+      "rel_path": "core/ib_data_ingestor.py",
+      "role": "Robust historical and intraday data ingestor from IBKR into the central SqlStore.",
+      "priority": "high",
+      "categories": [
+        "data_ingest",
+        "infra",
+        "research",
+        "backtest",
+        "live_trading"
+      ],
+      "tasks": [
+        "Implement resilient IBKR data fetching with retries, backoff, and rate limiting",
+        "Standardize schemas and write paths into SqlStore with environment tagging",
+        "Enforce history length, intraday vs EOD policies, and retention rules",
+        "Integrate with data_quality for gap, anomaly, and stale-data detection",
+        "Add a simulation/replay mode that reads from stored data instead of IBKR live"
+      ],
+      "phase_ids": [
+        "phase_data_layer",
+        "phase_execution_broker",
+        "phase_observability_ops"
+      ]
+    },
+    {
+      "rel_path": "core/ib_order_router.py",
+      "role": "Central IBKR order routing and execution safety layer for paper and live trading.",
+      "priority": "high",
+      "categories": [
+        "live_trading",
+        "risk",
+        "infra"
+      ],
+      "tasks": [
+        "Separate desired target positions from actual orders, fills, and pending state",
+        "Implement idempotent order submission with retries, backoff, and circuit breakers",
+        "Integrate with risk_engine for pre-trade checks and exposure limits",
+        "Add explicit paper vs live configuration profiles and safety guards",
+        "Persist all order intents, confirmations, and rejections to SqlStore for audit"
+      ],
+      "phase_ids": [
+        "phase_execution_broker",
+        "phase_observability_ops",
+        "phase_architecture_env"
+      ]
+    },
+    {
+      "rel_path": "core/index_fundamentals.py",
+      "role": "Fundamental data engine for indices/ETFs used in macro and pairs analysis.",
+      "priority": "medium",
+      "categories": [
+        "data_ingest",
+        "research",
+        "backtest",
+        "risk"
+      ],
+      "tasks": [
+        "Align fundamental data schemas and keys with SqlStore conventions",
+        "Implement refresh/TTL policies and backfill logic for missing fundamentals",
+        "Expose factorized fundamentals (value, quality, growth) to signals_engine and pair_ranking",
+        "Persist ingestion metadata and quality scores for audit and diagnostics"
+      ],
+      "phase_ids": [
+        "phase_data_layer",
+        "phase_signals_portfolio"
+      ]
+    },
+    {
+      "rel_path": "core/macro_data.py",
+      "role": "Macro time series ingestion and caching layer feeding macro_engine and features.",
+      "priority": "medium",
+      "categories": [
+        "data_ingest",
+        "infra",
+        "research"
+      ],
+      "tasks": [
+        "Standardize macro series identifiers, frequencies, and schema for SqlStore",
+        "Implement cache/TTL adapters with clear invalidation rules",
+        "Integrate with external macro providers and handle retries/failover",
+        "Record missing, revised, or delayed macro data events for diagnostics"
+      ],
+      "phase_ids": [
+        "phase_data_layer",
+        "phase_observability_ops"
+      ]
+    },
+    {
+      "rel_path": "core/macro_engine.py",
+      "role": "Macro profile engine computing macro overlays and regimes for pairs trading.",
+      "priority": "high",
+      "categories": [
+        "research",
+        "backtest",
+        "live_trading",
+        "risk"
+      ],
+      "tasks": [
+        "Define a macro profile model combining macro_data, regimes, and sensitivities",
+        "Integrate macro overlays with signals_engine and risk_engine as risk modifiers",
+        "Support backtest and live evaluation of macro-aware strategies with shared configs",
+        "Persist macro overlay states and decisions into SqlStore for replay and explainability",
+        "Expose macro regime and overlay summaries to dashboard_service"
+      ],
+      "phase_ids": [
+        "phase_signals_portfolio",
+        "phase_observability_ops",
+        "phase_testing_deployment_ai"
+      ]
+    },
+    {
+      "rel_path": "core/macro_features.py",
+      "role": "Feature construction utilities for macro-driven factors used in signals and risk.",
+      "priority": "medium",
+      "categories": [
+        "research",
+        "backtest",
+        "risk"
+      ],
+      "tasks": [
+        "Define a canonical set of macro features derived from macro_data and index_fundamentals",
+        "Ensure feature computation is deterministic and aligned across backtest and live",
+        "Expose configurable feature sets via params and fair_value_config where relevant",
+        "Persist macro feature metadata and transformations for traceability"
+      ],
+      "phase_ids": [
+        "phase_signals_portfolio",
+        "phase_testing_deployment_ai"
+      ]
+    },
+    {
+      "rel_path": "core/meta_optimization.py",
+      "role": "Meta-optimization utilities for tuning optimization processes and hyper-parameters.",
+      "priority": "medium",
+      "categories": [
+        "research",
+        "backtest",
+        "infra"
+      ],
+      "tasks": [
+        "Leverage central distributions and ranges for meta-parameter search",
+        "Define meta-objectives (robustness, stability across regimes) using metrics utilities",
+        "Ensure deterministic seeding and logging of all meta-optimization runs",
+        "Store meta-optimization results and configs in SqlStore for later analysis"
+      ],
+      "phase_ids": [
+        "phase_signals_portfolio",
+        "phase_testing_deployment_ai"
+      ]
+    },
+    {
+      "rel_path": "core/meta_optimizer.py",
+      "role": "Orchestrator for running multiple optimizations and aggregating their results.",
+      "priority": "medium",
+      "categories": [
+        "research",
+        "backtest",
+        "infra"
+      ],
+      "tasks": [
+        "Coordinate multiple optimizer/full_parameter_optimization runs under AppContext",
+        "Support profile-based meta-runs (different universes, regimes, risk settings)",
+        "Aggregate and persist summary statistics and best configurations into SqlStore",
+        "Expose a simple interface for agents or CLI tools to trigger meta-optimization jobs"
+      ],
+      "phase_ids": [
+        "phase_signals_portfolio",
+        "phase_testing_deployment_ai"
+      ]
+    },
+    {
+      "rel_path": "core/metrics.py",
+      "role": "Shared metrics library for performance, risk, and optimization evaluation.",
+      "priority": "medium",
+      "categories": [
+        "research",
+        "backtest",
+        "risk",
+        "utils"
+      ],
+      "tasks": [
+        "Consolidate performance and risk metric implementations used across backtests and live",
+        "Ensure metric functions are pure, typed, and consistent in sign/scale conventions",
+        "Add advanced risk-adjusted metrics (Sharpe, Sortino, Calmar, drawdowns, tail risk)",
+        "Include simple doctests or unit-style checks for core calculations"
+      ],
+      "phase_ids": [
+        "phase_signals_portfolio",
+        "phase_testing_deployment_ai"
+      ]
+    },
+    {
+      "rel_path": "core/ml_analysis.py",
+      "role": "Machine learning analysis toolkit for pairs selection, signals, and diagnostics.",
+      "priority": "medium",
+      "categories": [
+        "research",
+        "backtest",
+        "utils"
+      ],
+      "tasks": [
+        "Modularize heavy ML routines into smaller, testable functions with clear inputs/outputs",
+        "Integrate SHAP or permutation importance with graceful fallbacks when deps missing",
+        "Enforce reproducible ML experiments via centralized random seeds and config snapshots",
+        "Persist key ML artifacts and analysis outputs into SqlStore for dashboards"
+      ],
+      "phase_ids": [
+        "phase_signals_portfolio",
+        "phase_testing_deployment_ai"
+      ]
+    },
+    {
+      "rel_path": "core/optimization_backtester.py",
+      "role": "Backtesting engine tuned for evaluating optimization candidates under realistic assumptions.",
+      "priority": "high",
+      "categories": [
+        "backtest",
+        "research",
+        "risk"
+      ],
+      "tasks": [
+        "Align backtest flow with signals_engine, risk_engine, and optimizer parameter sets",
+        "Model realistic trading costs, slippage, and execution constraints",
+        "Support walk-forward and rolling-window evaluations with consistent configs",
+        "Persist standardized backtest results (PnL, risk stats, trades) into SqlStore",
+        "Expose summary views consumable by dashboard_service and meta_optimizer"
+      ],
+      "phase_ids": [
+        "phase_signals_portfolio",
+        "phase_testing_deployment_ai"
+      ]
+    },
+    {
+      "rel_path": "core/optimizer.py",
+      "role": "Core pairs-trading optimizer coordinating signals, parameters, and evaluation.",
+      "priority": "high",
+      "categories": [
+        "research",
+        "backtest",
+        "infra"
+      ],
+      "tasks": [
+        "Centralize optimization entrypoints and remove duplicate or legacy flows",
+        "Use ranges and distributions as the single source of parameter search spaces",
+        "Integrate tightly with optimization_backtester for candidate evaluation",
+        "Persist optimization logs, trials, and best configs using SqlStore and json_safe",
+        "Ensure optimizer behavior is deterministic per profile and seed"
+      ],
+      "phase_ids": [
+        "phase_signals_portfolio",
+        "phase_testing_deployment_ai"
+      ]
+    },
+    {
+      "rel_path": "core/pair_ranking.py",
+      "role": "Canonical pair scoring and ranking engine used for universe selection and monitoring.",
+      "priority": "high",
+      "categories": [
+        "research",
+        "backtest",
+        "live_trading",
+        "risk"
+      ],
+      "tasks": [
+        "Define a standard pair score that combines statistical, liquidity, and risk dimensions",
+        "Integrate data_quality, macro_features, and index_fundamentals into ranking inputs",
+        "Persist ranked universes and scores in SqlStore tagged by profile and timestamp",
+        "Expose ranking explainability (top drivers per pair) for dashboards and audits",
+        "Parameterize ranking weights and criteria via params and ranges"
+      ],
+      "phase_ids": [
+        "phase_signals_portfolio",
+        "phase_data_layer"
+      ]
+    },
+    {
+      "rel_path": "core/pair_recommender.py",
+      "role": "Recommendation engine suggesting candidate pairs and parameter presets for research UI.",
+      "priority": "high",
+      "categories": [
+        "research",
+        "web_ui",
+        "api",
+        "backtest"
+      ],
+      "tasks": [
+        "Integrate with pair_ranking and pairs_universe as primary inputs",
+        "Expose a clean API for dashboard_service to request recommendations",
+        "Support filtering by risk profile, sector, liquidity, and environment",
+        "Log and persist recommendation rationales and configs to SqlStore",
+        "Provide hooks to evaluate recommended pairs via optimization_backtester"
+      ],
+      "phase_ids": [
+        "phase_signals_portfolio",
+        "phase_web_app_ux"
+      ]
+    },
+    {
+      "rel_path": "core/pairs_universe.py",
+      "role": "Single source of truth for pairs universes across research, backtest, and live.",
+      "priority": "high",
+      "categories": [
+        "infra",
+        "data_ingest",
+        "research",
+        "backtest",
+        "live_trading",
+        "risk"
+      ],
+      "tasks": [
+        "Define a canonical pairs universe schema compatible with SqlStore and JSON files",
+        "Integrate with SqlStore to persist and version universes across environments",
+        "Support profile-specific universes (dev, research, paper, live) with validation",
+        "Run data_quality checks on universes (liquidity, data availability, symbol validity)",
+        "Track change history and provenance for any universe modification"
+      ],
+      "phase_ids": [
+        "phase_architecture_env",
+        "phase_data_layer",
+        "phase_signals_portfolio"
+      ]
+    },
+    {
+      "rel_path": "core/params.py",
+      "role": "Centralized parameter and profile configuration hub for the pairs-trading system.",
+      "priority": "high",
+      "categories": [
+        "infra",
+        "research",
+        "backtest",
+        "live_trading",
+        "risk"
+      ],
+      "tasks": [
+        "Refactor scattered params into structured Pydantic models keyed by environment/profile",
+        "Link parameter definitions to ranges and defaults used across optimizers and engines",
+        "Support config snapshotting with git_rev and run_id for every major workflow",
+        "Deprecate direct magic numbers elsewhere in favor of params accessors",
+        "Validate parameter compatibility with risk_engine and broker limits"
+      ],
+      "phase_ids": [
+        "phase_architecture_env",
+        "phase_signals_portfolio"
+      ]
+    },
+    {
+      "rel_path": "core/ranges.py",
+      "role": "Advanced parameter range utilities powering optimization and configuration.",
+      "priority": "high",
+      "categories": [
+        "infra",
+        "research",
+        "backtest",
+        "utils"
+      ],
+      "tasks": [
+        "Standardize parameter range definitions for all optimization-relevant knobs",
+        "Integrate tightly with distributions and params as a single source of truth",
+        "Add validation for bounds, step sizes, and log/linear semantics",
+        "Remove any duplicated or unused range definitions across the codebase",
+        "Support config-driven overrides per environment/profile"
+      ],
+      "phase_ids": [
+        "phase_architecture_env",
+        "phase_signals_portfolio",
+        "phase_testing_deployment_ai"
+      ]
+    },
+    {
+      "rel_path": "core/refactor_load_price_data.py",
+      "role": "One-off refactor tool to migrate legacy price-loading code to the new data layer.",
+      "priority": "low",
+      "categories": [
+        "utils",
+        "other"
+      ],
+      "tasks": [
+        "Restrict usage to controlled migration workflows and document limitations",
+        "Add safety checks and a dry-run mode before modifying any target files"
+      ],
+      "phase_ids": [
+        "phase_architecture_env",
+        "phase_testing_deployment_ai"
+      ]
+    },
+    {
+      "rel_path": "core/refactor_streamlit_query_params.py",
+      "role": "Automated migration helper for updating deprecated Streamlit query params APIs.",
+      "priority": "low",
+      "categories": [
+        "utils",
+        "web_ui"
+      ],
+      "tasks": [
+        "Implement idempotent transformation from st.experimental_get_query_params to st.query_params",
+        "Add minimal tests or checks ensuring no behavioral changes in existing tabs"
+      ],
+      "phase_ids": [
+        "phase_web_app_ux",
+        "phase_testing_deployment_ai"
+      ]
+    },
+    {
+      "rel_path": "core/refactor_streamlit_width.py",
+      "role": "Migration helper for updating Streamlit width-related arguments across the UI.",
+      "priority": "low",
+      "categories": [
+        "utils",
+        "web_ui"
+      ],
+      "tasks": [
+        "Automate safe replacement of use_container_width with the new width API",
+        "Provide a dry-run report mode to preview changes before applying them"
+      ],
+      "phase_ids": [
+        "phase_web_app_ux",
+        "phase_testing_deployment_ai"
+      ]
+    },
+    {
+      "rel_path": "core/regime_classifier.py",
+      "role": "Regime detection module classifying volatility and market regimes for signals and risk.",
+      "priority": "medium",
+      "categories": [
+        "research",
+        "backtest",
+        "risk"
+      ],
+      "tasks": [
+        "Define a clean interface for regime classification based on price and macro inputs",
+        "Implement an initial volatility-based regime classifier with deterministic behavior",
+        "Integrate regime outputs into signals_engine and macro_engine as optional inputs",
+        "Persist regime labels and configs into SqlStore for backtests and live monitoring"
+      ],
+      "phase_ids": [
+        "phase_signals_portfolio",
+        "phase_testing_deployment_ai"
+      ]
+    },
+    {
+      "rel_path": "core/risk_engine.py",
+      "role": "Central risk engine enforcing limits, exposures, and kill-switches across the fund.",
+      "priority": "high",
+      "categories": [
+        "risk",
+        "live_trading",
+        "backtest",
+        "infra"
+      ],
+      "tasks": [
+        "Define standard risk model interfaces for position, portfolio, and exposure checks",
+        "Unify risk rules and limits across research, paper, and live with explicit overrides",
+        "Integrate with SqlStore and broker router to monitor real positions and orders",
+        "Implement kill-switches, max drawdown gates, and portfolio-level caps",
+        "Log and persist all risk decisions and violations with environment metadata",
+        "Support simulation and replay modes for testing new risk policies"
+      ],
+      "phase_ids": [
+        "phase_signals_portfolio",
+        "phase_execution_broker",
+        "phase_observability_ops"
+      ]
+    },
+    {
+      "rel_path": "core/risk_parity.py",
+      "role": "Risk-parity utilities for portfolio sizing and allocation within pairs strategies.",
+      "priority": "high",
+      "categories": [
+        "risk",
+        "research",
+        "backtest",
+        "live_trading"
+      ],
+      "tasks": [
+        "Implement robust risk-parity sizing algorithms compatible with pairs portfolios",
+        "Expose a clear API used by signals_engine and portfolio constructors",
+        "Support leverage, concentration, and sector exposure constraints",
+        "Add validation and unit-style tests on toy portfolios to verify behavior",
+        "Coordinate with risk_engine to avoid conflicting sizing and limits"
+      ],
+      "phase_ids": [
+        "phase_signals_portfolio",
+        "phase_testing_deployment_ai"
+      ]
+    },
+    {
+      "rel_path": "core/signals_engine.py",
+      "role": "High-level signals engine generating pair signals and target portfolios from data and configs.",
+      "priority": "high",
+      "categories": [
+        "research",
+        "backtest",
+        "live_trading",
+        "risk"
+      ],
+      "tasks": [
+        "Unify signal generation pipeline (data → features → scores → targets) under a single interface",
+        "Decouple signal computation from execution, outputting explicit target positions and metadata",
+        "Integrate fair_value_engine, macro_engine, regime_classifier, and risk_parity as pluggable components",
+        "Ensure deterministic outputs given inputs, environment, and config snapshot",
+        "Persist signals, targets, and inputs to SqlStore for full traceability across modes",
+        "Support both simulation and live modes using the same core logic with profile-based switches"
+      ],
+      "phase_ids": [
+        "phase_signals_portfolio",
+        "phase_execution_broker",
+        "phase_testing_deployment_ai"
+      ]
+    },
+    {
+      "rel_path": "core/sql_store.py",
+      "role": "Central SQL persistence layer for prices, signals, risk, experiments, and metadata.",
+      "priority": "high",
+      "categories": [
+        "infra",
+        "data_ingest",
+        "research",
+        "backtest",
+        "live_trading"
+      ],
+      "tasks": [
+        "Finalize schema definitions and typed accessors for all major entities (prices, signals, risk, orders, configs)",
+        "Implement schema versioning and lightweight migrations with clear upgrade paths",
+        "Add health checks, connection management, and error handling for all supported backends",
+        "Optimize indices and partitioning for common access patterns and time-series queries",
+        "Tag all records with environment, profile, run_id, and git_rev where applicable",
+        "Provide simple helper APIs used by dashboard_service, optimizers, and risk_engine"
+      ],
+      "phase_ids": [
+        "phase_architecture_env",
+        "phase_data_layer",
+        "phase_observability_ops"
+      ]
+    },
+    {
+      "rel_path": "core/tab_comparison_matrices.py",
+      "role": "UI and computation layer for comparison matrices (correlations, metrics) across pairs.",
+      "priority": "medium",
+      "categories": [
+        "web_ui",
+        "research",
+        "backtest"
+      ],
+      "tasks": [
+        "Refactor matrix computations into pure functions reusable outside Streamlit contexts",
+        "Ensure metrics used here are sourced from advanced_metrics and metrics utilities",
+        "Integrate pairs_universe and SqlStore as data sources instead of ad-hoc loaders",
+        "Add basic caching and performance safeguards for large universes"
+      ],
+      "phase_ids": [
+        "phase_web_app_ux",
+        "phase_signals_portfolio"
+      ]
+    },
+    {
+      "rel_path": "data_loader.py",
+      "role": "Thin adapter bridging legacy callers to common.data_loader and the SqlStore-based data layer.",
+      "priority": "medium",
+      "categories": [
+        "data_ingest",
+        "infra",
+        "research",
+        "backtest"
+      ],
+      "tasks": [
+        "Keep the module as a stable facade delegating to common.data_loader and sql_price_loader",
+        "Ensure all paths go through AppContext and SqlStore where possible for consistency",
+        "Add deprecation warnings or logs for legacy-only usage patterns",
+        "Standardize default history length and frequency arguments across callers"
+      ],
+      "phase_ids": [
+        "phase_data_layer",
+        "phase_architecture_env"
+      ]
+    },
+    {
+      "rel_path": "datafeed/ib_connection.py",
+      "role": "Shared IBKR connection manager reused by data ingestion and order routing.",
+      "priority": "high",
+      "categories": [
+        "infra",
+        "data_ingest",
+        "live_trading"
+      ],
+      "tasks": [
+        "Centralize IBKR client creation, reconnect logic, and error handling",
+        "Load credentials and connection settings from secure env/profile configs",
+        "Expose health-check and status APIs for dashboard_service and ops tooling",
+        "Share connection safely between ib_data_ingestor and ib_order_router with clear lifecycle",
+        "Add explicit awareness of paper vs live endpoints and safety limits"
+      ],
+      "phase_ids": [
+        "phase_execution_broker",
+        "phase_data_layer",
+        "phase_observability_ops"
+      ]
+    },
+    {
+      "rel_path": "datafeed/yf_loader.py",
+      "role": "Lightweight Yahoo Finance-based loader for research and testing data.",
+      "priority": "medium",
+      "categories": [
+        "data_ingest",
+        "research",
+        "backtest"
+      ],
+      "tasks": [
+        "Wrap yfinance calls with retry, backoff, and simple rate-limiting safeguards",
+        "Normalize outputs into the same schema used by SqlStore price tables",
+        "Integrate basic data_quality checks for gaps and anomalies",
+        "Support optional local caching for offline tests and faster research iterations"
+      ],
+      "phase_ids": [
+        "phase_data_layer",
+        "phase_testing_deployment_ai"
+      ]
+    },
+    {
+      "rel_path": "dedupe_opt_tab.py",
+      "role": "One-off maintenance tool to deduplicate optimization tab code and reduce dashboard bloat",
+      "priority": "low",
+      "categories": [
+        "infra",
+        "utils"
+      ],
+      "tasks": [
+        "Refactor script into a small, idempotent CLI utility using the shared AppContext logging",
+        "Document usage and mark as maintenance-only, ensuring it is excluded from main app entry points",
+        "Add a minimal test or dry-run mode to verify changes without overwriting files"
+      ],
+      "phase_ids": [
+        "phase_architecture_env",
+        "phase_testing_deployment_ai"
+      ]
+    },
+    {
+      "rel_path": "fix_imports.py",
+      "role": "Temporary refactoring helper to normalize imports across the project",
+      "priority": "low",
+      "categories": [
+        "infra",
+        "utils"
+      ],
+      "tasks": [
+        "Limit script scope to a deterministic, dry-runable import normalization pass with backups",
+        "Update it to respect the current package layout and avoid touching generated or backup files",
+        "Mark script as dev-only and wire basic logging for traceability when used"
+      ],
+      "phase_ids": [
+        "phase_architecture_env",
+        "phase_testing_deployment_ai"
+      ]
+    },
+    {
+      "rel_path": "gpt_upgrade_agent.py",
+      "role": "Thin wrapper for AI-based upgrade agent focused on per-file refactors and governance",
+      "priority": "medium",
+      "categories": [
+        "infra",
+        "other"
+      ],
+      "tasks": [
+        "Implement a minimal UpgradeAgent interface that delegates to hedge_fund_upgrade_agent primitives",
+        "Wire environment-aware safety guards so the agent never touches live-trading configs directly",
+        "Add configuration hooks for rate-limiting, logging, and dry-run modes",
+        "Ensure deterministic behavior by seeding any stochastic components through central config"
+      ],
+      "phase_ids": [
+        "phase_architecture_env",
+        "phase_testing_deployment_ai"
+      ]
+    },
+    {
+      "rel_path": "health_check_full_system.py",
+      "role": "End-to-end system health checker covering data, risk, broker, and web entrypoints",
+      "priority": "high",
+      "categories": [
+        "infra",
+        "tests",
+        "risk"
+      ],
+      "tasks": [
+        "Refactor checks into composable functions (data, broker, risk, dashboards, APIs) with clear statuses",
+        "Integrate with AppContext and SqlStore to validate data freshness, schemas, and history length",
+        "Add broker and paper/live profile connectivity checks with safe timeouts and retries",
+        "Emit structured health results (JSON) suitable for dashboards and external monitoring tools",
+        "Introduce a fast smoke-test mode for CI and a deeper diagnostic mode for ops"
+      ],
+      "phase_ids": [
+        "phase_architecture_env",
+        "phase_observability_ops",
+        "phase_testing_deployment_ai"
+      ]
+    },
+    {
+      "rel_path": "hedge_fund_upgrade_agent.py",
+      "role": "Central coordinator for stepwise, phase-based upgrades of the codebase toward hedge-fund-grade standards.",
+      "priority": "medium",
+      "categories": [
+        "infra",
+        "other"
+      ],
+      "tasks": [
+        "Model upgrade phases and per-file tasks as explicit data structures tied to the global phase ids.",
+        "Add deterministic execution order and idempotency checks so rerunning the agent does not corrupt files.",
+        "Introduce dry-run and snapshot modes that back up modified files and configs before applying changes.",
+        "Integrate with health_check_full_system.py to validate the system after each major upgrade phase."
+      ],
+      "phase_ids": [
+        "phase_architecture_env",
+        "phase_observability_ops"
+      ]
+    },
+    {
+      "rel_path": "quick_test.py",
+      "role": "Minimal developer smoke-test script for critical imports and basic flows",
+      "priority": "low",
+      "categories": [
+        "tests",
+        "utils"
+      ],
+      "tasks": [
+        "Replace ad-hoc imports with a deterministic, fast smoke-test of AppContext and core services",
+        "Ensure script can run from project root and respect active environment/profile settings",
+        "Mark as dev-only and integrate into a basic local pre-commit or CI check"
+      ],
+      "phase_ids": [
+        "phase_architecture_env",
+        "phase_testing_deployment_ai"
+      ]
+    },
+    {
+      "rel_path": "root\\__init__.py",
+      "role": "Root package initializer wiring environment profiles, shared context, and high-level entrypoints",
+      "priority": "high",
+      "categories": [
+        "infra",
+        "web_ui"
+      ],
+      "tasks": [
+        "Expose a small, typed API to create an AppContext based on profile (dev/research/paper/live)",
+        "Remove legacy globals and ensure environment is explicit and inspectable from all root modules",
+        "Centralize project-wide constants (e.g., version, git_rev lookup) behind typed accessors",
+        "Document the root package contract for dashboards, APIs, and scripts"
+      ],
+      "phase_ids": [
+        "phase_architecture_env",
+        "phase_web_app_ux"
+      ]
+    },
+    {
+      "rel_path": "root\\analysis.py",
+      "role": "Core research and fund-level analysis engine for ranking pairs, portfolios, and regimes",
+      "priority": "high",
+      "categories": [
+        "research",
+        "backtest",
+        "risk"
+      ],
+      "tasks": [
+        "Refactor heavy functions into smaller, typed units that consume SqlStore/price loaders instead of ad-hoc data",
+        "Align signal and ranking computation with the shared signal_generator and risk overlays",
+        "Persist analysis outputs (rankings, metrics, configs, git_rev) into a central store for traceability",
+        "Ensure all randomness (e.g., sampling, clustering) is seeded via central config for reproducibility",
+        "Add hooks for regime-aware analytics and integration with dashboard views"
+      ],
+      "phase_ids": [
+        "phase_data_layer",
+        "phase_signals_portfolio",
+        "phase_testing_deployment_ai",
+        "phase_architecture_env"
+      ]
+    },
+    {
+      "rel_path": "root\\api_server.py",
+      "role": "FastAPI-based fair-value and analytics HTTP API for internal tools and agents",
+      "priority": "high",
+      "categories": [
+        "api",
+        "research",
+        "live_trading"
+      ],
+      "tasks": [
+        "Refactor to instantiate a single AppContext per process with explicit profile selection",
+        "Standardize request/response models using Pydantic v2 with clear schemas and validation",
+        "Route price and signal requests through the shared data and signal engines with consistent parameters",
+        "Add observability: structured logging, request timing, and health endpoints for each dependency",
+        "Ensure rate limits, auth hooks, and explicit separation between research and live endpoints"
+      ],
+      "phase_ids": [
+        "phase_architecture_env",
+        "phase_signals_portfolio",
+        "phase_execution_broker",
+        "phase_web_app_ux",
+        "phase_observability_ops",
+        "phase_testing_deployment_ai"
+      ]
+    },
+    {
+      "rel_path": "root\\backtest.py",
+      "role": "High-level backtesting orchestrator for pairs strategies across universes and regimes",
+      "priority": "high",
+      "categories": [
+        "backtest",
+        "research",
+        "risk"
+      ],
+      "tasks": [
+        "Unify backtest configuration into typed models shared with live trading and paper profiles",
+        "Ensure data access goes through SqlStore/price loader with deterministic seeds and exact history rules",
+        "Delegate strategy logic to reusable components also used by live execution (signals, sizing, risk overlays)",
+        "Persist backtest runs, parameters, and performance metrics for later comparison and replay",
+        "Provide hooks for simulation modes that mimic live-execution constraints and slippage"
+      ],
+      "phase_ids": [
+        "phase_data_layer",
+        "phase_signals_portfolio",
+        "phase_execution_broker",
+        "phase_testing_deployment_ai",
+        "phase_architecture_env"
+      ]
+    },
+    {
+      "rel_path": "root\\backtest_logic.py",
+      "role": "Core backtest implementation details and shared utilities used by root.backtest",
+      "priority": "high",
+      "categories": [
+        "backtest",
+        "research"
+      ],
+      "tasks": [
+        "Isolate pure strategy, PnL, and risk computations from I/O for easier reuse and testing",
+        "Align order/position representation with the live execution engine’s data structures",
+        "Support regime-aware and rolling-window backtests consistent with live signal parameters",
+        "Add unit-style tests or doctests for key math functions (returns, drawdowns, risk metrics)"
+      ],
+      "phase_ids": [
+        "phase_signals_portfolio",
+        "phase_data_layer",
+        "phase_testing_deployment_ai"
+      ]
+    },
+    {
+      "rel_path": "root\\config_tab.py",
+      "role": "Streamlit configuration tab for environment, profiles, and global system settings",
+      "priority": "high",
+      "categories": [
+        "web_ui",
+        "infra"
+      ],
+      "tasks": [
+        "Refactor UI to read/write a central Pydantic-based settings model via AppContext",
+        "Make environment/profile selection explicit, clearly labeled, and persisted in session_state",
+        "Guard dangerous options (live trading, leverage caps) behind confirmations and clear warnings",
+        "Add validation feedback for misconfigured paths, brokers, or data sources visible in the UI"
+      ],
+      "phase_ids": [
+        "phase_architecture_env",
+        "phase_web_app_ux"
+      ]
+    },
+    {
+      "rel_path": "root\\dashboard.backup_mojibake.py",
+      "role": "Legacy backup of an older dashboard implementation kept only for reference",
+      "priority": "low",
+      "categories": [
+        "other"
+      ],
+      "tasks": [
+        "Mark file as deprecated/backup and exclude it from any runtime imports or tooling",
+        "Document which parts (if any) are still relevant and migrate them into shared modules before removal",
+        "Plan eventual deletion once parity with root.dashboard.py and newer UIs is confirmed"
+      ],
+      "phase_ids": [
+        "phase_architecture_env"
+      ]
+    },
+    {
+      "rel_path": "root\\dashboard.py",
+      "role": "Main Streamlit dashboard aggregating research, risk, and live-trading controls",
+      "priority": "high",
+      "categories": [
+        "web_ui",
+        "research",
+        "live_trading",
+        "risk"
+      ],
+      "tasks": [
+        "Decompose the monolithic file into smaller, testable sections wired through dashboard_service_factory",
+        "Ensure all tabs use shared services (data, signals, risk, broker) via AppContext, not ad-hoc flows",
+        "Make environment and risk status prominent (profile badges, risk lights, read-only vs live modes)",
+        "Standardize widget keys and state handling using centralized UI helpers to avoid conflicts",
+        "Add lightweight performance and health indicators (latency, data age, broker status) to the layout"
+      ],
+      "phase_ids": [
+        "phase_architecture_env",
+        "phase_signals_portfolio",
+        "phase_execution_broker",
+        "phase_web_app_ux",
+        "phase_observability_ops"
+      ]
+    },
+    {
+      "rel_path": "root\\dashboard_home_v2.py",
+      "role": "Modernized dashboard home providing top-level fund status and navigation hub",
+      "priority": "high",
+      "categories": [
+        "web_ui",
+        "infra"
+      ],
+      "tasks": [
+        "Surface high-level KPIs, environment indicators, and key health metrics via shared services",
+        "Provide clear navigation to research, optimization, risk, and live-trading screens",
+        "Integrate profile-aware views so dev/research/paper/live are visually distinct and safe",
+        "Refactor shared cards and summaries into reusable components backed by AppContext"
+      ],
+      "phase_ids": [
+        "phase_architecture_env",
+        "phase_web_app_ux",
+        "phase_observability_ops"
+      ]
+    },
+    {
+      "rel_path": "root\\dashboard_service_factory.py",
+      "role": "Factory for dashboard-level services wiring data, signals, risk, and brokers into UI-friendly adapters",
+      "priority": "high",
+      "categories": [
+        "infra",
+        "web_ui"
+      ],
+      "tasks": [
+        "Define clear service interfaces for data access, signal generation, portfolio views, and execution",
+        "Ensure all services are instantiated from AppContext with explicit environment profiles",
+        "Provide lightweight caching and error boundaries suitable for Streamlit reruns",
+        "Document factory usage patterns and migrate dashboard tabs to depend exclusively on it"
+      ],
+      "phase_ids": [
+        "phase_architecture_env",
+        "phase_web_app_ux",
+        "phase_observability_ops"
+      ]
+    },
+    {
+      "rel_path": "root\\dedupe_opt_tab.py",
+      "role": "Dashboard-specific helper for deduplicating optimization tab UI and logic",
+      "priority": "medium",
+      "categories": [
+        "web_ui",
+        "infra",
+        "utils"
+      ],
+      "tasks": [
+        "Factor out common optimization-tab sections into reusable UI components and service calls",
+        "Remove code duplication with root.optimization_tab and backup variants while preserving behavior",
+        "Align any optimization-specific state management with shared Streamlit key conventions",
+        "Add brief documentation of how deduped components are intended to be reused across tabs"
+      ],
+      "phase_ids": [
+        "phase_architecture_env",
+        "phase_web_app_ux"
+      ]
+    },
+    {
+      "rel_path": "root\\fair_value_api_tab.py",
+      "role": "Streamlit tab for exploring and validating the fair-value API and advisor logic",
+      "priority": "high",
+      "categories": [
+        "web_ui",
+        "api",
+        "research"
+      ],
+      "tasks": [
+        "Replace direct data or model access with calls to root.api_server or shared signal services",
+        "Expose configuration controls (universe, parameters) that mirror live API behavior",
+        "Show clear separation between simulation, paper, and live query modes in the UI",
+        "Log queries and responses for debugging and validation of fair-value decisions",
+        "Guard against using dummy data when connected to live profiles"
+      ],
+      "phase_ids": [
+        "phase_signals_portfolio",
+        "phase_web_app_ux",
+        "phase_architecture_env"
+      ]
+    },
+    {
+      "rel_path": "root\\generate_config.py",
+      "role": "Utility to generate standard config.json/universe configs for pairs trading experiments",
+      "priority": "medium",
+      "categories": [
+        "data_ingest",
+        "research",
+        "infra"
+      ],
+      "tasks": [
+        "Refactor to use Pydantic-based config models aligned with root.settings profiles",
+        "Ensure deterministic pair selection logic with explicit random seeds and filters",
+        "Write generated configs into a governed location with version and timestamp metadata",
+        "Add a dry-run/preview mode to inspect output before writing files"
+      ],
+      "phase_ids": [
+        "phase_architecture_env",
+        "phase_data_layer",
+        "phase_testing_deployment_ai"
+      ]
+    },
+    {
+      "rel_path": "root\\generate_pairs_universe.py",
+      "role": "Universe builder for generating and maintaining the tradable pairs universe",
+      "priority": "high",
+      "categories": [
+        "data_ingest",
+        "research",
+        "backtest"
+      ],
+      "tasks": [
+        "Use centralized data loaders and fundamental/price filters to build a reproducible pairs universe",
+        "Persist universes and selection criteria into SqlStore with history and config snapshots",
+        "Expose options for different environments (research vs live eligible universe) via profiles",
+        "Integrate basic diagnostics (coverage, liquidity, sector balance) into output logs",
+        "Provide an option to run as a simulation or backfill mode for historical analyses"
+      ],
+      "phase_ids": [
+        "phase_data_layer",
+        "phase_signals_portfolio",
+        "phase_testing_deployment_ai"
+      ]
+    },
+    {
+      "rel_path": "root\\ibkr_connection.py",
+      "role": "IBKR connectivity and session management for data and trading, behind a safe abstraction",
+      "priority": "high",
+      "categories": [
+        "live_trading",
+        "data_ingest",
+        "infra",
+        "api"
+      ],
+      "tasks": [
+        "Wrap IBKR client initialization in a profile-aware broker adapter with paper/live separation",
+        "Implement robust retry, backoff, and timeout logic with structured error reporting",
+        "Expose a minimal, typed interface for market data and order routing used by higher layers",
+        "Ensure credentials are loaded from secure sources (env/secret manager stub) and never logged",
+        "Add health checks and connectivity tests consumable by dashboards and health_check_full_system"
+      ],
+      "phase_ids": [
+        "phase_execution_broker",
+        "phase_data_layer",
+        "phase_observability_ops",
+        "phase_architecture_env"
+      ]
+    },
+    {
+      "rel_path": "root\\index_fundamentals_tab.py",
+      "role": "Streamlit tab for exploring index/ETF fundamentals and their impact on pairs",
+      "priority": "medium",
+      "categories": [
+        "web_ui",
+        "research",
+        "data_ingest"
+      ],
+      "tasks": [
+        "Route data access through the shared fundamental_loader and SqlStore instead of direct sources",
+        "Present fundamentals in a way that ties into pair selection and risk overlays",
+        "Add caching and pagination for large datasets to keep UI responsive",
+        "Highlight environment/profile (research vs live) and disable dummy data in live views"
+      ],
+      "phase_ids": [
+        "phase_data_layer",
+        "phase_signals_portfolio",
+        "phase_web_app_ux"
+      ]
+    },
+    {
+      "rel_path": "root\\ingest_universe_from_ib.py",
+      "role": "Ingestion script/tab for importing instrument universe from IBKR into the central store",
+      "priority": "high",
+      "categories": [
+        "data_ingest",
+        "research",
+        "live_trading"
+      ],
+      "tasks": [
+        "Refactor ingestion logic to use the IBKR broker adapter and SqlStore with explicit schemas",
+        "Add gap detection, anomaly logging, and data-quality scoring during universe import",
+        "Make environment/profile explicit (paper vs live) and safe by default",
+        "Support incremental updates and idempotent re-runs without duplicating instruments"
+      ],
+      "phase_ids": [
+        "phase_data_layer",
+        "phase_execution_broker",
+        "phase_observability_ops"
+      ]
+    },
+    {
+      "rel_path": "root\\insights.py",
+      "role": "Research insights and analytics builder feeding high-level views and reports",
+      "priority": "medium",
+      "categories": [
+        "research",
+        "web_ui"
+      ],
+      "tasks": [
+        "Consolidate scattered analytics into reusable functions returning typed data models",
+        "Tie insights to persisted backtest/live metrics to make them reproducible and explorable",
+        "Expose a minimal API for dashboards and agents to request top-N pairs, themes, or risks",
+        "Ensure all computations use shared signal/risk engines rather than duplicating logic"
+      ],
+      "phase_ids": [
+        "phase_signals_portfolio",
+        "phase_data_layer",
+        "phase_web_app_ux"
+      ]
+    },
+    {
+      "rel_path": "root\\live_dash_app.py",
+      "role": "Streamlit entrypoint for live trading and monitoring dashboard",
+      "priority": "high",
+      "categories": [
+        "web_ui",
+        "live_trading",
+        "risk"
+      ],
+      "tasks": [
+        "Ensure startup builds an AppContext with a mandatory explicit live/paper profile selection",
+        "Limit this app to live-relevant tabs and hide research-only or dummy-data views",
+        "Display clear risk state, broker connectivity, and kill-switch controls at the top level",
+        "Wire in health checks and latency indicators for data and broker flows"
+      ],
+      "phase_ids": [
+        "phase_architecture_env",
+        "phase_execution_broker",
+        "phase_web_app_ux",
+        "phase_observability_ops"
+      ]
+    },
+    {
+      "rel_path": "root\\macro_tab.py",
+      "role": "Macro adjustments and market regime configuration tab influencing signals and risk",
+      "priority": "high",
+      "categories": [
+        "web_ui",
+        "research",
+        "risk"
+      ],
+      "tasks": [
+        "Connect macro sliders and settings directly to the macro_adjustments and macro_sensitivity engines",
+        "Persist macro regimes and parameters with timestamps and profiles for reproducibility",
+        "Differentiate between research tuning and live-approved macro overlays with approvals or locks",
+        "Visualize macro impacts on key pairs and portfolio metrics using shared analytics helpers"
+      ],
+      "phase_ids": [
+        "phase_signals_portfolio",
+        "phase_data_layer",
+        "phase_web_app_ux"
+      ]
+    },
+    {
+      "rel_path": "root\\matrix_research_tab.py",
+      "role": "Matrix-style research tab for cross-sectional pair analytics and selection",
+      "priority": "high",
+      "categories": [
+        "web_ui",
+        "research",
+        "backtest"
+      ],
+      "tasks": [
+        "Standardize matrix computations through advanced_metrics and matrix_helpers modules",
+        "Load data exclusively via SqlStore/market_data_router with clear history-length controls",
+        "Allow exporting selected universes or candidate pairs into configs and backtests",
+        "Optimize performance with caching and efficient queries for large universes",
+        "Make environment/profile explicit and avoid any implicit live-trading actions"
+      ],
+      "phase_ids": [
+        "phase_data_layer",
+        "phase_signals_portfolio",
+        "phase_web_app_ux"
+      ]
+    },
+    {
+      "rel_path": "root\\optimization_tab.backup_quotes_fix.py",
+      "role": "Legacy backup of optimization tab with quote-related fixes",
+      "priority": "low",
+      "categories": [
+        "other"
+      ],
+      "tasks": [
+        "Mark as backup-only and remove any references from dashboards or scripts",
+        "Extract any still-missing bugfixes into shared optimization logic, then plan deprecation",
+        "Exclude file from automated tooling (lint, build) once migration is complete"
+      ],
+      "phase_ids": [
+        "phase_architecture_env"
+      ]
+    },
+    {
+      "rel_path": "root\\optimization_tab.dedup.py",
+      "role": "Partially deduplicated version of the optimization tab used during refactoring",
+      "priority": "medium",
+      "categories": [
+        "web_ui",
+        "research",
+        "backtest"
+      ],
+      "tasks": [
+        "Compare implementation with root.optimization_tab and extract shared components into services/UI helpers",
+        "Remove residual duplication and ensure a single canonical optimization UI remains",
+        "Validate that all optimization workflows use shared backtest/Optuna engines and consistent configs",
+        "Once merged, mark this file as deprecated or fully remove it"
+      ],
+      "phase_ids": [
+        "phase_signals_portfolio",
+        "phase_web_app_ux",
+        "phase_testing_deployment_ai"
+      ]
+    },
+    {
+      "rel_path": "root\\optimization_tab.py",
+      "role": "Primary optimization Streamlit tab for hyper-parameters, pair selection, and strategy search",
+      "priority": "high",
+      "categories": [
+        "web_ui",
+        "research",
+        "backtest"
+      ],
+      "tasks": [
+        "Route all optimization runs through a shared Optuna/Zoom engine with deterministic seeds",
+        "Persist optimization studies, configs, and results in SqlStore/Parquet with metadata for replay",
+        "Align objective functions and constraints with live risk and portfolio construction rules",
+        "Separate UI concerns (widgets, layouts) from optimization logic via dashboard_service_factory",
+        "Add clear environment/profile indicators and restrict live-linked parameters without approval"
+      ],
+      "phase_ids": [
+        "phase_signals_portfolio",
+        "phase_data_layer",
+        "phase_web_app_ux",
+        "phase_testing_deployment_ai"
+      ]
+    },
+    {
+      "rel_path": "root\\overview_tab.py",
+      "role": "Investment-committee style overview tab for fund-level status and KPIs",
+      "priority": "high",
+      "categories": [
+        "web_ui",
+        "risk",
+        "live_trading"
+      ],
+      "tasks": [
+        "Aggregate key metrics (AUM, exposure, PnL, drawdowns, crowding) via shared analytics services",
+        "Display environment and profile prominently, including whether views are live or simulated",
+        "Integrate data freshness and health indicators for critical components (data, broker, risk engine)",
+        "Offer drill-down links to risk, portfolio, and pair-level tabs without duplicating logic"
+      ],
+      "phase_ids": [
+        "phase_web_app_ux",
+        "phase_observability_ops",
+        "phase_architecture_env"
+      ]
+    },
+    {
+      "rel_path": "root\\pair_tab.py",
+      "role": "Pair-level deep-dive dashboard for signals, trades, and live status",
+      "priority": "high",
+      "categories": [
+        "web_ui",
+        "research",
+        "live_trading",
+        "risk"
+      ],
+      "tasks": [
+        "Use a unified pair profile model from live_pair_store/live_profiles for all views",
+        "Show signal state, recent trades, and risk overlays derived from shared engines",
+        "Support both research and live modes with clear labeling and read-only safeguards in live",
+        "Integrate controls for paper-trade simulations and live order suggestions while delegating execution",
+        "Ensure widgets and callbacks use stable keys and centralized time-series data loaders"
+      ],
+      "phase_ids": [
+        "phase_signals_portfolio",
+        "phase_data_layer",
+        "phase_execution_broker",
+        "phase_web_app_ux"
+      ]
+    },
+    {
+      "rel_path": "root\\pairs.py",
+      "role": "Domain models and utilities for pairs, spreads, and related portfolio constructs",
+      "priority": "high",
+      "categories": [
+        "research",
+        "backtest",
+        "risk",
+        "infra"
+      ],
+      "tasks": [
+        "Define typed Pydantic models or dataclasses for pair definitions, states, and configs",
+        "Centralize spread/z-score/Ou-process helpers used by backtests, signals, and dashboards",
+        "Align pair identifiers and metadata with SqlStore schemas and live_pair_store profiles",
+        "Add serialization helpers to persist pair states and configs across runs and environments"
+      ],
+      "phase_ids": [
+        "phase_signals_portfolio",
+        "phase_data_layer",
+        "phase_execution_broker",
+        "phase_architecture_env"
+      ]
+    },
+    {
+      "rel_path": "root\\portfolio_tab.py",
+      "role": "Portfolio-level dashboard for positions, exposures, risk, and performance",
+      "priority": "high",
+      "categories": [
+        "web_ui",
+        "risk",
+        "live_trading",
+        "research"
+      ],
+      "tasks": [
+        "Source portfolio holdings and PnL from the shared portfolio_loader and SqlStore",
+        "Visualize risk metrics (VaR/ES, drawdowns, concentration, correlation crowding) using shared risk_helpers",
+        "Support scenario filters (profile, date range, strategy) without duplicating analytics code",
+        "Highlight discrepancies between target and actual exposures and link to execution diagnostics",
+        "Make live vs paper portfolios clearly distinguishable with appropriate safeguards"
+      ],
+      "phase_ids": [
+        "phase_signals_portfolio",
+        "phase_execution_broker",
+        "phase_web_app_ux",
+        "phase_observability_ops"
+      ]
+    },
+    {
+      "rel_path": "root\\risk_tab.py",
+      "role": "Fund-level risk dashboard focused on real data and live constraints",
+      "priority": "high",
+      "categories": [
+        "web_ui",
+        "risk",
+        "live_trading"
+      ],
+      "tasks": [
+        "Integrate portfolio, pair-level, and macro risks into a unified view using shared risk_helpers",
+        "Display real-time or near-real-time metrics (exposures, limits, breaches) with clear thresholds",
+        "Expose safe controls for risk limits and kill-switches, logging all changes with metadata",
+        "Ensure tab is read-only or heavily guarded in live mode and clearly separate research views"
+      ],
+      "phase_ids": [
+        "phase_web_app_ux",
+        "phase_observability_ops",
+        "phase_execution_broker"
+      ]
+    },
+    {
+      "rel_path": "root\\run_all.py",
+      "role": "Unified entrypoint for launching the full system (dashboards, APIs, services)",
+      "priority": "high",
+      "categories": [
+        "infra",
+        "web_ui"
+      ],
+      "tasks": [
+        "Convert into a small, explicit launcher that selects environment/profile and orchestrates components",
+        "Support starting subsets (e.g., dashboards only, API only) via CLI flags or config",
+        "Wire structured logging and health checks at startup, failing fast on critical misconfigurations",
+        "Document intended usage patterns for dev/research/paper/live deployments"
+      ],
+      "phase_ids": [
+        "phase_architecture_env",
+        "phase_web_app_ux",
+        "phase_testing_deployment_ai"
+      ]
+    },
+    {
+      "rel_path": "root\\run_upgrade.py",
+      "role": "Entry script for running upgrade and visualization agents in a controlled manner",
+      "priority": "medium",
+      "categories": [
+        "infra",
+        "other"
+      ],
+      "tasks": [
+        "Refactor to use hedge_fund_upgrade_agent/gpt_upgrade_agent with explicit phase selection",
+        "Add CLI arguments or config for dry-run, scope restriction, and logging verbosity",
+        "Ensure it cannot modify live-trading configs without an explicit override flag",
+        "Log executed upgrades and outcomes into a small audit trail for governance"
+      ],
+      "phase_ids": [
+        "phase_architecture_env",
+        "phase_testing_deployment_ai"
+      ]
+    },
+    {
+      "rel_path": "root\\run_zoom_campaign.py",
+      "role": "Coordinator for running Optuna Zoom optimization campaigns over strategies/universes",
+      "priority": "medium",
+      "categories": [
+        "research",
+        "backtest",
+        "infra"
+      ],
+      "tasks": [
+        "Standardize campaign configuration (search space, objectives, seeds) using Pydantic models",
+        "Route all optimizations through shared backtest and optimization engines for consistency",
+        "Persist campaign results, logs, and config snapshots for later analysis and reproduction",
+        "Provide a simulation vs live-constraints mode to reflect realistic trading limitations"
+      ],
+      "phase_ids": [
+        "phase_signals_portfolio",
+        "phase_testing_deployment_ai",
+        "phase_architecture_env"
+      ]
+    },
+    {
+      "rel_path": "root\\settings.py",
+      "role": "Centralized settings and profile management module for dev/research/paper/live environments",
+      "priority": "high",
+      "categories": [
+        "infra",
+        "risk",
+        "web_ui"
+      ],
+      "tasks": [
+        "Define Pydantic-based settings models capturing environment, data paths, broker configs, and risk caps",
+        "Implement profile loading/overrides from JSON/YAML/env with clear precedence rules",
+        "Expose helpers for runtime components (dashboards, APIs, backtests) to query active settings",
+        "Track git_rev and config snapshots for each run to support full reproducibility and audits",
+        "Mark dangerous overrides (e.g., disabling risk limits) and require explicit confirmation in UIs/CLIs"
+      ],
+      "phase_ids": [
+        "phase_architecture_env",
+        "phase_web_app_ux",
+        "phase_execution_broker",
+        "phase_observability_ops"
+      ]
+    },
+    {
+      "rel_path": "root\\smart_scan_tab.py",
+      "role": "Smart-scan Streamlit tab for discovering and ranking candidate pairs and strategies",
+      "priority": "high",
+      "categories": [
+        "web_ui",
+        "research",
+        "backtest"
+      ],
+      "tasks": [
+        "Use shared analysis and signal engines to compute candidate scores and diagnostics",
+        "Allow users to filter and export selected pairs into universe configs and backtests",
+        "Ensure scans operate on the central data store with explicit history windows and quality checks",
+        "Optimize performance for large universes via batching, caching, and async-friendly design where possible",
+        "Display profile/environment and prevent accidental live trading actions from this research tab"
+      ],
+      "phase_ids": [
+        "phase_signals_portfolio",
+        "phase_data_layer",
+        "phase_web_app_ux"
+      ]
+    },
+    {
+      "rel_path": "root/system_upgrader_agent.py",
+      "role": "Central log-driven upgrade agent orchestrating phased refactors and code migrations for the whole system.",
+      "priority": "high",
+      "categories": [
+        "infra",
+        "utils",
+        "tests"
+      ],
+      "tasks": [
+        "Align agent actions and config with the defined upgrade phases and environment profiles",
+        "Refactor to use AppContext and central config_manager instead of ad-hoc paths or flags",
+        "Add dry-run and rollback metadata so upgrades are idempotent and auditable",
+        "Persist upgrade decisions, affected files, and git_rev into SqlStore or JSON snapshots",
+        "Improve structured logging and error handling for batch and per-file upgrade runs"
+      ],
+      "phase_ids": [
+        "phase_architecture_env",
+        "phase_observability_ops",
+        "phase_testing_deployment_ai"
+      ]
+    },
+    {
+      "rel_path": "root/tab_comparison_matrices.py",
+      "role": "Streamlit tab providing HF-grade correlation and comparison matrices for research and monitoring.",
+      "priority": "high",
+      "categories": [
+        "web_ui",
+        "research"
+      ],
+      "tasks": [
+        "Wire tab into AppContext with explicit environment profile (dev/research/paper/live) indicators",
+        "Route all price and factor data access through SqlStore/market_data_router for consistency",
+        "Reuse shared signal and risk helpers for metrics instead of custom in-tab calculations",
+        "Add caching, progress indicators, and unique key generation for all Streamlit widgets",
+        "Standardize outputs (tables/plots) to feed other tabs and agents via a shared response schema"
+      ],
+      "phase_ids": [
+        "phase_architecture_env",
+        "phase_data_layer",
+        "phase_signals_portfolio",
+        "phase_web_app_ux"
+      ]
+    },
+    {
+      "rel_path": "root/test_agent.py",
+      "role": "Lightweight harness for exercising and validating the visualization agent behaviours.",
+      "priority": "low",
+      "categories": [
+        "tests",
+        "research"
+      ],
+      "tasks": [
+        "Convert into a small, deterministic test harness that calls VisualizationAgent via a stable API",
+        "Ensure it uses central config/env profiles instead of hard-coded paths or modes",
+        "Mark clearly as non-production and safe to run in any environment"
+      ],
+      "phase_ids": [
+        "phase_architecture_env",
+        "phase_testing_deployment_ai"
+      ]
+    },
+    {
+      "rel_path": "root/trade_logic.py",
+      "role": "Core trade decision module mapping signals and portfolio targets into actionable position intents.",
+      "priority": "high",
+      "categories": [
+        "live_trading",
+        "backtest",
+        "risk"
+      ],
+      "tasks": [
+        "Separate pure signal interpretation (what target to hold) from execution concerns (how to trade)",
+        "Define clear data models for target positions, deltas, and trade intents shared across backtest and live",
+        "Integrate risk overlays (max leverage, exposure caps, kill-switches) using shared risk_helpers",
+        "Ensure all parameters and thresholds are pulled from central, versioned config models",
+        "Add structured logging of every trade decision including inputs, overrides, and environment"
+      ],
+      "phase_ids": [
+        "phase_architecture_env",
+        "phase_signals_portfolio",
+        "phase_execution_broker",
+        "phase_observability_ops"
+      ]
+    },
+    {
+      "rel_path": "root/visualization.py",
+      "role": "Shared visualization toolkit for plots and tables used by research and UI agents.",
+      "priority": "medium",
+      "categories": [
+        "research",
+        "web_ui",
+        "utils"
+      ],
+      "tasks": [
+        "Refactor plotting helpers to accept typed data models/DataFrames and avoid direct global state",
+        "Consolidate duplicated plotting logic used by tabs, scripts, and agents into reusable functions",
+        "Add options for environment-aware styling and risk indicators where relevant",
+        "Ensure graceful degradation when optional visualization libraries are missing"
+      ],
+      "phase_ids": [
+        "phase_signals_portfolio",
+        "phase_web_app_ux",
+        "phase_testing_deployment_ai"
+      ]
+    },
+    {
+      "rel_path": "root/visualization_agent.py",
+      "role": "Agent that orchestrates creation of rich visual diagnostics for pairs, backtests, and live state.",
+      "priority": "medium",
+      "categories": [
+        "web_ui",
+        "research",
+        "infra"
+      ],
+      "tasks": [
+        "Refactor the agent to depend on AppContext and shared visualization helpers instead of ad-hoc flows",
+        "Make the agent environment-aware (research/paper/live) and restrict data sources accordingly",
+        "Add structured inputs/outputs so other modules can request specific visualizations programmatically",
+        "Improve logging and error handling around heavy plots to avoid crashing UI flows"
+      ],
+      "phase_ids": [
+        "phase_architecture_env",
+        "phase_web_app_ux",
+        "phase_testing_deployment_ai"
+      ]
+    },
+    {
+      "rel_path": "root/volatility.py",
+      "role": "Utility module for volatility and risk metric calculations reused across signals and portfolio logic.",
+      "priority": "medium",
+      "categories": [
+        "risk",
+        "research",
+        "utils"
+      ],
+      "tasks": [
+        "Align volatility estimators with those in advanced_metrics and risk_helpers to avoid inconsistencies",
+        "Add full type hints and small doctest-style examples for core formulas",
+        "Ensure functions are side-effect-free and safe to use in both backtest and live paths",
+        "Introduce basic unit-style tests for key volatility computations"
+      ],
+      "phase_ids": [
+        "phase_signals_portfolio",
+        "phase_testing_deployment_ai"
+      ]
+    },
+    {
+      "rel_path": "root_desktop/app.py",
+      "role": "Legacy desktop entry point mirroring the main web app functionality for local workflows.",
+      "priority": "medium",
+      "categories": [
+        "web_ui",
+        "infra"
+      ],
+      "tasks": [
+        "Refactor bootstrap to reuse the same AppContext and config models as the main web application",
+        "Minimize business logic here by delegating to shared services and views",
+        "Make environment profile explicit and visible in the desktop UI state",
+        "Clarify which flows are desktop-only vs shared with the web app"
+      ],
+      "phase_ids": [
+        "phase_architecture_env",
+        "phase_web_app_ux"
+      ]
+    },
+    {
+      "rel_path": "root_desktop/views/main_window.py",
+      "role": "Main desktop window and tab container for research, optimization, and monitoring views.",
+      "priority": "medium",
+      "categories": [
+        "web_ui",
+        "research"
+      ],
+      "tasks": [
+        "Align tabs and layout with the Streamlit-based dashboard structure where feasible",
+        "Ensure each tab uses shared services (data loaders, signal engine, risk engine) rather than custom logic",
+        "Display environment and risk status prominently in the main window",
+        "Introduce consistent key naming and state handling for interactive widgets"
+      ],
+      "phase_ids": [
+        "phase_architecture_env",
+        "phase_web_app_ux"
+      ]
+    },
+    {
+      "rel_path": "run_hf_upgrade_batch.py",
+      "role": "Command-line entry script to run the system upgrade agent in batch mode.",
+      "priority": "medium",
+      "categories": [
+        "infra",
+        "utils"
+      ],
+      "tasks": [
+        "Wrap system_upgrader_agent with a clear CLI interface and help text",
+        "Wire in environment/profile selection and dry-run options by default",
+        "Add structured logging to summarize outcomes and failures of each batch run",
+        "Ensure script exits with meaningful status codes for CI integration"
+      ],
+      "phase_ids": [
+        "phase_architecture_env",
+        "phase_testing_deployment_ai"
+      ]
+    },
+    {
+      "rel_path": "scripts/backtest_pair_from_sql.py",
+      "role": "Script to run a single-pair backtest using historical data from SqlStore.",
+      "priority": "medium",
+      "categories": [
+        "backtest",
+        "research"
+      ],
+      "tasks": [
+        "Refactor to use the shared backtest engine and AppContext instead of custom plumbing",
+        "Pull parameters from typed config models and support environment-aware overrides",
+        "Enforce deterministic seeds and persist backtest configs and results to SqlStore",
+        "Harmonize output metrics and artifacts with those used by the web dashboard"
+      ],
+      "phase_ids": [
+        "phase_architecture_env",
+        "phase_signals_portfolio",
+        "phase_testing_deployment_ai"
+      ]
+    },
+    {
+      "rel_path": "scripts/build_dq_pairs_universe.py",
+      "role": "Universe builder that constructs and maintains the dq_pairs research universe in DuckDB/SqlStore.",
+      "priority": "high",
+      "categories": [
+        "data_ingest",
+        "research"
+      ],
+      "tasks": [
+        "Define and enforce a clear schema for the dq_pairs universe including keys and indices",
+        "Use centralized DuckDB/SqlStore helpers with proper locking and error handling",
+        "Add options for incremental updates, history retention, and data quality scoring",
+        "Log build metadata (config, git_rev, run_id) for each universe snapshot",
+        "Expose reusable functions for other tools to query or extend the dq_pairs universe"
+      ],
+      "phase_ids": [
+        "phase_architecture_env",
+        "phase_data_layer",
+        "phase_observability_ops"
+      ]
+    },
+    {
+      "rel_path": "scripts/build_zoom_backtest_universe.py",
+      "role": "Prepares a backtest-ready universe tailored for Optuna/Zoom optimization campaigns.",
+      "priority": "medium",
+      "categories": [
+        "data_ingest",
+        "backtest"
+      ],
+      "tasks": [
+        "Standardize universe schema and link it to dq_pairs and SqlStore price histories",
+        "Support deterministic sampling and seeding to make optimization studies reproducible",
+        "Record creation metadata and filters used for each universe snapshot",
+        "Expose a callable function that can be reused by other research and CI pipelines"
+      ],
+      "phase_ids": [
+        "phase_data_layer",
+        "phase_testing_deployment_ai"
+      ]
+    },
+    {
+      "rel_path": "scripts/export_zoom_best_params_for_dq_pairs.py",
+      "role": "Exports best optimization parameters from Zoom/Optuna studies for the dq_pairs universe.",
+      "priority": "medium",
+      "categories": [
+        "research",
+        "backtest"
+      ],
+      "tasks": [
+        "Use the shared zoom_storage/Optuna abstraction instead of local file logic",
+        "Persist exported params into SqlStore or structured JSON with versioning and git_rev",
+        "Ensure mapping between pairs and param sets is explicit and schema-validated",
+        "Add CLI options for environment/profile selection and filters on study names"
+      ],
+      "phase_ids": [
+        "phase_data_layer",
+        "phase_signals_portfolio",
+        "phase_testing_deployment_ai"
+      ]
+    },
+    {
+      "rel_path": "scripts/ingest_ibkr_prices.py",
+      "role": "Robust price ingestion script pulling historical data from IBKR into central storage.",
+      "priority": "high",
+      "categories": [
+        "data_ingest",
+        "live_trading"
+      ],
+      "tasks": [
+        "Refactor to use the unified market_data_router and SqlStore schemas for prices",
+        "Implement robust retry/backoff, rate limiting, and safe failure modes for IBKR API calls",
+        "Add gap detection, anomaly logging, and basic data quality scoring per symbol",
+        "Make broker connection and symbols driven by environment-aware config models",
+        "Record ingestion runs (coverage, errors, timestamps) for monitoring dashboards"
+      ],
+      "phase_ids": [
+        "phase_architecture_env",
+        "phase_data_layer",
+        "phase_observability_ops"
+      ]
+    },
+    {
+      "rel_path": "scripts/ingest_prices_for_dq_pairs.py",
+      "role": "Ingests historical prices for the dq_pairs universe from configured data sources.",
+      "priority": "high",
+      "categories": [
+        "data_ingest",
+        "research"
+      ],
+      "tasks": [
+        "Route all data access through market_data_router to support multiple vendors consistently",
+        "Ensure writes go to the canonical price tables in DuckDB/SqlStore with clear retention policies",
+        "Implement gap detection, retries, and anomaly flags at the symbol-pair level",
+        "Parameterize universe, date ranges, and vendors via typed, environment-aware configs",
+        "Integrate ingestion run metadata with observability dashboards"
+      ],
+      "phase_ids": [
+        "phase_architecture_env",
+        "phase_data_layer",
+        "phase_observability_ops"
+      ]
+    },
+    {
+      "rel_path": "scripts/maintain_duckdb_cache.py",
+      "role": "Maintenance script for cache.duckdb handling compaction, retention, and integrity checks.",
+      "priority": "high",
+      "categories": [
+        "data_ingest",
+        "infra"
+      ],
+      "tasks": [
+        "Centralize DuckDB connection management and locking via shared helpers",
+        "Implement retention policies (by age, size, or tags) for price and signal tables",
+        "Add integrity checks, index validation, and lightweight VACUUM/OPTIMIZE routines",
+        "Expose health metrics (table sizes, fragmentation, last maintenance) for monitoring",
+        "Make critical operations dry-runnable and configurable per environment"
+      ],
+      "phase_ids": [
+        "phase_data_layer",
+        "phase_observability_ops"
+      ]
+    },
+    {
+      "rel_path": "scripts/optuna_backtest_search.py",
+      "role": "Runs Optuna-based hyperparameter search over the backtest engine for pairs strategies.",
+      "priority": "high",
+      "categories": [
+        "backtest",
+        "research"
+      ],
+      "tasks": [
+        "Refactor to call a shared backtest-and-evaluate function with clear typed configs",
+        "Enforce deterministic seeding for Optuna studies and the underlying backtests",
+        "Persist study results, best params, and config snapshots into zoom_storage/SqlStore",
+        "Add pruning and checkpointing options suitable for long-running campaigns",
+        "Expose standardized summaries consumable by the web dashboard and agents"
+      ],
+      "phase_ids": [
+        "phase_signals_portfolio",
+        "phase_data_layer",
+        "phase_testing_deployment_ai"
+      ]
+    },
+    {
+      "rel_path": "scripts/replay_best_trial.py",
+      "role": "Replays and validates the best Optuna trial for a specific pair using the backtest engine.",
+      "priority": "high",
+      "categories": [
+        "backtest",
+        "research"
+      ],
+      "tasks": [
+        "Fetch best trial parameters via the shared zoom_storage interface using strong typing",
+        "Run replay using the same backtest engine and data layer as used in the original study",
+        "Persist replay results and diagnostics with explicit links to the originating study/trial",
+        "Ensure deterministic behaviour and consistent metrics vs the original optimization",
+        "Prepare outputs (plots/tables) in a format reusable by UI and reporting tools"
+      ],
+      "phase_ids": [
+        "phase_signals_portfolio",
+        "phase_testing_deployment_ai"
+      ]
+    },
+    {
+      "rel_path": "scripts/research_rank_pairs_from_dq.py",
+      "role": "Research script ranking pairs from dq_pairs universe based on signals and performance metrics.",
+      "priority": "high",
+      "categories": [
+        "research",
+        "backtest"
+      ],
+      "tasks": [
+        "Use the shared signal engine and portfolio metrics instead of bespoke ranking logic",
+        "Ensure all input data comes from the canonical dq_pairs and price tables in SqlStore",
+        "Persist rankings, configs, and metrics for each run with environment and git_rev tags",
+        "Align ranking outputs with downstream consumers (top-pair selection, dashboards, mini-fund)",
+        "Add basic self-checks for data freshness and completeness before running rankings"
+      ],
+      "phase_ids": [
+        "phase_architecture_env",
+        "phase_data_layer",
+        "phase_signals_portfolio"
+      ]
+    },
+    {
+      "rel_path": "scripts/run_mini_fund_optimize.py",
+      "role": "Runs parameter optimization focused on the mini-fund subset of pairs.",
+      "priority": "medium",
+      "categories": [
+        "backtest",
+        "research"
+      ],
+      "tasks": [
+        "Refactor to reuse the same Optuna/backtest scaffolding as the main optimization scripts",
+        "Drive mini-fund universe selection via config and SqlStore queries instead of hard-coded lists",
+        "Persist mini-fund-specific studies with clear tags and separation from global studies",
+        "Harmonize metrics and outputs with those used for the full-universe campaigns"
+      ],
+      "phase_ids": [
+        "phase_signals_portfolio",
+        "phase_testing_deployment_ai"
+      ]
+    },
+    {
+      "rel_path": "scripts/run_mini_fund_signals.py",
+      "role": "Generates daily signals for the mini-fund pairs, feeding paper/live workflows.",
+      "priority": "high",
+      "categories": [
+        "research",
+        "live_trading",
+        "backtest"
+      ],
+      "tasks": [
+        "Route all calculations through the central signal engine and risk overlays used system-wide",
+        "Make environment profile explicit (research/paper/live) and gate risky actions accordingly",
+        "Persist generated signals and context (configs, data snapshot) into SqlStore for auditability",
+        "Add monitoring hooks to flag missing data, stale prices, or inconsistent exposures",
+        "Ensure deterministic behaviour for research re-runs while supporting live-time stamping"
+      ],
+      "phase_ids": [
+        "phase_architecture_env",
+        "phase_data_layer",
+        "phase_signals_portfolio",
+        "phase_observability_ops"
+      ]
+    },
+    {
+      "rel_path": "scripts/run_mini_fund_snapshot.py",
+      "role": "Produces a snapshot/scan of mini-fund pairs for daily monitoring and research.",
+      "priority": "medium",
+      "categories": [
+        "research",
+        "web_ui"
+      ],
+      "tasks": [
+        "Use shared data loaders and signal computations to build the snapshot",
+        "Persist snapshot outputs in a standardized schema consumable by dashboards",
+        "Parameterize snapshot scope and thresholds via config models",
+        "Add light self-checks for data freshness and coverage before producing a snapshot"
+      ],
+      "phase_ids": [
+        "phase_data_layer",
+        "phase_signals_portfolio",
+        "phase_testing_deployment_ai"
+      ]
+    },
+    {
+      "rel_path": "scripts/run_zoom_campaign_for_dq_pairs.py",
+      "role": "Orchestrates multi-study Zoom/Optuna campaigns across the dq_pairs universe.",
+      "priority": "medium",
+      "categories": [
+        "backtest",
+        "research"
+      ],
+      "tasks": [
+        "Refactor to orchestrate campaigns via zoom_storage and shared optimization helpers",
+        "Support batching, resume-from-checkpoint, and deterministic seeding per campaign",
+        "Tag runs with environment, universe version, and config snapshots for later analysis",
+        "Expose progress and summary stats suitable for monitoring or UI integration"
+      ],
+      "phase_ids": [
+        "phase_signals_portfolio",
+        "phase_testing_deployment_ai"
+      ]
+    },
+    {
+      "rel_path": "scripts/save_zoom_best_params.py",
+      "role": "Extracts and persists best Zoom/Optuna parameters into canonical storage.",
+      "priority": "medium",
+      "categories": [
+        "research",
+        "infra"
+      ],
+      "tasks": [
+        "Read best params via zoom_storage with proper validation of study and trial IDs",
+        "Save results into SqlStore/JSON with explicit schema and versioning",
+        "Include environment, universe, and metric used for each best-param record",
+        "Ensure idempotent writes so repeated runs do not corrupt existing records"
+      ],
+      "phase_ids": [
+        "phase_data_layer",
+        "phase_signals_portfolio",
+        "phase_testing_deployment_ai"
+      ]
+    },
+    {
+      "rel_path": "scripts/select_top_pairs_from_ranked_csv.py",
+      "role": "Utility script to select top-ranked pairs from research outputs for further workflows.",
+      "priority": "medium",
+      "categories": [
+        "research",
+        "utils"
+      ],
+      "tasks": [
+        "Treat ranked CSV as a formally defined schema and validate before processing",
+        "Parameterize selection criteria (top-N, filters, risk caps) via config models",
+        "Output selected pairs in formats consumable by backtests, dashboards, and live configs",
+        "Record selection run metadata and links to the source ranking run"
+      ],
+      "phase_ids": [
+        "phase_data_layer",
+        "phase_signals_portfolio"
+      ]
+    },
+    {
+      "rel_path": "scripts/use_optuna_best_for_pair.py",
+      "role": "Applies stored best Optuna parameters to run focused backtests for a chosen pair.",
+      "priority": "medium",
+      "categories": [
+        "backtest",
+        "research"
+      ],
+      "tasks": [
+        "Load best params using shared zoom_storage and config translation helpers",
+        "Run backtests via the central backtest engine and data layer for consistency",
+        "Emit standardized reports (metrics, plots, configs) for comparison across pairs",
+        "Ensure deterministic runs and clear environment tagging in all outputs"
+      ],
+      "phase_ids": [
+        "phase_signals_portfolio",
+        "phase_testing_deployment_ai"
+      ]
+    },
+    {
+      "rel_path": "sitecustomize.py",
+      "role": "Project-level bootstrap configuring paths, logging, and environment for all Python processes.",
+      "priority": "high",
+      "categories": [
+        "infra",
+        "utils"
+      ],
+      "tasks": [
+        "Centralize environment/profile detection and AppContext initialization in a safe, minimal way",
+        "Set up structured logging defaults, timezone handling, and basic error hooks",
+        "Avoid heavy or side-effectful imports that could break external tools or REPLs",
+        "Document and guard any behaviour that differs between dev/research/paper/live",
+        "Ensure compatibility with test runners and scripts that may bypass full app bootstrap"
+      ],
+      "phase_ids": [
+        "phase_architecture_env",
+        "phase_observability_ops"
+      ]
+    },
+    {
+      "rel_path": "strip_old_actions_block.py",
+      "role": "Maintenance utility to strip obsolete actions blocks from code files.",
+      "priority": "low",
+      "categories": [
+        "infra",
+        "utils"
+      ],
+      "tasks": [
+        "Confirm script is clearly marked as a one-off maintenance tool, not part of runtime flows",
+        "Add dry-run and backup options before mutating files",
+        "Align path handling and logging with the system_upgrader_agent where relevant"
+      ],
+      "phase_ids": [
+        "phase_architecture_env",
+        "phase_testing_deployment_ai"
+      ]
+    },
+    {
+      "rel_path": "study.py",
+      "role": "Study orchestration module tying together experiments, backtests, and optimization runs.",
+      "priority": "medium",
+      "categories": [
+        "research",
+        "backtest"
+      ],
+      "tasks": [
+        "Refactor to use shared config models and AppContext for all study definitions",
+        "Delegate actual backtest/optimization work to the core engines and scripts",
+        "Persist study metadata, configs, and links to outputs in SqlStore",
+        "Ensure reproducibility by enforcing deterministic seeding and version tagging"
+      ],
+      "phase_ids": [
+        "phase_signals_portfolio",
+        "phase_testing_deployment_ai"
+      ]
+    },
+    {
+      "rel_path": "tools/bootstrap_universe.py",
+      "role": "Tooling script to initialize or extend the trading/research universe from raw definitions.",
+      "priority": "medium",
+      "categories": [
+        "data_ingest",
+        "infra"
+      ],
+      "tasks": [
+        "Delegate universe construction to shared universe-building helpers (e.g., dq_pairs builder)",
+        "Support idempotent runs and environment-specific universe variants",
+        "Validate inputs and schemas before inserting into SqlStore/DuckDB",
+        "Add clear logging of created/updated symbols and pairs"
+      ],
+      "phase_ids": [
+        "phase_architecture_env",
+        "phase_data_layer"
+      ]
+    },
+    {
+      "rel_path": "tools/debug_settings.py",
+      "role": "Diagnostics tool to inspect configuration, environment, and component health.",
+      "priority": "high",
+      "categories": [
+        "infra",
+        "tests"
+      ],
+      "tasks": [
+        "Connect to AppContext and config_manager to display effective settings and profiles",
+        "Add health checks for SqlStore, DuckDB, broker connectivity, and data sources",
+        "Report discrepancies between expected and actual environments or paths",
+        "Provide machine-readable output (JSON/lines) for CI and monitoring hooks",
+        "Ensure it is safe to run in all environments without triggering trading actions"
+      ],
+      "phase_ids": [
+        "phase_architecture_env",
+        "phase_observability_ops",
+        "phase_testing_deployment_ai"
+      ]
+    },
+    {
+      "rel_path": "tools/ingest_from_ibkr.py",
+      "role": "Thin wrapper delegating IBKR historical ingestion to the core ingestion engine.",
+      "priority": "medium",
+      "categories": [
+        "data_ingest"
+      ],
+      "tasks": [
+        "Ensure it calls core.ib_data_ingestor or scripts/ingest_ibkr_prices via a stable API",
+        "Expose minimal, clear CLI arguments for universe, dates, and environment profile",
+        "Add basic logging and error reporting consistent with other ingestion tools",
+        "Document that it is a convenience wrapper, not a separate ingestion path"
+      ],
+      "phase_ids": [
+        "phase_architecture_env",
+        "phase_data_layer"
+      ]
+    },
+    {
+      "rel_path": "tools/migrate_utcnow_to_timezone.py",
+      "role": "Codebase refactoring tool to replace naive datetime.utcnow usage with timezone-aware calls.",
+      "priority": "low",
+      "categories": [
+        "infra",
+        "utils"
+      ],
+      "tasks": [
+        "Keep script clearly marked as a development/refactor utility only",
+        "Ensure safe dry-run mode and backups before rewriting files",
+        "Align datetime conventions with global time-handling policies defined in config"
+      ],
+      "phase_ids": [
+        "phase_architecture_env",
+        "phase_testing_deployment_ai"
+      ]
+    },
+    {
+      "rel_path": "tools/refactor_use_container_width.py",
+      "role": "Refactoring tool to migrate Streamlit use_container_width usage to the new width API.",
+      "priority": "low",
+      "categories": [
+        "infra",
+        "web_ui",
+        "utils"
+      ],
+      "tasks": [
+        "Confirm it operates only on project files and respects .gitignore or allowlists",
+        "Provide dry-run and diff output options before applying changes",
+        "Align transformations with the current UI helper patterns and key conventions"
+      ],
+      "phase_ids": [
+        "phase_web_app_ux",
+        "phase_testing_deployment_ai"
+      ]
+    },
+    {
+      "rel_path": "tools/test_ib_basic.py",
+      "role": "Connectivity and sanity-check script for IBKR API access.",
+      "priority": "medium",
+      "categories": [
+        "tests",
+        "data_ingest"
+      ],
+      "tasks": [
+        "Ensure it never sends live orders and is clearly scoped to read-only checks",
+        "Drive connection parameters (host, port, clientId, environment) from central config",
+        "Report connectivity, latency, and basic symbol data in a structured, parseable format",
+        "Guard execution with explicit environment/profile flags to avoid misuse"
+      ],
+      "phase_ids": [
+        "phase_architecture_env",
+        "phase_observability_ops",
+        "phase_testing_deployment_ai"
+      ]
+    },
+    {
+      "rel_path": "validate_project_structure.py",
+      "role": "Validator enforcing project layout, naming, and cohesion rules across the codebase.",
+      "priority": "high",
+      "categories": [
+        "infra",
+        "tests"
+      ],
+      "tasks": [
+        "Codify expectations about directories, module names, and key shared components",
+        "Add checks for duplicate or dead entry points that bypass AppContext and SqlStore",
+        "Expose output as both human-readable and machine-readable for CI gating",
+        "Integrate with system_upgrader_agent to highlight files needing migration",
+        "Ensure validations are fast enough to run frequently during development"
+      ],
+      "phase_ids": [
+        "phase_architecture_env",
+        "phase_testing_deployment_ai"
+      ]
+    },
+    {
+      "rel_path": "view_dq_pairs.py",
+      "role": "Viewing tool for exploring the dq_pairs universe and its key attributes.",
+      "priority": "medium",
+      "categories": [
+        "web_ui",
+        "research"
+      ],
+      "tasks": [
+        "Refactor to read dq_pairs from the canonical SqlStore/DuckDB location",
+        "Standardize views and metrics with those used in the main web dashboard",
+        "Add environment/profile awareness and clear indication of data freshness",
+        "Prepare a callable function that UI tabs or agents can reuse for dq_pairs views"
+      ],
+      "phase_ids": [
+        "phase_data_layer",
+        "phase_signals_portfolio",
+        "phase_web_app_ux"
+      ]
+    }
+  ]
+}

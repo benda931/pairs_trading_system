@@ -1,0 +1,85 @@
+# 📦 full_pairs_trading_system.py
+# קובץ ראשי שמריץ את המערכת המלאה – כולל חיבור ל-IBKR, ניתוח תנודתיות, פתיחת עסקאות לפי Z-score ועוד
+
+from ibkr_connection import connect_ibkr
+from pairs import load_pairs
+from utils import (
+    load_config,
+    calculate_zscore,
+    log_trade,
+    load_price_data,
+    calculate_half_life,
+    calculate_correlation,
+    calculate_volatility_zscore
+)
+from volatility import calculate_atr, adjust_position_ratio
+from trade_logic import should_open_trade, should_close_trade, evaluate_edge
+
+import time
+
+
+def main():
+    # שלב 1: טען הגדרות מהקובץ
+    config = load_config()
+
+    # שלב 2: טען את רשימת הזוגות
+    pairs = load_pairs()
+
+    # שלב 3: התחבר ל-IBKR
+    ib = connect_ibkr(config["ib_host"], config["ib_port"], config["client_id"])
+    if ib is None:
+        print("❌ לא הצלחנו להתחבר ל-IBKR. עצירה.")
+        return
+
+    print(f"\n✅ מחובר ל-IBKR. סורק {len(pairs)} זוגות...")
+
+    # שלב 4: עבור על כל זוג
+    for symbol_x, symbol_y in pairs:
+        try:
+            df_x = load_price_data(symbol_x)
+            df_y = load_price_data(symbol_y)
+
+            z = calculate_zscore(df_x['close'], df_y['close'], config["rolling_window"])
+            atr_x = calculate_atr(df_x, config["atr_window"])
+            atr_y = calculate_atr(df_y, config["atr_window"])
+            ratio = adjust_position_ratio(atr_x.iloc[-1], atr_y.iloc[-1])
+
+            correlation = calculate_correlation(df_x['close'], df_y['close'])
+            half_life = calculate_half_life(df_x['close'] - df_y['close'])
+            vol_zscore = calculate_volatility_zscore(df_x['close'], window=config["rolling_window"])
+            edge = evaluate_edge(z, ratio)
+
+            print(f"\n📊 זוג: {symbol_x}/{symbol_y}")
+            print(f"Z: {z:.2f} | ATR Ratio: {ratio:.2f} | Edge: {edge:.2f}")
+            print(f"Corr: {correlation:.2f} | Half-life: {half_life:.1f} | Vol-Z: {vol_zscore:.2f}")
+
+            if correlation < config["min_correlation"]:
+                print("⛔ קורלציה נמוכה – מדלג")
+                continue
+            if not (config["min_half_life"] <= half_life <= config["max_half_life"]):
+                print("⛔ half-life לא תקין – מדלג")
+                continue
+            if not (config["min_volatility_zscore"] <= vol_zscore <= config["max_volatility_zscore"]):
+                print("⛔ סטיית תנודתיות קיצונית – מדלג")
+                continue
+            if edge < config["min_edge"]:
+                print("⛔ edge נמוך – מדלג")
+                continue
+
+            # פתיחת עסקה
+            if should_open_trade(z, config["z_open"]):
+                print("🚀 פותח עסקה (לוג בלבד בשלב זה)")
+                log_trade(symbol_x, symbol_y, z, ratio, "open")
+
+            # סגירת עסקה
+            elif should_close_trade(z, config["z_close"]):
+                print("💼 סוגר עסקה (לוג בלבד בשלב זה)")
+                log_trade(symbol_x, symbol_y, z, ratio, "close")
+
+        except Exception as e:
+            print(f"⚠️ שגיאה בזוג {symbol_x}/{symbol_y} – {e}")
+
+        time.sleep(1)  # מנוחה קצרה בין זוג לזוג
+
+if __name__ == "__main__":
+    main()

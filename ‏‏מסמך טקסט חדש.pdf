@@ -1,0 +1,263 @@
+מדריך פונקציות ושימושים למערכת האופטימיזציה
+
+תוכן
+
+common.helpers
+
+common.matrix_helpers
+
+advanced_metrics
+
+דוגמות ייבוא ושילוב ב-optim_backtester_v5.py
+
+common.helpers
+
+ריכוז פונקציות כלליות לניהול קבצים, לוגים, פונקציות סטטיסטיות ועוד.
+
+1. IO Utilities
+
+read_json(path: PathLike) -> Any
+
+תכלית: קריאה ופקוח JSON מתוך קובץ.
+
+שימוש: טעינת נתוני קונפיגורציה, נתונים טבלאיים ושמירתם למבנה Python.
+
+דוגמה:
+
+from common.helpers import read_json
+data = read_json("config.json")
+
+write_json(obj: Any, path: PathLike, indent: int = 2)
+
+תכלית: כתיבת אובייקט Python כ-JSON באופן אטומי.
+
+שימוש: שמירת תוצאות סימולציה, פרמטרים, מטא־דאטה.
+
+דוגמה:
+
+from common.helpers import write_json
+results = {"profit": 1234}
+write_json(results, "results.json")
+
+read_yaml(path: PathLike) / write_yaml(...)
+
+תכלית: קריאה/כתיבה של קבצי YAML אם PyYAML מותקן.
+
+שימוש: מערכי קונפיגורציה מורכבים, פרמטרים רב־שלביים.
+
+2. Logging & Profiling
+
+get_logger(name: str=None, level: int=logging.INFO)
+
+תכלית: לוגר עם פורמט צבעוני.
+
+שימוש: הדפסת אירועים, ניפוי שגיאות.
+
+דוגמה:
+
+from common.helpers import get_logger
+log = get_logger(__name__)
+log.info("Simulation started")
+
+@contextlib.contextmanager timing(label: str)
+
+תכלית: מדידת זמן ריצה של בלוקים.
+
+שימוש: בenchmarks ובדיקות ביצועים.
+
+דוגמה:
+
+from common.helpers import timing
+with timing("backtest"):  # logs זמן
+    run_backtest()
+
+3. Functional Utilities
+
+rolling_sharpe_ratio(returns, window, risk_free_rate, annualization) -> np.ndarray
+
+תכלית: חישוב יחסי שרפ נעים.
+
+נוסחה:
+
+
+: ממוצע התשואות במסגרת החלון
+
+: שיעור חסרון
+
+: סטיית תקן
+
+: תקופת אנליזה (למשל 252)
+
+שימוש: מדדי סיכון נעים, איתור נקודות מומנטום.
+
+דוגמה:
+
+from common.helpers import rolling_sharpe_ratio
+sr = rolling_sharpe_ratio(daily_rets, window=20)
+
+garch_volatility(returns, p=1, q=1, horizon=1)
+
+תכלית: אומדן תנודתיות על בסיס מודל GARCH(p,q).
+
+שימוש: תחזית תנודתיות, חישובי VaR מתקדמים.
+
+דוגמה:
+
+from common.helpers import garch_volatility
+vol = garch_volatility(returns, p=1, q=1)
+
+risk_metrics(returns, alpha=0.05, window=None) -> dict
+
+תכלית: חישוב VaR, CVaR, max drawdown, ulcer index.
+
+נוסחאות:
+
+VaR: אחוזון 
+
+CVaR: ממוצע הפסדים מתחת ל-VaR
+
+max drawdown: 
+
+ulcer index:  כאשר 
+
+שימוש: סקירת סיכונים כוללת, השוואת אסטרטגיות.
+
+דוגמה:
+
+from common.helpers import risk_metrics
+metrics = risk_metrics(returns, alpha=0.01, window=100)
+
+4. Miscellaneous
+
+flatten_dict / unflatten_dict: הפיכת dict מקונחת לשטוחה ולהיפך.
+
+deep_merge: מיזוג מילונים עם אפשרות overwrite.
+
+humanize_bytes(n): המרת בייטים למחרוזת רל
+
+hash_file(path, algorithm): חישוב hash קבצים.
+
+load_dotenv(path, override): טעינת משתני סביבת .env.
+
+gpu_accelerate: דקורטור להאצת חישובים עם CuPy.
+
+common.matrix_helpers
+
+כלים לעיבוד סדרות מטריצות (Pandas Series of 2D arrays).
+
+1. סדרות מטריצות
+
+ensure_matrix_series(series, name)
+
+תכלית: אימות תקינות הסדרה (לא ריקה, כל איבר במימד 2, ממדים תואמים).
+
+שימוש: טרום עיבוד בכל פונקציה של עיבוד מטריצות.
+
+matrix_correlation(series) -> pd.DataFrame
+
+תכלית: חישוב מטריצת קורלציה בין אלמנטים ב־Series (pairwise).
+
+שימוש: איתור זוגות מתואמים במטבעות, מניות.
+
+matrix_covariance(series) -> pd.DataFrame
+
+תכלית: חישוב ממוצע משותף (covariance) בין מטריצות.
+
+matrix_pca(series, n_components) -> pd.DataFrame
+
+תכלית: פריסה למרכיבים עיקריים.
+
+מתמטיקה: SVD 
+
+2. כלים מתקדמים
+
+broadcast_to_series: התאמת צורות למטריצות.
+
+save_tensor_series, load_tensor_series: שמירה וטעינה (.npz).
+
+apply_matrix_series, apply_matrix_series_parallel: יישום פונקציות למטריצה בכל איבר.
+
+rolling_matrix: חישובי rolling על סדרת מטריצות.
+
+robust_cov: covariance חזקה מפני outliers.
+
+detect_outliers: איתור חריגים בסדרה.
+
+kernel_pca: PCA גרעיני.
+
+pairwise_distances: חישוב מרחקי L2/L1 בין מטריצות.
+
+cross_covariance: covariance משותף בין סדרות שונות.
+
+svd_decompose: פירוק SVD גנרי.
+
+advanced_metrics
+
+מטריקות מתקדמות למדידה והשוואה בין סיגנלים.
+
+1. סדרת מדדים
+
+rolling_covariance(series): covariance נעים.
+
+rolling_spectral_analysis(series): אנליזה ספקטרלית נעה.
+
+rolling_mahalanobis_distance(series): מרחק mahalanobis נעים.
+
+rolling_distance_correlation(series): correlation מרחקית נעה.
+
+2. מדדים סטטיים
+
+dynamic_time_warping(series): DTW לחפיפה בין סדרות.
+
+mahalanobis_distance(series): מרחק מרחבי בין וקטורים.
+
+distance_correlation(series): correlation על בסיס מרחק.
+
+spectral_analysis(series): הפענוח הספקטרלי של אות.
+
+kalman_filter(series): סינון קלמן לחיזוי סדרות.
+
+cointegration_test(series, method): בדיקות קוינטגרציה (Engle-Granger, Johansen).
+
+דוגמות ייבוא ושילוב ב-optim_backtester_v5.py 
+
+# ייבוא מודולים
+from common.helpers import (
+    read_json, write_json,
+    rolling_sharpe_ratio, risk_metrics,
+    flatten_dict, deep_merge,
+    load_dotenv, humanize_bytes
+)
+from common.matrix_helpers import (
+    ensure_matrix_series, matrix_correlation,
+    matrix_pca, rolling_matrix
+)
+from advanced_metrics import (
+    cointegration_test, dynamic_time_warping,
+    kalman_filter, distance_correlation
+)
+
+# שימוש בשלבי ה-backtest
+# 1. טען נתונים
+config = read_json('config.json')
+# 2. טען סדרת מטריצות
+series = load_tensor_series('price_series.npz')
+ensure_matrix_series(series, 'price input')
+# 3. חישובי קורלציות
+corr = matrix_correlation(series)
+# 4. פרוס PCA
+pca_res = matrix_pca(series, n_components=3)
+# 5. מדדי סיכון
+rets = compute_returns(series)
+sr = rolling_sharpe_ratio(rets, window=20)
+rmetrics = risk_metrics(rets, alpha=0.05)
+# 6. בדיקות קוינטגרציה
+coint = cointegration_test(series, method='johansen')
+# 7. שימוש ב-DTW להשוואת זוגות
+dtw_res = dynamic_time_warping(series)
+
+# קונפיגורציה
+env = load_dotenv('.env', override=True)
+
+להורדה כ־PDF: העתק טקסט זה לכלי עריכת Markdown/LaTeX והצא ל־PDF.
+

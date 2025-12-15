@@ -1,0 +1,1 @@
+sym_x,sym_y,seed_category,corr,p_value,half_life,spread_sharpe,spread_sortino,spread_vol,spread_max_dd,spread_pos_ratio,spread_neg_ratio,n_obs,beta,intercept,is_viable,pair_score,pair_label,risk_return_score,stats_quality_score,macro_score,fundamental_score,structure_score,penalty_total,is_clone_like

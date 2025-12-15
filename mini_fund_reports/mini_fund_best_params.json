@@ -1,0 +1,22 @@
+{
+  "SPY-QQQ": {
+    "best_by_score": {},
+    "best_by_sharpe": {}
+  },
+  "XLY-XLP": {
+    "best_by_score": {},
+    "best_by_sharpe": {}
+  },
+  "ITOT-VTI": {
+    "best_by_score": {},
+    "best_by_sharpe": {}
+  },
+  "DIA-SPY": {
+    "best_by_score": {},
+    "best_by_sharpe": {}
+  },
+  "HYG-SPY": {
+    "best_by_score": {},
+    "best_by_sharpe": {}
+  }
+}

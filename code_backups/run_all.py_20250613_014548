@@ -1,0 +1,76 @@
+# 📄 run_all.py – גרסה עם סיסמה מוצפנת וקליטת סיסמה גם דרך BAT
+
+import os
+import subprocess
+import sys
+import base64
+
+# === הגדרות אימות ===
+# הסיסמה האמיתית (Omri2024!) מוצפנת בבסיס Base64
+ENCRYPTED_PASSWORD = "T21yaTIwMjQh"
+
+# === פונקציית פענוח בסיסמה ===
+def decrypt_password(encoded):
+    return base64.b64decode(encoded.encode()).decode()
+
+# === אימות סיסמה (פרמטר או הקלדה רגילה) ===
+def authenticate():
+    actual_password = decrypt_password(ENCRYPTED_PASSWORD)
+
+    # בדיקת סיסמה כפרמטר (לשימוש בקובץ BAT)
+    if len(sys.argv) > 1:
+        if sys.argv[1] == actual_password:
+            print("✅ אימות סיסמה עבר בהצלחה (פרמטר)")
+            return
+        else:
+            print("❌ סיסמה שגויה (פרמטר)")
+            exit()
+
+    # בקשת סיסמה רגילה
+    pw = input("🔐 נא להזין סיסמה להפעלה: ")
+    if pw != actual_password:
+        print("❌ סיסמה שגויה. גישה נדחתה.")
+        exit()
+
+# === הורדת נתונים אם צריך ===
+def download_data():
+    if not os.path.exists("data") or len(os.listdir("data")) == 0:
+        print("⬇️ מוריד נתונים מהאינטרנט...")
+        subprocess.call(["python", "data_loader.py"])
+    else:
+        print("✅ תיקיית נתונים קיימת – מדלג על הורדה")
+
+# === בדיקת קבצים חיוניים ===
+def check_files():
+    required_files = [
+        "config.json",
+        "full_pairs_trading_system.py",
+        "dashboard.py",
+        "utils.py",
+        "volatility.py",
+        "trade_logic.py",
+        "pairs.py",
+        "ibkr_connection.py"
+    ]
+    missing = [f for f in required_files if not os.path.exists(f)]
+    if missing:
+        print("❌ חסרים קבצים: ", missing)
+        return False
+    return True
+
+# === הרצת המערכת והדשבורד ===
+def run_all():
+    print("🚀 מריץ את המערכת הראשית...")
+    subprocess.Popen(["python", "full_pairs_trading_system.py"])
+    print("📊 פותח את הדשבורד...")
+    subprocess.call(["streamlit", "run", "dashboard.py"])
+
+# === נקודת התחלה ===
+if __name__ == "__main__":
+    authenticate()
+    print("📦 התחלת מערכת מסחר זוגי")
+    if check_files():
+        download_data()
+        run_all()
+    else:
+        print("🛑 עצירה – יש להשלים קבצים חסרים לפני המשך.")

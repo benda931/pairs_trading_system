@@ -1,0 +1,64 @@
+# 📊 analysis.py – טאאב ניתוח זוג מעמיק עם אינדיקטורים מתקדמים וגרפים חכמים
+
+import streamlit as st
+import pandas as pd
+import plotly.graph_objects as go
+from utils import (
+    load_price_data, calculate_zscore, calculate_correlation,
+    calculate_half_life, calculate_volatility_zscore,
+    get_implied_volatility, calculate_historical_volatility,
+    calculate_beta, evaluate_pair_quality
+)
+from volatility import calculate_atr
+
+
+def render_analysis_tab():
+    st.header("🧠 ניתוח זוג בודד - פרמטרים מתקדמים")
+
+    col1, col2 = st.columns(2)
+    with col1:
+        symbol_x = st.text_input("נייר X", value="SPY", key="sym_x")
+    with col2:
+        symbol_y = st.text_input("נייר Y", value="VOO", key="sym_y")
+
+    if st.button("🔍 בצע ניתוח", type="primary"):
+        try:
+            df_x = load_price_data(symbol_x)
+            df_y = load_price_data(symbol_y)
+            spread = df_x['close'] - df_y['close']
+            z = calculate_zscore(df_x['close'], df_y['close'], window=20)
+            corr = calculate_correlation(df_x['close'], df_y['close'])
+            hl = calculate_half_life(spread)
+            volz = calculate_volatility_zscore(df_x['close'], 20)
+            atr_x = calculate_atr(df_x, 14)
+            iv_x = get_implied_volatility(symbol_x)
+            hv_x = calculate_historical_volatility(df_x['close'])
+            beta_x = calculate_beta(df_x['close'])
+            quality = evaluate_pair_quality(z, corr, hl, volz)
+
+            st.subheader("🔢 פרמטרים עיקריים")
+            st.markdown(f"""
+            - **Z-score:** {z:.2f}  
+            - **Correlation:** {corr:.2f}  
+            - **Half-life:** {hl:.1f} ימים  
+            - **Volatility Z-score:** {volz:.2f}  
+            - **ATR:** {atr_x.iloc[-1]:.3f}  
+            - **IV (משוער):** {iv_x:.3f}  
+            - **HV:** {hv_x:.3f}  
+            - **Beta:** {beta_x:.3f}  
+            - **איכות זוג:** {quality}
+            """)
+
+            st.subheader("📈 גרף מחירים והשוואת זוג")
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(x=df_x['date'], y=df_x['close'], name=symbol_x))
+            fig.add_trace(go.Scatter(x=df_y['date'], y=df_y['close'], name=symbol_y))
+            fig.update_layout(title=f"{symbol_x} מול {symbol_y}", xaxis_title="תאריך", yaxis_title="מחיר", height=400)
+            st.plotly_chart(fig, use_container_width=True)
+
+            st.subheader("📉 גרף סטיית Z")
+            z_series = (spread - spread.rolling(20).mean()) / spread.rolling(20).std()
+            st.line_chart(z_series.dropna())
+
+        except Exception as e:
+            st.error(f"שגיאה בניתוח: {e}")

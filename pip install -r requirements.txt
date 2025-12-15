@@ -1,0 +1,30 @@
+# Core
+numpy
+pandas
+scipy
+scikit-learn
+statsmodels
+
+# Visualization
+matplotlib
+seaborn
+plotly
+dash
+
+# Financial data
+yfinance
+ta
+
+# Optimization
+optuna
+joblib
+
+# Web UI
+streamlit
+
+# AI & explanations (אם רלוונטי לפרויקט)
+shap
+
+# Optional Dev Tools
+pytest
+ipykernel

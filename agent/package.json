@@ -1,0 +1,20 @@
+{
+  "name": "pairs-agent",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx src/index.ts",
+    "apply": "tsx src/apply-canvas.ts canvas.md"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "openai": "^4.57.0",
+    "yargs": "^17.7.2",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^22.18.0",
+    "tsx": "^4.20.5",
+    "typescript": "^5.9.2"
+  }
+}

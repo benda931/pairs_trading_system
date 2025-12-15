@@ -1,0 +1,104 @@
+{
+  "strategy": {
+    "z_open": 2.0,
+    "z_close": 0.5,
+    "max_exposure_per_trade": 0.1,
+    "rolling_window": 60,
+    "atr_window": 14,
+    "use_volatility_adjustment": true,
+    "auto_rebalance": true,
+    "dry_run": false,
+    "log_trades": true
+  },
+  "filters": {
+    "min_correlation": 0.7,
+    "min_edge": 1.2,
+    "min_half_life": 1,
+    "max_half_life": 200,
+    "min_volatility_zscore": -1.5,
+    "max_volatility_zscore": 1.5
+  },
+  "volatility_profiles": {
+    "default": {
+      "min_z": -1.5,
+      "max_z": 1.5
+    },
+    "tech": {
+      "min_z": -2.0,
+      "max_z": 2.0
+    },
+    "etf": {
+      "min_z": -1.0,
+      "max_z": 1.0
+    },
+    "crypto": {
+      "min_z": -2.5,
+      "max_z": 2.5
+    }
+  },
+  "optimization": {
+    "enabled": true,
+    "min_quality_score": 0.5,
+    "max_drawdown_threshold": 0.15,
+    "std_threshold": 0.01,
+    "median_diff_threshold": 0.02,
+    "z_of_atr": 1.0,
+    "price_ratio_dev": 0.03,
+    "volatility_spike": 0.2,
+    "percentile_rank_spread": 85,
+    "rolling_corr_drop": 0.1,
+    "price_ratio_z": 1.5,
+    "log_price_ratio_z": 1.2,
+    "standardized_residual": 1.0,
+    "kalman_residual": 1.1,
+    "cointegration_deviation": 0.05
+  },
+  "ib": {
+    "host": "127.0.0.1",
+    "port": 6083,
+    "client_id": 1
+  },
+  "pairs_file": "pairs_universe.csv",
+  "pairs": [],
+  "metadata": {
+    "version": "3.2",
+    "created": "2025-06-12",
+    "author": "Omri",
+    "note": "250 זוגות אוטומטיים מדורגים עם תחומים מגוונים"
+  },
+  "version": "1.0.0",
+  "last_updated": "2025-12-10T18:58:32Z",
+  "theme": "light",
+  "accent": "Blue",
+  "language": "he",
+  "compact_layout": false,
+  "default_tab": "Dashboard",
+  "show_experimental_tabs": false,
+  "enable_heavy_panels": false,
+  "max_rows_per_table": 5000,
+  "cache_ttl_minutes": 30,
+  "data_dir": "data",
+  "logs_dir": "logs",
+  "studies_dir": "studies",
+  "backtest_start": "2020-01-01",
+  "backtest_end": "2024-12-31",
+  "default_frequency": "D",
+  "benchmark_symbol": "SPY",
+  "max_trials": 100,
+  "n_jobs": 1,
+  "sampler": "tpe",
+  "pruner": "median",
+  "enable_ml_analysis": true,
+  "enable_shap": true,
+  "enable_xgboost": true,
+  "enable_gpu": false,
+  "ib_enable": false,
+  "ib_host": "127.0.0.1",
+  "ib_port": 7497,
+  "ib_client_id": 1,
+  "max_gross_exposure": 1000000.0,
+  "max_leverage": 5.0,
+  "per_pair_risk_budget": 0.01,
+  "engine_url": null,
+  "sql_store_url": null
+}

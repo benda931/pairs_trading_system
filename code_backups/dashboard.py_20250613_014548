@@ -1,0 +1,143 @@
+# 📊 dashboard.py – כולל טעינה חיה מ-API, Score, אופטימיזציה וקונפיגים
+
+import streamlit as st
+import plotly.graph_objects as go
+import pandas as pd
+import numpy as np
+import os
+
+from utils import (
+    calculate_zscore, calculate_half_life,
+    calculate_correlation, calculate_volatility_zscore,
+    load_price_data, get_implied_volatility,
+    calculate_historical_volatility, calculate_beta,
+    evaluate_pair_quality
+)
+from volatility import calculate_atr
+from trade_logic import evaluate_edge
+from data_loader import load_pairs
+from config_manager import load_config
+from backtest import render_backtest_tab
+from analysis import render_analysis_tab
+from insights import render_insights_tab
+from optimization_tab import render_optimization_tab
+from config_tab import render_config_tab
+
+# הגדרות עיצוב
+st.set_page_config(layout="wide")
+st.title("📈 מערכת מסחר זוגי - Dashboard חכם")
+
+# טעינת קונפיגים וזוגות
+config = load_config("config.json")
+pairs = load_pairs()
+
+# טאבים
+tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
+    "🔍 סריקה חכמה", "🧠 ניתוח זוג", "🔁 Backtest",
+    "📊 סקירה כוללת", "🧪 תובנות מערכת", "⚙️ אופטימיזציה", "🛠 קונפיגים"
+])
+
+# === TAB 1: סריקה חכמה ===
+with tab1:
+    st.header("🔍 סריקה מתקדמת על כל הזוגות")
+
+    use_live_data = st.checkbox("🔄 השתמש בנתונים חיים (API)", value=False)
+    results = []
+
+    for pair in pairs:
+        try:
+            sym_x, sym_y = pair["symbols"]
+            score = pair.get("score", 0)
+
+            df_x = load_price_data(sym_x, force_refresh=use_live_data)
+            df_y = load_price_data(sym_y, force_refresh=use_live_data)
+            z = calculate_zscore(df_x['close'], df_y['close'], config["strategy"]["rolling_window"])
+            corr = calculate_correlation(df_x['close'], df_y['close'])
+            hl = calculate_half_life(df_x['close'] - df_y['close'])
+            volz = calculate_volatility_zscore(df_x['close'], config["strategy"]["rolling_window"])
+            edge = evaluate_edge(z, corr)
+            quality = evaluate_pair_quality(z, corr, hl, volz)
+
+            results.append({
+                "X": sym_x, "Y": sym_y, "Z": round(z, 2),
+                "Corr": round(corr, 2), "Half-life": round(hl, 1),
+                "VolZ": round(volz, 2), "Edge": round(edge, 2),
+                "Score": round(score, 3), "Quality": quality
+            })
+        except Exception as e:
+            st.write(f"⚠️ שגיאה בזוג {pair}: {e}")
+            continue
+
+    if results:
+        df = pd.DataFrame(results).sort_values("Quality", ascending=False)
+        st.dataframe(df, use_container_width=True)
+    else:
+        st.warning("⚠️ לא נמצאו תוצאות")
+
+# === TAB 2: ניתוח זוג ===
+with tab2:
+    render_analysis_tab()
+
+# === TAB 3: Backtest ===
+with tab3:
+    render_backtest_tab()
+
+# === TAB 4: סקירה היסטורית מלוגים ===
+with tab4:
+    st.header("📊 סקירה היסטורית מבוססת לוגים")
+    logs = []
+    for file in os.listdir("logs"):
+        if file.endswith("_log.csv"):
+            df = pd.read_csv(os.path.join("logs", file))
+            df['זוג'] = file.replace("_log.csv", "")
+            logs.append(df)
+
+    if logs:
+        df_logs = pd.concat(logs)
+        df_logs["תאריך"] = pd.to_datetime(df_logs["כניסה"], errors='coerce')
+        df_logs = df_logs.dropna(subset=["תאריך"])
+
+        st.subheader("📌 סיכום לפי זוג")
+        summary = df_logs.groupby("זוג")["רווח ($)"].agg(['count', 'sum', 'mean', 'std']).reset_index()
+        summary.columns = ["זוג", "מספר עסקאות", "סה\"כ רווח", "ממוצע", "סטיית תקן"]
+        st.dataframe(summary, use_container_width=True)
+
+        st.markdown("### ⏳ סינון לפי טווח זמן")
+        min_date = df_logs['תאריך'].min()
+        max_date = df_logs['תאריך'].max()
+        date_range = st.date_input("בחר טווח תאריכים", [min_date, max_date])
+
+        if len(date_range) == 2:
+            df_logs = df_logs[(df_logs['תאריך'] >= pd.to_datetime(date_range[0])) & (df_logs['תאריך'] <= pd.to_datetime(date_range[1]))]
+
+        st.markdown("### 📈 רווח מצטבר לאורך זמן")
+        df_logs = df_logs.sort_values("תאריך")
+        df_logs['רווח מצטבר'] = df_logs['רווח ($)'].cumsum()
+        st.line_chart(df_logs.set_index("תאריך")["רווח מצטבר"])
+
+        st.markdown("### 🔎 זיהוי רצפי רווח/הפסד")
+        df_logs['תוצאה'] = df_logs['רווח ($)'] > 0
+        df_logs['רצף ID'] = df_logs.groupby('זוג')['תוצאה'].apply(lambda x: (x != x.shift()).cumsum()).reset_index(drop=True)
+        df_logs['רצף'] = df_logs.groupby(['זוג', 'רצף ID'])['תוצאה'].transform('count')
+        max_streaks = df_logs.groupby('זוג')['רצף'].max().reset_index().sort_values(by='רצף', ascending=False)
+        st.dataframe(max_streaks.rename(columns={'רצף': 'אורך רצף מקסימלי'}), use_container_width=True)
+
+        st.markdown("### 🔍 חיפוש עסקאות")
+        search = st.text_input("חפש סימבול/מילת מפתח")
+        if search:
+            filtered = df_logs[df_logs.apply(lambda row: search.lower() in str(row).lower(), axis=1)]
+            st.dataframe(filtered, use_container_width=True)
+    else:
+        st.warning("⚠️ לא נמצאו לוגים להצגה")
+
+# === TAB 5: תובנות וניתוח מבוסס לוגים ו-GPT ===
+with tab5:
+    render_insights_tab()
+
+# === TAB 6: אופטימיזציה ===
+with tab6:
+    render_optimization_tab()
+
+# === TAB 7: ניהול קונפיגים ===
+with tab7:
+    render_config_tab()

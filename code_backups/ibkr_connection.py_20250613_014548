@@ -1,0 +1,12 @@
+from ib_insync import IB
+
+
+def connect_ibkr(host='127.0.0.1', port=6083, client_id=1):
+    ib = IB()
+    try:
+        ib.connect(host, port, clientId=client_id)
+        print(f"🔌 Connected to IBKR at {host}:{port} with client ID {client_id}")
+        return ib
+    except Exception as e:
+        print("❌ Failed to connect to IBKR:", e)
+        return None

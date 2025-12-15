@@ -1,0 +1,8 @@
+# 📄 pairs.py – טעינת רשימת זוגות
+
+import json
+
+def load_pairs():
+    with open("config.json", "r", encoding="utf-8") as f:
+        config = json.load(f)
+    return config.get("pairs", [])

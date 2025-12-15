@@ -1,0 +1,26 @@
+# 📁 config_tab.py – טאב Streamlit לניהול קבצי קונפיג
+
+import streamlit as st
+import json
+from config_manager import load_config, save_config, list_configs
+
+def render_config_tab():
+    st.header("🛠 ניהול קונפיגים (הגדרות מערכת)")
+
+    # טען קבצים קיימים
+    configs = list_configs()
+    selected_config = st.selectbox("בחר קובץ קונפיג לטעינה", ["config.json"] + configs)
+
+    # טען את הקונפיג הנבחר
+    config = load_config(selected_config)
+
+    # הצג את הקונפיג בפורמט JSON לעריכה
+    st.subheader("⚙️ תצורה נוכחית (JSON)")
+    edited_config = st.json(config, expanded=True)
+
+    # אפשרות לשמירה מחדש
+    st.markdown("### 💾 שמירת קונפיג חדש")
+    file_name = st.text_input("שם קובץ לשמירה (אופציונלי):", "")
+    if st.button("שמור"):
+        file_saved = save_config(edited_config, file_name if file_name else None)
+        st.success(f"✔️ נשמר בהצלחה כ־ {file_saved}")

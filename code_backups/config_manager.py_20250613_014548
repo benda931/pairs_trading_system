@@ -1,0 +1,32 @@
+# 📁 config_manager.py – טעינה, שמירה וניהול קונפיג דינמי למערכת המסחר
+
+import json
+import os
+from datetime import datetime
+
+CONFIG_DIR = "configs"  # תיקייה בה נשמרים כל הקונפיגים
+
+def ensure_config_dir():
+    os.makedirs(CONFIG_DIR, exist_ok=True)
+
+def list_configs():
+    ensure_config_dir()
+    return [f for f in os.listdir(CONFIG_DIR) if f.endswith(".json")]
+
+def load_config(profile="config.json"):
+    path = profile if os.path.isfile(profile) else os.path.join(CONFIG_DIR, profile)
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+def save_config(config, profile=None):
+    ensure_config_dir()
+    if profile is None:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M")
+        profile = f"config_{timestamp}.json"
+    path = os.path.join(CONFIG_DIR, profile)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(config, f, indent=2, ensure_ascii=False)
+    return profile
+
+def load_default_config():
+    return load_config("config.json")

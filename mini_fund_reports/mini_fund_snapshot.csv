@@ -1,0 +1,6 @@
+Pair,n_studies,n_trials,Best_Score,Best_Sharpe,Sharpe_med,Sharpe_p10,Sharpe_p90,DD_med,DD_p90,ParamScore_med,DSR_med,WF_robust_med,Quality,Weight,Notional
+SPY-QQQ,0,0,,,,,,,,,,,EMPTY,0.2,20000.0
+XLY-XLP,0,0,,,,,,,,,,,EMPTY,0.2,20000.0
+ITOT-VTI,0,0,,,,,,,,,,,EMPTY,0.2,20000.0
+DIA-SPY,0,0,,,,,,,,,,,EMPTY,0.2,20000.0
+HYG-SPY,0,0,,,,,,,,,,,EMPTY,0.2,20000.0

@@ -1,0 +1,40 @@
+# 📦 data_loader.py – טעינה והורדה של נתוני מחיר
+
+import os
+import pandas as pd
+import yfinance as yf
+from pairs import load_pairs  # ודא שהקובץ pairs.py כולל load_pairs
+
+# === הורדת נתונים עבור כל הסימבולים ===
+def download_data(symbols, folder="data", period="6mo"):
+    os.makedirs(folder, exist_ok=True)
+    for symbol in symbols:
+        path = os.path.join(folder, f"{symbol}.csv")
+        try:
+            df = yf.download(symbol, period=period)
+            if df.empty:
+                print(f"⚠️ לא נמצאו נתונים ל-{symbol}")
+                continue
+            df = df.reset_index()
+            df = df[["Date", "Open", "High", "Low", "Close", "Volume"]]
+            df.columns = ["date", "open", "high", "low", "close", "volume"]
+            df.to_csv(path, index=False)
+            print(f"✅ נשמר: {symbol}")
+        except Exception as e:
+            print(f"❌ שגיאה ב-{symbol}: {e}")
+
+# === טעינת נתונים לקוד (לדשבורד) ===
+def load_price_data(symbol, folder="data"):
+    path = os.path.join(folder, f"{symbol}.csv")
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"❌ לא נמצא קובץ נתונים עבור {symbol} ב-{folder}")
+    df = pd.read_csv(path, parse_dates=["date"])
+    df.columns = [col.lower() for col in df.columns]
+    return df
+
+# === ריצה עצמאית להורדת כל הנתונים ===
+if __name__ == "__main__":
+    pairs = load_pairs()
+    symbols = {sym.upper() for pair in pairs for sym in pair}
+    print(f"⬇️ מוריד נתונים עבור {len(symbols)} סימבולים...")
+    download_data(sorted(symbols))

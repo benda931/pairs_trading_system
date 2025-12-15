@@ -1,0 +1,73 @@
+import logging
+logging.basicConfig(level=logging.INFO)
+
+# 📄 run_all.py – גרסה עם סיסמה מוצפנת וקליטת סיסמה גם דרך BAT
+
+import os
+import subprocess
+import sys
+import base64
+
+# === הגדרות אימות ===
+ENCRYPTED_PASSWORD = "T21yaTIwMjQh"
+
+def decrypt_password(encoded):
+    return base64.b64decode(encoded.encode()).decode()
+
+def authenticate():
+    actual_password = decrypt_password(ENCRYPTED_PASSWORD)
+
+    if len(sys.argv) > 1:
+        if sys.argv[1] == actual_password:
+            print("✅ אימות סיסמה עבר בהצלחה (פרמטר)")
+            return
+        else:
+            print("❌ סיסמה שגויה (פרמטר)")
+            exit()
+
+    pw = input("🔐 נא להזין סיסמה להפעלה: ")
+    if pw != actual_password:
+        print("❌ סיסמה שגויה. גישה נדחתה.")
+        exit()
+
+def download_data():
+    if not os.path.exists("data") or len(os.listdir("data")) == 0:
+        print("⬇️ מוריד נתונים מהאינטרנט...")
+        subprocess.call(["python", "data_loader.py"])
+    else:
+        print("✅ תיקיית נתונים קיימת – מדלג על הורדה")
+
+def check_files():
+    required_files = [
+        "config.json",
+        "full_pairs_trading_system.py",
+        "dashboard.py",
+        "utils.py",
+        "volatility.py",
+        "trade_logic.py",
+        "pairs.py",
+        "ibkr_connection.py"
+    ]
+    missing = [f for f in required_files if not os.path.exists(f)]
+    if missing:
+        print("❌ חסרים קבצים:", missing)
+        return False
+    return True
+
+def run_all():
+    print("🚀 מריץ את המערכת הראשית...")
+    subprocess.Popen(["python", "full_pairs_trading_system.py"])
+    print("📊 פותח את הדשבורד...")
+    subprocess.call(["streamlit", "run", "dashboard.py"])
+
+if __name__ == "__main__":
+    try:
+        authenticate()
+        print("📦 התחלת מערכת מסחר זוגי")
+        if check_files():
+            download_data()
+            run_all()
+        else:
+            print("🛑 עצירה – יש להשלים קבצים חסרים לפני המשך.")
+    except Exception as e:
+        print(f"Error: {e}")

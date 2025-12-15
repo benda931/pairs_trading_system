@@ -1,0 +1,158 @@
+import streamlit as st
+import pandas as pd
+import numpy as np
+import plotly.graph_objects as go
+import os
+import yfinance as yf
+from utils import (
+    get_implied_volatility,
+    load_price_data,
+    calculate_historical_volatility,
+    calculate_beta
+)
+from volatility import calculate_atr
+
+        data = ticker.option_chain(opt_dates[0])
+        calls = data.calls
+        iv_series = calls['impliedVolatility'].dropna()
+        return float(iv_series.mean()) if not iv_series.empty else 0.2
+    except:
+        return 0.2
+
+def run_backtest(bt_x, bt_y, z_entry, z_exit, config):
+    try:
+        df_x = load_price_data(bt_x)
+        df_y = load_price_data(bt_y)
+        spread = df_x['close'] - df_y['close']
+        z = (spread - spread.rolling(config["rolling_window"]).mean()) / spread.rolling(config["rolling_window"]).std()
+
+        atr_x = calculate_atr(df_x, config["atr_window"])
+        atr_y = calculate_atr(df_y, config["atr_window"])
+        iv_x = get_implied_volatility(bt_x)
+        iv_y = get_implied_volatility(bt_y)
+        hv_x = calculate_historical_volatility(df_x['close'])
+        hv_y = calculate_historical_volatility(df_y['close'])
+        beta_x = calculate_beta(df_x['close'])
+        beta_y = calculate_beta(df_y['close'])
+
+        adj_vol_x = 0.4 * atr_x.iloc[-1] + 0.3 * iv_x + 0.2 * hv_x + 0.1 * beta_x
+        adj_vol_y = 0.4 * atr_y.iloc[-1] + 0.3 * iv_y + 0.2 * hv_y + 0.1 * beta_y
+        ratio = adj_vol_y / adj_vol_x if adj_vol_x != 0 else 1
+
+        capital = 50000
+        position_size_x = capital * ratio / (1 + ratio)
+        position_size_y = capital / (1 + ratio)
+
+        df_bt = pd.DataFrame({
+            "date": df_x['date'],
+            "z": z,
+            "spread": spread,
+            "px": df_x['close'],
+            "py": df_y['close']
+        }).dropna().reset_index(drop=True)
+
+        in_trade = False
+        pnl = []
+        trades = []
+        wins = 0
+        losses = 0
+        peak = 0
+        drawdowns = []
+
+        for i in range(len(df_bt)):
+            row = df_bt.iloc[i]
+            if not in_trade:
+                if abs(row['z']) > z_entry:
+                    in_trade = True
+                    entry_date = row['date']
+                    entry_px = row['px']
+                    entry_py = row['py']
+                    direction = -1 if row['z'] > 0 else 1
+            else:
+                if abs(row['z']) < z_exit:
+                    exit_date = row['date']
+                    exit_px = row['px']
+                    exit_py = row['py']
+                    profit = direction * ((entry_px - exit_px) * position_size_x + (exit_py - entry_py) * position_size_y)
+                    pnl.append(profit)
+                    peak = max(peak, sum(pnl))
+                    drawdown = peak - sum(pnl)
+                    drawdowns.append(drawdown)
+                    if profit > 0:
+                        wins += 1
+                    else:
+                        losses += 1
+                    trades.append({
+                        "כניסה": entry_date,
+                        "יציאה": exit_date,
+                        "Z כניסה": round(z_entry, 2),
+                        "Z יציאה": round(z_exit, 2),
+                        "רווח ($)": round(profit, 2),
+                        "כמות X": round(position_size_x, 2),
+                        "כמות Y": round(position_size_y, 2),
+                        "ATR X": round(atr_x.iloc[-1], 4),
+                        "IV X": round(iv_x, 4),
+                        "HV X": round(hv_x, 4),
+                        "Beta X": round(beta_x, 4)
+                    })
+                    in_trade = False
+
+        if pnl:
+            cum_pnl = pd.Series(pnl).cumsum()
+            win_rate = (wins / len(pnl)) * 100
+            max_dd = max(drawdowns) if drawdowns else 0
+
+            st.success(f"✅ {len(pnl)} עסקאות | רווח כולל: ${sum(pnl):.2f} | ממוצע לעסקה: ${np.mean(pnl):.2f} | Win Rate: {win_rate:.1f}% | Max Drawdown: ${max_dd:.2f}")
+
+            st.plotly_chart(go.Figure(data=go.Scatter(y=cum_pnl, mode="lines+markers")), use_container_width=True)
+            df_pnl = pd.DataFrame({"date": [t['יציאה'] for t in trades], "PnL": cum_pnl})
+            st.plotly_chart(go.Figure(data=go.Scatter(x=df_pnl['date'], y=df_pnl['PnL'], mode="lines+markers")), use_container_width=True)
+            st.plotly_chart(go.Figure(data=go.Scatter(y=pd.Series(drawdowns), mode="lines+markers")), use_container_width=True)
+
+            df_trades = pd.DataFrame(trades)
+            df_trades['משך (ימים)'] = pd.to_datetime(df_trades['יציאה']) - pd.to_datetime(df_trades['כניסה'])
+            df_trades['משך (ימים)'] = df_trades['משך (ימים)'].dt.days
+            avg_duration = df_trades['משך (ימים)'].mean()
+            std_pnl = df_trades['רווח ($)'].std()
+            st.markdown(f"**📌 ממוצע משך עסקה:** {avg_duration:.1f} ימים | **📌 סטיית תקן של רווחים:** ${std_pnl:.2f}")
+
+            df_trades['🔻הפסד / רווח🔺'] = df_trades['רווח ($)'].apply(lambda x: '🔺 רווח' if x >= 0 else '🔻 הפסד')
+            st.dataframe(df_trades, use_container_width=True)
+
+            csv = df_trades.to_csv(index=False).encode('utf-8')
+            st.download_button("📥 הורד טבלת עסקאות (CSV)", data=csv, file_name=f"{bt_x}_{bt_y}_trades.csv", mime="text/csv")
+
+            os.makedirs("logs", exist_ok=True)
+            log_path = f"logs/{bt_x}_{bt_y}_log.csv"
+            df_trades.to_csv(log_path, index=False)
+            st.info(f"📝 לוג נשמר אוטומטית ל: {log_path}")
+
+            try:
+                all_logs = []
+                for file in os.listdir("logs"):
+                    if file.endswith("_log.csv") and file != os.path.basename(log_path):
+                        df_old = pd.read_csv(os.path.join("logs", file))
+                        df_old['מקור'] = file.replace("_log.csv", "")
+                        all_logs.append(df_old)
+                if all_logs:
+                    df_all = pd.concat(all_logs + [df_trades.assign(מקור=f"{bt_x}_{bt_y}")])
+                    pivot = df_all.groupby("מקור")["רווח ($)"].sum().sort_values(ascending=False)
+                    st.markdown("### 📊 השוואה לרווחים קודמים:")
+                    st.bar_chart(pivot)
+            except Exception as e:
+                st.warning(f"⚠️ שגיאה בקריאת סימולציות קודמות: {e}")
+
+            st.markdown("---")
+            st.subheader("🤖 סימולציית ביצוע עסקאות (אוטומציה)")
+            enable_trading = st.toggle("אפשר שליחת פקודות (סימולציה בלבד)", value=False)
+
+            if enable_trading:
+                for trade in trades:
+                    st.markdown(f"🔄 שליחת פקודה: מכירה של {bt_x} וקנייה של {bt_y} בגובה ${capital} לפי יחס {ratio:.2f}")
+                st.success("💡 סימולציית ביצוע הושלמה. בפועל, כאן יישלחו פקודות ל-IBKR או ברוקר אחר לפי הממשק.")
+
+        else:
+            st.warning("⚠️ לא בוצעו עסקאות בתנאים הנתונים")
+
+    except Exception as e:
+        st.error(f"שגיאה בסימולציה: {e}")

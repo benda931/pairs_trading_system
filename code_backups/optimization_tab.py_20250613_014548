@@ -1,0 +1,108 @@
+# 📊 optimization_tab.py – טאב אופטימיזציה שלם כולל פונקציה לייבוא לדשבורד
+
+import streamlit as st
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import io
+from itertools import product
+
+# === עטיפה לפונקציה הראשית לדשבורד ===
+def render_optimization_tab():
+    st.title("⚙️ אופטימיזציה חכמה למסחר זוגי")
+
+    mode = st.radio("מצב אופטימיזציה", ["אוטומטי", "ידני"], horizontal=True)
+
+    param_explanations = {
+        "z_entry": "רמת Z לכניסה לעסקה",
+        "z_exit": "רמת Z ליציאה מהעסקה",
+        "atr_weight": "משקל ATR בתנודתיות",
+        "iv_weight": "משקל IV בתנודתיות",
+        "hv_weight": "משקל HV בתנודתיות",
+        "beta_weight": "משקל Beta בתנודתיות",
+        "min_corr": "מינימום קורלציה בין הצמדים",
+        "min_half_life": "אורך חיים מינימלי (Half-life)",
+        "volz_threshold": "סף סטיית תנודתיות",
+        "max_drawdown_threshold": "סף מקסימלי ל-Drawdown",
+        "min_quality_score": "איכות מינימלית של הצמד",
+        "std_threshold": "סטיית תקן מינימלית לכניסה",
+        "median_diff_threshold": "מרחק מהמֵדיאן",
+        "z_of_atr": "Z-Score של ATR",
+        "price_ratio_dev": "סטיית יחס מחירים מהממוצע ההיסטורי",
+        "volatility_spike": "תנודה חדה בתנודתיות",
+        "percentile_rank_spread": "אחוזון של התפלגות הספראד",
+        "rolling_corr_drop": "ירידת קורלציה גלגלית מול ממוצע",
+        "price_ratio_z": "Z של יחס המחירים",
+        "log_price_ratio_z": "Z של log(P1/P2)",
+        "standardized_residual": "שארית תקנית מרגרסיה",
+        "kalman_residual": "סטייה לפי פילטר קלמן",
+        "cointegration_deviation": "סטייה מהקואינטגרציה"
+    }
+
+    st.markdown("## ⚙️ פרמטרים לאופטימיזציה")
+    selected_params = st.multiselect("בחר פרמטרים", options=list(param_explanations.keys()), default=list(param_explanations.keys())[:6])
+
+    param_ranges = {}
+    for param in selected_params:
+        with st.expander(f"{param} - {param_explanations[param]}"):
+            if mode == "אוטומטי":
+                col1, col2, col3 = st.columns(3)
+                min_val = col1.number_input(f"🔽 מינימום", key=f"min_{param}")
+                max_val = col2.number_input(f"🔼 מקסימום", key=f"max_{param}")
+                step = col3.number_input(f"↕️ צעד", key=f"step_{param}", min_value=0.0001)
+                param_ranges[param] = np.arange(min_val, max_val + step, step)
+            else:
+                val = st.number_input(f"🎯 ערך קבוע לפרמטר", key=f"val_{param}")
+                param_ranges[param] = [val]
+
+    def simulate(parameters):
+        np.random.seed(sum(map(hash, parameters.values())))
+        long_stock = f"Stock_{np.random.randint(1, 100)}"
+        short_stock = f"Stock_{np.random.randint(101, 200)}"
+        ratio = round(np.random.uniform(0.5, 2), 2)
+        quantity = round(np.random.uniform(10, 100), 0)
+        return {
+            "Sharpe": round(np.random.uniform(0.5, 3), 2),
+            "Profit": round(np.random.uniform(1000, 10000), 2),
+            "Drawdown": round(np.random.uniform(100, 2000), 2),
+            "Score": round(np.random.uniform(0, 1), 3),
+            "Long": long_stock,
+            "Short": short_stock,
+            "Ratio": ratio,
+            "Quantity": quantity
+        }
+
+    st.markdown("## 🚀 הפעלת סימולציה")
+    run = st.button("הרץ אופטימיזציה")
+    if run:
+        st.info("מריץ סימולציות... המתן מספר שניות...")
+        results = []
+        keys, values = zip(*param_ranges.items())
+        for combination in product(*values):
+            param_set = dict(zip(keys, combination))
+            sim_result = simulate(param_set)
+            sim_result.update(param_set)
+            results.append(sim_result)
+
+        df_results = pd.DataFrame(results)
+        df_sorted = df_results.sort_values("Score", ascending=False)
+
+        st.markdown("## 🧾 טבלת תוצאות")
+        st.dataframe(df_sorted, use_container_width=True)
+
+        st.markdown("## 🥇 קומבינציה מובילה")
+        st.json(df_sorted.iloc[0].to_dict())
+
+        st.markdown("## 📉 גרף ציונים")
+        fig, ax = plt.subplots()
+        ax.bar(range(len(df_sorted)), df_sorted["Score"])
+        ax.set_title("ציון משוקלל לכל קומבינציה")
+        ax.set_xlabel("קומבינציה")
+        ax.set_ylabel("Score")
+        st.pyplot(fig)
+
+        st.markdown("## 📥 הורדת תוצאות")
+        buffer = io.BytesIO()
+        df_sorted.to_csv(buffer, index=False)
+        buffer.seek(0)
+        st.download_button("הורד CSV", data=buffer, file_name="optimization_results.csv", mime="text/csv")

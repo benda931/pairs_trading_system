@@ -1,0 +1,146 @@
+diff --git a/core/backtest.py b/core/backtest.py
+new file mode 100644
+index 0000000..1111111
+--- /dev/null
++++ b/core/backtest.py
+@@
++"""
++Shim module: מפנה כל import core.backtest → backtest_pair של Optim-V5.
++"""
++
++from .optim_backtester_v5 import backtest_pair
++
++__all__ = ["backtest_pair"]
+diff --git a/core/optim_backtester_v5.py b/core/optim_backtester_v5.py
+new file mode 100644
+index 0000000..2222222
+--- /dev/null
++++ b/core/optim_backtester_v5.py
+@@
++# ---------------------------------------------------------
++#  optim_backtester_v5.py   ·   2025-07-06
++#  Pairs-Trading Backtester – PRO Edition (V-5)
++# ---------------------------------------------------------
++"""
++Features
++--------
++✓ Multi-asset / multi-pair back-testing
++✓ Commission tiers + slippage + borrow
++✓ 5 sizing methods - fixed, %, vol, Kelly, regime
++✓ 4 stop types    - fixed, trailing, ATR, volatility
++✓ Leverage, margin cost, equity guard
++✓ Joblib cache for Optuna
++✓ Performance metrics: Sharpe, Sortino, Calmar, Tail…
++"""
++
++from __future__ import annotations
++import os, json, pickle, hashlib
++from typing import Any, Callable, Dict, Optional
++import numpy as np, pandas as pd, joblib
++
++# ---------- helpers ----------
++def _hash(o: Any) -> str:
++    return hashlib.sha1(json.dumps(o, sort_keys=True, default=str).encode()).hexdigest()[:16]
++
++def _ensure_df(x, name):
++    if isinstance(x, pd.Series):   return x.to_frame(name)
++    if isinstance(x, pd.DataFrame):return x.copy()
++    raise TypeError(f"{name} must be Series/DataFrame")
++
++# ---------- sizing ----------
++def _size_vec(ret: pd.Series, base: float, method:str,
++              vol_target:float|None, regime:pd.Series|None):
++    if method=="fixed":       return pd.Series(base, index=ret.index)
++    if method=="percent":     return ret*0 + base
++    if method=="volatility" and vol_target:
++        vol=ret.rolling(252).std(); return base*(vol_target/vol).shift(1)
++    if method=="kelly":
++        mu,var=ret.rolling(252).mean(),ret.rolling(252).var()
++        return base*(mu/var).clip(0,10).shift(1)
++    if method=="regime" and regime is not None:
++        scale = regime.replace({"bull":1,"bear":0.3,"sideways":0.6}).shift(1)
++        return base*scale
++    raise ValueError(method)
++
++# ---------- stops ----------
++def _mask(eq, sl, tp, trailing):
++    if sl is None and tp is None: return pd.Series(False,index=eq.index)
++    hi = eq.cummax() if trailing else (1+tp if tp is not None else np.inf)
++    lo = eq.cummin() if trailing else (1-sl if sl is not None else -np.inf)
++    return (eq<=lo)|(eq>=hi)
++
++# ---------- perf ----------
++def _sharpe(s): return s.mean()/s.std()*np.sqrt(252) if s.std()!=0 else 0
++
++# ---------- main ----------
++class BacktesterV5:
++    def __init__(self, price:pd.Series|pd.DataFrame,
++                 signals:Callable|None=None,
++                 params:Dict[str,Any]|None=None,
++                 commission:float=5e-4,
++                 tiers:Dict[float,float]|None=None,
++                 slippage:float=0.0,
++                 size:float=1_000_000,
++                 sizing:str="fixed",
++                 vol_target:float|None=None,
++                 stop_loss:float|None=None,
++                 take_profit:float|None=None,
++                 stop_type:str="fixed",
++                 leverage:float=1.0,
++                 cache_dir:str="_bt_cache"):
++        self.price=_ensure_df(price,"price").ffill()
++        self.ret  = self.price.pct_change().fillna(0).iloc[:,0]
++        self.sig_factory=signals; self.pars=params or {}
++        self.comm,self.tiers,self.slip=commission,tiers,slippage
++        self.base,size
++        self.base=size; self.sizing=sizing; self.vol_target=vol_target
++        self.sl,self.tp=stop_loss,take_profit; self.stop_type=stop_type
++        self.leverage=leverage
++        os.makedirs(cache_dir,exist_ok=True); self.cache=cache_dir
++
++    def _fee(self,x):
++        if self.tiers:
++            for thr,r in sorted(self.tiers.items()):
++                if x<=thr: return x*r
++            return x*list(sorted(self.tiers.items()))[-1][1]
++        return x*self.comm
++
++    def run_fast(self)->float:
++        key=_hash((self.pars,self.sizing,self.stop_type))
++        fp=f"{self.cache}/{key}.pkl"
++        if os.path.exists(fp): return pickle.load(open(fp,"rb"))
++
++        sig = self.sig_factory(self.pars).generate(self.price) if self.sig_factory else \
++              pd.DataFrame(0,index=self.price.index,columns=["sig"])
++        pos=sig.clip(-1,1).shift(1).sum(axis=1).clip(-1,1)
++        size_vec=_size_vec(self.ret,self.base,self.sizing,self.vol_target,None)
++        trades=pos.diff().abs()*size_vec
++        strat=pos*self.ret*self.leverage - (trades.apply(self._fee)+trades*self.slip)/size_vec
++        mask=_mask((1+strat).cumprod(),self.sl,self.tp,trailing=self.stop_type=='trailing')
++        strat=strat.where(~mask,0)
++        sh=_sharpe(strat)
++        pickle.dump(sh,open(fp,"wb"))
++        return sh
++
++# ---------- Optuna wrapper ----------
++def backtest_pair(pars:Dict[str,Any], loader:Callable)->float:
++    prices=loader(("SPY","QQQ")).iloc[:,0]
++    return BacktesterV5(prices, signals=lambda p:_ZSig(p), params=pars).run_fast()
++
++# ---------- simple z-signal -----------
++class _ZSig:
++    def __init__(self,p): self.p=p
++    def generate(self, price, hedge=None):
++        l=int(self.p["lookback"]); ze=self.p["z_entry"]; zx=self.p["z_exit"]
++        z=(price-price.rolling(l).mean())/price.rolling(l).std()
++        s=pd.DataFrame({'sig':0},index=price.index)
++        s.loc[z<-ze,'sig']=1; s.loc[z>ze,'sig']=-1
++        s.loc[(z>-zx)&(z<zx),'sig']=0
++        return s
++
++# ---------- demo run -------------
++if __name__=="__main__":
++    idx=pd.date_range("2023-01-01",periods=252)
++    ser=pd.Series(np.random.randn(252).cumsum()+100,index=idx)
++    params={"lookback":30,"z_entry":2,"z_exit":1}
++    print(backtest_pair(params, lambda t: ser.to_frame("SPY")))

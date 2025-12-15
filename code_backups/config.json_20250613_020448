@@ -1,0 +1,1819 @@
+{
+  "strategy": {
+    "z_open": 2.0,
+    "z_close": 0.5,
+    "max_exposure_per_trade": 0.1,
+    "rolling_window": 60,
+    "atr_window": 14,
+    "use_volatility_adjustment": true,
+    "auto_rebalance": true,
+    "dry_run": false,
+    "log_trades": true
+  },
+  "filters": {
+    "min_correlation": 0.7,
+    "min_edge": 1.2,
+    "min_half_life": 1,
+    "max_half_life": 200,
+    "min_volatility_zscore": -1.5,
+    "max_volatility_zscore": 1.5
+  },
+  "volatility_profiles": {
+    "default": {
+      "min_z": -1.5,
+      "max_z": 1.5
+    },
+    "tech": {
+      "min_z": -2.0,
+      "max_z": 2.0
+    },
+    "etf": {
+      "min_z": -1.0,
+      "max_z": 1.0
+    },
+    "crypto": {
+      "min_z": -2.5,
+      "max_z": 2.5
+    }
+  },
+  "optimization": {
+    "enabled": true,
+    "min_quality_score": 0.5,
+    "max_drawdown_threshold": 0.15,
+    "std_threshold": 0.01,
+    "median_diff_threshold": 0.02,
+    "z_of_atr": 1.0,
+    "price_ratio_dev": 0.03,
+    "volatility_spike": 0.2,
+    "percentile_rank_spread": 85,
+    "rolling_corr_drop": 0.1,
+    "price_ratio_z": 1.5,
+    "log_price_ratio_z": 1.2,
+    "standardized_residual": 1.0,
+    "kalman_residual": 1.1,
+    "cointegration_deviation": 0.05
+  },
+  "ib": {
+    "host": "127.0.0.1",
+    "port": 6083,
+    "client_id": 1
+  },
+  "pairs": [
+    {
+      "symbols": [
+        "SQ",
+        "GS"
+      ],
+      "score": 0.5
+    },
+    {
+      "symbols": [
+        "RY",
+        "TD"
+      ],
+      "score": 0.505
+    },
+    {
+      "symbols": [
+        "AXP",
+        "CRM"
+      ],
+      "score": 0.51
+    },
+    {
+      "symbols": [
+        "DIA",
+        "CVX"
+      ],
+      "score": 0.515
+    },
+    {
+      "symbols": [
+        "ORCL",
+        "TD"
+      ],
+      "score": 0.52
+    },
+    {
+      "symbols": [
+        "HAL",
+        "XLI"
+      ],
+      "score": 0.525
+    },
+    {
+      "symbols": [
+        "XBI",
+        "WFC"
+      ],
+      "score": 0.53
+    },
+    {
+      "symbols": [
+        "USB",
+        "VTI"
+      ],
+      "score": 0.535
+    },
+    {
+      "symbols": [
+        "BITO",
+        "XLP"
+      ],
+      "score": 0.54
+    },
+    {
+      "symbols": [
+        "OXY",
+        "XLE"
+      ],
+      "score": 0.545
+    },
+    {
+      "symbols": [
+        "AAPL",
+        "XLE"
+      ],
+      "score": 0.55
+    },
+    {
+      "symbols": [
+        "OXY",
+        "ADBE"
+      ],
+      "score": 0.555
+    },
+    {
+      "symbols": [
+        "DIA",
+        "C"
+      ],
+      "score": 0.56
+    },
+    {
+      "symbols": [
+        "META",
+        "VOO"
+      ],
+      "score": 0.565
+    },
+    {
+      "symbols": [
+        "VLO",
+        "XLY"
+      ],
+      "score": 0.57
+    },
+    {
+      "symbols": [
+        "CVX",
+        "XOM"
+      ],
+      "score": 0.575
+    },
+    {
+      "symbols": [
+        "XLE",
+        "JPM"
+      ],
+      "score": 0.58
+    },
+    {
+      "symbols": [
+        "XBI",
+        "MSFT"
+      ],
+      "score": 0.585
+    },
+    {
+      "symbols": [
+        "XLP",
+        "VT"
+      ],
+      "score": 0.59
+    },
+    {
+      "symbols": [
+        "NVDA",
+        "XOM"
+      ],
+      "score": 0.595
+    },
+    {
+      "symbols": [
+        "SPY",
+        "JPM"
+      ],
+      "score": 0.6
+    },
+    {
+      "symbols": [
+        "SQ",
+        "BTC"
+      ],
+      "score": 0.605
+    },
+    {
+      "symbols": [
+        "XLI",
+        "XLV"
+      ],
+      "score": 0.61
+    },
+    {
+      "symbols": [
+        "XLV",
+        "VTI"
+      ],
+      "score": 0.615
+    },
+    {
+      "symbols": [
+        "KMI",
+        "XLV"
+      ],
+      "score": 0.62
+    },
+    {
+      "symbols": [
+        "AXP",
+        "XLP"
+      ],
+      "score": 0.625
+    },
+    {
+      "symbols": [
+        "COP",
+        "IVV"
+      ],
+      "score": 0.63
+    },
+    {
+      "symbols": [
+        "AAPL",
+        "GBTC"
+      ],
+      "score": 0.635
+    },
+    {
+      "symbols": [
+        "CVX",
+        "AMZN"
+      ],
+      "score": 0.64
+    },
+    {
+      "symbols": [
+        "QQQ",
+        "TD"
+      ],
+      "score": 0.645
+    },
+    {
+      "symbols": [
+        "MSTR",
+        "JPM"
+      ],
+      "score": 0.65
+    },
+    {
+      "symbols": [
+        "SPY",
+        "XLK"
+      ],
+      "score": 0.655
+    },
+    {
+      "symbols": [
+        "VTI",
+        "ETH"
+      ],
+      "score": 0.66
+    },
+    {
+      "symbols": [
+        "XLB",
+        "GOOG"
+      ],
+      "score": 0.665
+    },
+    {
+      "symbols": [
+        "XLP",
+        "EOG"
+      ],
+      "score": 0.67
+    },
+    {
+      "symbols": [
+        "DIA",
+        "OXY"
+      ],
+      "score": 0.675
+    },
+    {
+      "symbols": [
+        "MPC",
+        "VLO"
+      ],
+      "score": 0.68
+    },
+    {
+      "symbols": [
+        "XLP",
+        "RIOT"
+      ],
+      "score": 0.685
+    },
+    {
+      "symbols": [
+        "XBI",
+        "GBTC"
+      ],
+      "score": 0.69
+    },
+    {
+      "symbols": [
+        "BITO",
+        "VT"
+      ],
+      "score": 0.695
+    },
+    {
+      "symbols": [
+        "BITO",
+        "IVV"
+      ],
+      "score": 0.7
+    },
+    {
+      "symbols": [
+        "XOM",
+        "USB"
+      ],
+      "score": 0.705
+    },
+    {
+      "symbols": [
+        "MS",
+        "XLU"
+      ],
+      "score": 0.71
+    },
+    {
+      "symbols": [
+        "TSLA",
+        "RIOT"
+      ],
+      "score": 0.715
+    },
+    {
+      "symbols": [
+        "SPY",
+        "ETH"
+      ],
+      "score": 0.72
+    },
+    {
+      "symbols": [
+        "DIA",
+        "XLK"
+      ],
+      "score": 0.725
+    },
+    {
+      "symbols": [
+        "NVDA",
+        "XLK"
+      ],
+      "score": 0.73
+    },
+    {
+      "symbols": [
+        "QQQ",
+        "MSFT"
+      ],
+      "score": 0.735
+    },
+    {
+      "symbols": [
+        "XLE",
+        "AMZN"
+      ],
+      "score": 0.74
+    },
+    {
+      "symbols": [
+        "BTC",
+        "SPY"
+      ],
+      "score": 0.745
+    },
+    {
+      "symbols": [
+        "SPY",
+        "VLO"
+      ],
+      "score": 0.75
+    },
+    {
+      "symbols": [
+        "ADBE",
+        "AMZN"
+      ],
+      "score": 0.755
+    },
+    {
+      "symbols": [
+        "XLI",
+        "GBTC"
+      ],
+      "score": 0.76
+    },
+    {
+      "symbols": [
+        "XLP",
+        "MS"
+      ],
+      "score": 0.765
+    },
+    {
+      "symbols": [
+        "GBTC",
+        "TD"
+      ],
+      "score": 0.77
+    },
+    {
+      "symbols": [
+        "DIA",
+        "ETH"
+      ],
+      "score": 0.775
+    },
+    {
+      "symbols": [
+        "VT",
+        "XLE"
+      ],
+      "score": 0.78
+    },
+    {
+      "symbols": [
+        "BTC",
+        "XOM"
+      ],
+      "score": 0.785
+    },
+    {
+      "symbols": [
+        "TSLA",
+        "VOO"
+      ],
+      "score": 0.79
+    },
+    {
+      "symbols": [
+        "NVDA",
+        "OXY"
+      ],
+      "score": 0.795
+    },
+    {
+      "symbols": [
+        "SQ",
+        "MSFT"
+      ],
+      "score": 0.8
+    },
+    {
+      "symbols": [
+        "RIOT",
+        "XLV"
+      ],
+      "score": 0.805
+    },
+    {
+      "symbols": [
+        "NVDA",
+        "VTI"
+      ],
+      "score": 0.81
+    },
+    {
+      "symbols": [
+        "NVDA",
+        "SQ"
+      ],
+      "score": 0.815
+    },
+    {
+      "symbols": [
+        "ORCL",
+        "COIN"
+      ],
+      "score": 0.82
+    },
+    {
+      "symbols": [
+        "XOM",
+        "JPM"
+      ],
+      "score": 0.825
+    },
+    {
+      "symbols": [
+        "USB",
+        "MSTR"
+      ],
+      "score": 0.83
+    },
+    {
+      "symbols": [
+        "XOM",
+        "VTI"
+      ],
+      "score": 0.835
+    },
+    {
+      "symbols": [
+        "IVV",
+        "MSTR"
+      ],
+      "score": 0.84
+    },
+    {
+      "symbols": [
+        "QQQ",
+        "WFC"
+      ],
+      "score": 0.845
+    },
+    {
+      "symbols": [
+        "COIN",
+        "XOM"
+      ],
+      "score": 0.85
+    },
+    {
+      "symbols": [
+        "XLK",
+        "OXY"
+      ],
+      "score": 0.855
+    },
+    {
+      "symbols": [
+        "MPC",
+        "META"
+      ],
+      "score": 0.86
+    },
+    {
+      "symbols": [
+        "XOM",
+        "XLF"
+      ],
+      "score": 0.865
+    },
+    {
+      "symbols": [
+        "XLK",
+        "XLP"
+      ],
+      "score": 0.87
+    },
+    {
+      "symbols": [
+        "XBI",
+        "MSTR"
+      ],
+      "score": 0.875
+    },
+    {
+      "symbols": [
+        "GS",
+        "XLY"
+      ],
+      "score": 0.88
+    },
+    {
+      "symbols": [
+        "HAL",
+        "IBIT"
+      ],
+      "score": 0.885
+    },
+    {
+      "symbols": [
+        "VLO",
+        "IVV"
+      ],
+      "score": 0.89
+    },
+    {
+      "symbols": [
+        "XLE",
+        "TD"
+      ],
+      "score": 0.895
+    },
+    {
+      "symbols": [
+        "BTC",
+        "TSLA"
+      ],
+      "score": 0.9
+    },
+    {
+      "symbols": [
+        "JPM",
+        "ETH"
+      ],
+      "score": 0.905
+    },
+    {
+      "symbols": [
+        "DIA",
+        "JPM"
+      ],
+      "score": 0.91
+    },
+    {
+      "symbols": [
+        "CVX",
+        "CRM"
+      ],
+      "score": 0.915
+    },
+    {
+      "symbols": [
+        "NVDA",
+        "KMI"
+      ],
+      "score": 0.92
+    },
+    {
+      "symbols": [
+        "HAL",
+        "GBTC"
+      ],
+      "score": 0.925
+    },
+    {
+      "symbols": [
+        "VTI",
+        "GBTC"
+      ],
+      "score": 0.93
+    },
+    {
+      "symbols": [
+        "XLY",
+        "PSX"
+      ],
+      "score": 0.935
+    },
+    {
+      "symbols": [
+        "ORCL",
+        "META"
+      ],
+      "score": 0.94
+    },
+    {
+      "symbols": [
+        "XLK",
+        "PSX"
+      ],
+      "score": 0.945
+    },
+    {
+      "symbols": [
+        "SQ",
+        "USB"
+      ],
+      "score": 0.95
+    },
+    {
+      "symbols": [
+        "XLK",
+        "AMZN"
+      ],
+      "score": 0.955
+    },
+    {
+      "symbols": [
+        "BTC",
+        "KMI"
+      ],
+      "score": 0.96
+    },
+    {
+      "symbols": [
+        "VTI",
+        "AMZN"
+      ],
+      "score": 0.965
+    },
+    {
+      "symbols": [
+        "SPY",
+        "XLU"
+      ],
+      "score": 0.97
+    },
+    {
+      "symbols": [
+        "BITO",
+        "XLC"
+      ],
+      "score": 0.975
+    },
+    {
+      "symbols": [
+        "XLY",
+        "ADBE"
+      ],
+      "score": 0.98
+    },
+    {
+      "symbols": [
+        "GS",
+        "GBTC"
+      ],
+      "score": 0.985
+    },
+    {
+      "symbols": [
+        "TSLA",
+        "XLE"
+      ],
+      "score": 0.99
+    },
+    {
+      "symbols": [
+        "BTC",
+        "XLY"
+      ],
+      "score": 0.995
+    },
+    {
+      "symbols": [
+        "AXP",
+        "AMZN"
+      ],
+      "score": 1.0
+    },
+    {
+      "symbols": [
+        "ORCL",
+        "COP"
+      ],
+      "score": 1.005
+    },
+    {
+      "symbols": [
+        "XLK",
+        "WFC"
+      ],
+      "score": 1.01
+    },
+    {
+      "symbols": [
+        "RY",
+        "XLF"
+      ],
+      "score": 1.015
+    },
+    {
+      "symbols": [
+        "ORCL",
+        "IVV"
+      ],
+      "score": 1.02
+    },
+    {
+      "symbols": [
+        "MARA",
+        "XLF"
+      ],
+      "score": 1.025
+    },
+    {
+      "symbols": [
+        "XLU",
+        "IWM"
+      ],
+      "score": 1.03
+    },
+    {
+      "symbols": [
+        "IWM",
+        "AMZN"
+      ],
+      "score": 1.035
+    },
+    {
+      "symbols": [
+        "GBTC",
+        "ADBE"
+      ],
+      "score": 1.04
+    },
+    {
+      "symbols": [
+        "VT",
+        "AMZN"
+      ],
+      "score": 1.045
+    },
+    {
+      "symbols": [
+        "MARA",
+        "USB"
+      ],
+      "score": 1.05
+    },
+    {
+      "symbols": [
+        "CVX",
+        "WFC"
+      ],
+      "score": 1.055
+    },
+    {
+      "symbols": [
+        "CRM",
+        "ADBE"
+      ],
+      "score": 1.06
+    },
+    {
+      "symbols": [
+        "XLY",
+        "AMZN"
+      ],
+      "score": 1.065
+    },
+    {
+      "symbols": [
+        "AXP",
+        "HAL"
+      ],
+      "score": 1.07
+    },
+    {
+      "symbols": [
+        "XLB",
+        "ETH"
+      ],
+      "score": 1.075
+    },
+    {
+      "symbols": [
+        "VLO",
+        "CRM"
+      ],
+      "score": 1.08
+    },
+    {
+      "symbols": [
+        "SQ",
+        "MSTR"
+      ],
+      "score": 1.085
+    },
+    {
+      "symbols": [
+        "ORCL",
+        "VT"
+      ],
+      "score": 1.09
+    },
+    {
+      "symbols": [
+        "GOOG",
+        "COP"
+      ],
+      "score": 1.095
+    },
+    {
+      "symbols": [
+        "COP",
+        "GBTC"
+      ],
+      "score": 1.1
+    },
+    {
+      "symbols": [
+        "XLC",
+        "AMZN"
+      ],
+      "score": 1.105
+    },
+    {
+      "symbols": [
+        "C",
+        "EOG"
+      ],
+      "score": 1.11
+    },
+    {
+      "symbols": [
+        "XLU",
+        "OXY"
+      ],
+      "score": 1.115
+    },
+    {
+      "symbols": [
+        "XLI",
+        "META"
+      ],
+      "score": 1.12
+    },
+    {
+      "symbols": [
+        "HAL",
+        "EOG"
+      ],
+      "score": 1.125
+    },
+    {
+      "symbols": [
+        "SPY",
+        "IWM"
+      ],
+      "score": 1.13
+    },
+    {
+      "symbols": [
+        "XLI",
+        "VTI"
+      ],
+      "score": 1.135
+    },
+    {
+      "symbols": [
+        "XBI",
+        "JPM"
+      ],
+      "score": 1.14
+    },
+    {
+      "symbols": [
+        "XLV",
+        "VT"
+      ],
+      "score": 1.145
+    },
+    {
+      "symbols": [
+        "XLP",
+        "XLF"
+      ],
+      "score": 1.15
+    },
+    {
+      "symbols": [
+        "MARA",
+        "RY"
+      ],
+      "score": 1.155
+    },
+    {
+      "symbols": [
+        "XLK",
+        "USB"
+      ],
+      "score": 1.16
+    },
+    {
+      "symbols": [
+        "ADBE",
+        "TD"
+      ],
+      "score": 1.165
+    },
+    {
+      "symbols": [
+        "SQ",
+        "AAPL"
+      ],
+      "score": 1.17
+    },
+    {
+      "symbols": [
+        "XBI",
+        "CRM"
+      ],
+      "score": 1.175
+    },
+    {
+      "symbols": [
+        "HAL",
+        "GS"
+      ],
+      "score": 1.18
+    },
+    {
+      "symbols": [
+        "VLO",
+        "IWM"
+      ],
+      "score": 1.185
+    },
+    {
+      "symbols": [
+        "VTI",
+        "JPM"
+      ],
+      "score": 1.19
+    },
+    {
+      "symbols": [
+        "NVDA",
+        "TSLA"
+      ],
+      "score": 1.195
+    },
+    {
+      "symbols": [
+        "COP",
+        "COIN"
+      ],
+      "score": 1.2
+    },
+    {
+      "symbols": [
+        "NVDA",
+        "TD"
+      ],
+      "score": 1.205
+    },
+    {
+      "symbols": [
+        "XLY",
+        "XLE"
+      ],
+      "score": 1.21
+    },
+    {
+      "symbols": [
+        "VOO",
+        "AMZN"
+      ],
+      "score": 1.215
+    },
+    {
+      "symbols": [
+        "NVDA",
+        "CVX"
+      ],
+      "score": 1.22
+    },
+    {
+      "symbols": [
+        "XLF",
+        "EOG"
+      ],
+      "score": 1.225
+    },
+    {
+      "symbols": [
+        "MARA",
+        "COIN"
+      ],
+      "score": 1.23
+    },
+    {
+      "symbols": [
+        "GOOG",
+        "MS"
+      ],
+      "score": 1.235
+    },
+    {
+      "symbols": [
+        "MS",
+        "GBTC"
+      ],
+      "score": 1.24
+    },
+    {
+      "symbols": [
+        "CVX",
+        "IBIT"
+      ],
+      "score": 1.245
+    },
+    {
+      "symbols": [
+        "EOG",
+        "WFC"
+      ],
+      "score": 1.25
+    },
+    {
+      "symbols": [
+        "AXP",
+        "JPM"
+      ],
+      "score": 1.255
+    },
+    {
+      "symbols": [
+        "BAC",
+        "MSTR"
+      ],
+      "score": 1.26
+    },
+    {
+      "symbols": [
+        "KMI",
+        "IWM"
+      ],
+      "score": 1.265
+    },
+    {
+      "symbols": [
+        "MARA",
+        "XLY"
+      ],
+      "score": 1.27
+    },
+    {
+      "symbols": [
+        "BITO",
+        "META"
+      ],
+      "score": 1.275
+    },
+    {
+      "symbols": [
+        "XLP",
+        "MSTR"
+      ],
+      "score": 1.28
+    },
+    {
+      "symbols": [
+        "MPC",
+        "XLE"
+      ],
+      "score": 1.285
+    },
+    {
+      "symbols": [
+        "DIA",
+        "VTI"
+      ],
+      "score": 1.29
+    },
+    {
+      "symbols": [
+        "XBI",
+        "ETH"
+      ],
+      "score": 1.295
+    },
+    {
+      "symbols": [
+        "XLB",
+        "CRM"
+      ],
+      "score": 1.3
+    },
+    {
+      "symbols": [
+        "IVV",
+        "EOG"
+      ],
+      "score": 1.305
+    },
+    {
+      "symbols": [
+        "XLV",
+        "GBTC"
+      ],
+      "score": 1.31
+    },
+    {
+      "symbols": [
+        "DIA",
+        "WFC"
+      ],
+      "score": 1.315
+    },
+    {
+      "symbols": [
+        "XLI",
+        "PSX"
+      ],
+      "score": 1.32
+    },
+    {
+      "symbols": [
+        "RIOT",
+        "IWM"
+      ],
+      "score": 1.325
+    },
+    {
+      "symbols": [
+        "DIA",
+        "IBIT"
+      ],
+      "score": 1.33
+    },
+    {
+      "symbols": [
+        "TSLA",
+        "CRM"
+      ],
+      "score": 1.335
+    },
+    {
+      "symbols": [
+        "VT",
+        "ETH"
+      ],
+      "score": 1.34
+    },
+    {
+      "symbols": [
+        "MPC",
+        "MSFT"
+      ],
+      "score": 1.345
+    },
+    {
+      "symbols": [
+        "XLK",
+        "C"
+      ],
+      "score": 1.35
+    },
+    {
+      "symbols": [
+        "MPC",
+        "WFC"
+      ],
+      "score": 1.355
+    },
+    {
+      "symbols": [
+        "BITO",
+        "VLO"
+      ],
+      "score": 1.36
+    },
+    {
+      "symbols": [
+        "XLU",
+        "MSTR"
+      ],
+      "score": 1.365
+    },
+    {
+      "symbols": [
+        "TSLA",
+        "GBTC"
+      ],
+      "score": 1.37
+    },
+    {
+      "symbols": [
+        "JPM",
+        "TD"
+      ],
+      "score": 1.375
+    },
+    {
+      "symbols": [
+        "CVX",
+        "VT"
+      ],
+      "score": 1.38
+    },
+    {
+      "symbols": [
+        "AAPL",
+        "IWM"
+      ],
+      "score": 1.385
+    },
+    {
+      "symbols": [
+        "GOOG",
+        "OXY"
+      ],
+      "score": 1.39
+    },
+    {
+      "symbols": [
+        "BAC",
+        "XLC"
+      ],
+      "score": 1.395
+    },
+    {
+      "symbols": [
+        "CRM",
+        "OXY"
+      ],
+      "score": 1.4
+    },
+    {
+      "symbols": [
+        "META",
+        "AMZN"
+      ],
+      "score": 1.405
+    },
+    {
+      "symbols": [
+        "VTI",
+        "IBIT"
+      ],
+      "score": 1.41
+    },
+    {
+      "symbols": [
+        "CVX",
+        "OXY"
+      ],
+      "score": 1.415
+    },
+    {
+      "symbols": [
+        "XLP",
+        "XLC"
+      ],
+      "score": 1.42
+    },
+    {
+      "symbols": [
+        "XLB",
+        "XLK"
+      ],
+      "score": 1.425
+    },
+    {
+      "symbols": [
+        "AXP",
+        "MS"
+      ],
+      "score": 1.43
+    },
+    {
+      "symbols": [
+        "QQQ",
+        "RY"
+      ],
+      "score": 1.435
+    },
+    {
+      "symbols": [
+        "COP",
+        "ADBE"
+      ],
+      "score": 1.44
+    },
+    {
+      "symbols": [
+        "VLO",
+        "TD"
+      ],
+      "score": 1.445
+    },
+    {
+      "symbols": [
+        "XLB",
+        "MS"
+      ],
+      "score": 1.45
+    },
+    {
+      "symbols": [
+        "SPY",
+        "PSX"
+      ],
+      "score": 1.455
+    },
+    {
+      "symbols": [
+        "BITO",
+        "BAC"
+      ],
+      "score": 1.46
+    },
+    {
+      "symbols": [
+        "PSX",
+        "VT"
+      ],
+      "score": 1.465
+    },
+    {
+      "symbols": [
+        "ORCL",
+        "XBI"
+      ],
+      "score": 1.47
+    },
+    {
+      "symbols": [
+        "VT",
+        "USB"
+      ],
+      "score": 1.475
+    },
+    {
+      "symbols": [
+        "XOM",
+        "XLE"
+      ],
+      "score": 1.48
+    },
+    {
+      "symbols": [
+        "SPY",
+        "VTI"
+      ],
+      "score": 1.485
+    },
+    {
+      "symbols": [
+        "BTC",
+        "XLC"
+      ],
+      "score": 1.49
+    },
+    {
+      "symbols": [
+        "QQQ",
+        "MPC"
+      ],
+      "score": 1.495
+    },
+    {
+      "symbols": [
+        "CVX",
+        "XLC"
+      ],
+      "score": 1.5
+    },
+    {
+      "symbols": [
+        "XLB",
+        "VOO"
+      ],
+      "score": 1.505
+    },
+    {
+      "symbols": [
+        "MSTR",
+        "IBIT"
+      ],
+      "score": 1.51
+    },
+    {
+      "symbols": [
+        "XLP",
+        "AMZN"
+      ],
+      "score": 1.515
+    },
+    {
+      "symbols": [
+        "XLF",
+        "VOO"
+      ],
+      "score": 1.52
+    },
+    {
+      "symbols": [
+        "XLF",
+        "WFC"
+      ],
+      "score": 1.525
+    },
+    {
+      "symbols": [
+        "COP",
+        "XLE"
+      ],
+      "score": 1.53
+    },
+    {
+      "symbols": [
+        "QQQ",
+        "XBI"
+      ],
+      "score": 1.535
+    },
+    {
+      "symbols": [
+        "META",
+        "GBTC"
+      ],
+      "score": 1.54
+    },
+    {
+      "symbols": [
+        "AXP",
+        "IVV"
+      ],
+      "score": 1.545
+    },
+    {
+      "symbols": [
+        "XOM",
+        "META"
+      ],
+      "score": 1.55
+    },
+    {
+      "symbols": [
+        "VOO",
+        "ETH"
+      ],
+      "score": 1.555
+    },
+    {
+      "symbols": [
+        "QQQ",
+        "JPM"
+      ],
+      "score": 1.56
+    },
+    {
+      "symbols": [
+        "NVDA",
+        "XLB"
+      ],
+      "score": 1.565
+    },
+    {
+      "symbols": [
+        "COP",
+        "IWM"
+      ],
+      "score": 1.57
+    },
+    {
+      "symbols": [
+        "XLC",
+        "IBIT"
+      ],
+      "score": 1.575
+    },
+    {
+      "symbols": [
+        "XLP",
+        "TD"
+      ],
+      "score": 1.58
+    },
+    {
+      "symbols": [
+        "TSLA",
+        "XLC"
+      ],
+      "score": 1.585
+    },
+    {
+      "symbols": [
+        "BTC",
+        "GS"
+      ],
+      "score": 1.59
+    },
+    {
+      "symbols": [
+        "AXP",
+        "MSTR"
+      ],
+      "score": 1.595
+    },
+    {
+      "symbols": [
+        "CVX",
+        "XLI"
+      ],
+      "score": 1.6
+    },
+    {
+      "symbols": [
+        "AAPL",
+        "XLC"
+      ],
+      "score": 1.605
+    },
+    {
+      "symbols": [
+        "XLU",
+        "KMI"
+      ],
+      "score": 1.61
+    },
+    {
+      "symbols": [
+        "XLI",
+        "MSFT"
+      ],
+      "score": 1.615
+    },
+    {
+      "symbols": [
+        "HAL",
+        "OXY"
+      ],
+      "score": 1.62
+    },
+    {
+      "symbols": [
+        "NVDA",
+        "XBI"
+      ],
+      "score": 1.625
+    },
+    {
+      "symbols": [
+        "AXP",
+        "IBIT"
+      ],
+      "score": 1.63
+    },
+    {
+      "symbols": [
+        "GS",
+        "IVV"
+      ],
+      "score": 1.635
+    },
+    {
+      "symbols": [
+        "XLY",
+        "IWM"
+      ],
+      "score": 1.64
+    },
+    {
+      "symbols": [
+        "ORCL",
+        "RIOT"
+      ],
+      "score": 1.645
+    },
+    {
+      "symbols": [
+        "IWM",
+        "TD"
+      ],
+      "score": 1.65
+    },
+    {
+      "symbols": [
+        "QQQ",
+        "GS"
+      ],
+      "score": 1.655
+    },
+    {
+      "symbols": [
+        "MPC",
+        "XLC"
+      ],
+      "score": 1.66
+    },
+    {
+      "symbols": [
+        "SQ",
+        "XLB"
+      ],
+      "score": 1.665
+    },
+    {
+      "symbols": [
+        "GOOG",
+        "XLU"
+      ],
+      "score": 1.67
+    },
+    {
+      "symbols": [
+        "COIN",
+        "VTI"
+      ],
+      "score": 1.675
+    },
+    {
+      "symbols": [
+        "AXP",
+        "XLY"
+      ],
+      "score": 1.68
+    },
+    {
+      "symbols": [
+        "HAL",
+        "XLV"
+      ],
+      "score": 1.685
+    },
+    {
+      "symbols": [
+        "XBI",
+        "XLC"
+      ],
+      "score": 1.69
+    },
+    {
+      "symbols": [
+        "SQ",
+        "PSX"
+      ],
+      "score": 1.695
+    },
+    {
+      "symbols": [
+        "XLB",
+        "XBI"
+      ],
+      "score": 1.7
+    },
+    {
+      "symbols": [
+        "MARA",
+        "ADBE"
+      ],
+      "score": 1.705
+    },
+    {
+      "symbols": [
+        "SPY",
+        "CRM"
+      ],
+      "score": 1.71
+    },
+    {
+      "symbols": [
+        "BTC",
+        "XLI"
+      ],
+      "score": 1.715
+    },
+    {
+      "symbols": [
+        "AMZN",
+        "IBIT"
+      ],
+      "score": 1.72
+    },
+    {
+      "symbols": [
+        "DIA",
+        "XLF"
+      ],
+      "score": 1.725
+    },
+    {
+      "symbols": [
+        "VTI",
+        "EOG"
+      ],
+      "score": 1.73
+    },
+    {
+      "symbols": [
+        "XLB",
+        "BAC"
+      ],
+      "score": 1.735
+    },
+    {
+      "symbols": [
+        "AXP",
+        "XLU"
+      ],
+      "score": 1.74
+    },
+    {
+      "symbols": [
+        "RIOT",
+        "VOO"
+      ],
+      "score": 1.745
+    }
+  ],
+  "metadata": {
+    "version": "3.2",
+    "created": "2025-06-12",
+    "author": "Omri",
+    "note": "250 זוגות אוטומטיים מדורגים עם תחומים מגוונים"
+  }
+}

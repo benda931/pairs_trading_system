@@ -1,0 +1,98 @@
+# 📊 insights.py – גרסה משודרגת עם טעינת API Key אוטומטית מ-.env
+
+import streamlit as st
+import pandas as pd
+import numpy as np
+import plotly.express as px
+import plotly.graph_objects as go
+import os
+from openai import OpenAI
+from sklearn.linear_model import LinearRegression
+from dotenv import load_dotenv
+
+# טעינת משתני סביבה מ-.env
+load_dotenv()
+api_key = os.getenv("OPENAI_API_KEY")
+client = OpenAI(api_key=api_key)
+
+def render_insights_tab():
+    st.header("🧪 תובנות מערכת חכמות מנתוני העבר")
+
+    logs = []
+    for file in os.listdir("logs"):
+        if file.endswith("_log.csv"):
+            df = pd.read_csv(os.path.join("logs", file))
+            df["זוג"] = file.replace("_log.csv", "")
+            logs.append(df)
+
+    if not logs:
+        st.warning("⚠️ לא נמצאו קבצי לוג")
+        return
+
+    df_logs = pd.concat(logs, ignore_index=True)
+
+    if "רווח ($)" not in df_logs.columns:
+        st.error("העמודה 'רווח ($)' חסרה בקובץ הלוג.")
+        return
+
+    df_logs["רווח ($)"] = pd.to_numeric(df_logs["רווח ($)"], errors='coerce')
+    df_logs = df_logs.dropna(subset=["רווח ($)"])
+
+    st.subheader("📋 סיכום סטטיסטי")
+    summaries = df_logs.groupby("זוג")["רווח ($)"].agg(["count", "mean", "std", "sum"]).reset_index()
+    summaries.columns = ["זוג", "עסקאות", "רווח ממוצע", "סטיית תקן", "סה\"כ רווח"]
+    st.dataframe(summaries, use_container_width=True)
+
+    st.subheader("📦 פיזור רווחים לפי זוג")
+    st.plotly_chart(px.box(df_logs, x="זוג", y="רווח ($)", points="all"), use_container_width=True)
+
+    st.subheader("🔥 Heatmap של רווח מצטבר")
+    pivot = df_logs.pivot_table(values="רווח ($)", index="זוג", aggfunc="sum").fillna(0)
+    pivot["log"] = np.log(np.abs(pivot["רווח ($)"]) + 1)
+    fig = px.imshow(pivot[["log"]].T, color_continuous_scale="RdBu", aspect="auto", text_auto=True)
+    st.plotly_chart(fig, use_container_width=True)
+
+    st.subheader("📆 רווח לפי חודשים")
+    df_logs["תאריך"] = pd.to_datetime(df_logs.get("כניסה"), errors='coerce')
+    df_logs = df_logs.dropna(subset=["תאריך"])
+    df_logs["חודש"] = df_logs["תאריך"].dt.to_period("M").astype(str)
+    monthly = df_logs.groupby("חודש")["רווח ($)"].sum().reset_index()
+    st.line_chart(monthly.set_index("חודש"))
+
+    if "משך (ימים)" not in df_logs.columns:
+        if "יציאה" in df_logs.columns and "כניסה" in df_logs.columns:
+            df_logs["כניסה"] = pd.to_datetime(df_logs["כניסה"], errors='coerce')
+            df_logs["יציאה"] = pd.to_datetime(df_logs["יציאה"], errors='coerce')
+            df_logs["משך (ימים)"] = (df_logs["יציאה"] - df_logs["כניסה"]).dt.days.clip(lower=1)
+        else:
+            df_logs["משך (ימים)"] = 1
+
+    if len(df_logs) >= 5:
+        st.subheader("📈 ניתוח רגרסיה")
+        X = df_logs[["משך (ימים)"]]
+        y = df_logs["רווח ($)"]
+        model = LinearRegression().fit(X, y)
+        pred = model.predict(X)
+        fig = go.Figure(data=[
+            go.Scatter(x=X["משך (ימים)"], y=y, mode='markers', name='Actual'),
+            go.Scatter(x=X["משך (ימים)"], y=pred, mode='lines', name='Regression')
+        ])
+        fig.update_layout(title="השפעת משך עסקה על רווח")
+        st.plotly_chart(fig, use_container_width=True)
+
+    st.subheader("🤖 ניתוח GPT לזיהוי תבניות")
+    top_pairs = summaries.sort_values("סה\"כ רווח", ascending=False).head(3)["זוג"].tolist()
+    prompt = f"Analyze these top-performing pairs: {top_pairs}. What common traits or statistical behaviors do they share in successful pairs trading?"
+
+    if st.button("צור תובנה חכמה"):
+        try:
+            response = client.chat.completions.create(
+                model="gpt-4",
+                messages=[
+                    {"role": "system", "content": "You are a financial analyst specializing in pairs trading."},
+                    {"role": "user", "content": prompt}
+                ]
+            )
+            st.markdown(response.choices[0].message.content)
+        except Exception as e:
+            st.error(f"שגיאה בגישה ל-GPT: {e}")

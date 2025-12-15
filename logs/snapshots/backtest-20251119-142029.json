@@ -1,0 +1,44 @@
+{
+  "section": "backtest",
+  "timestamp": "20251119-142029",
+  "git_rev": "",
+  "seed": 1337,
+  "run_id": "run-1337-20251119-142017",
+  "config": {
+    "theme": "light",
+    "accent": "Blue",
+    "backtest_start": "2020-01-01",
+    "backtest_end": "2024-12-31",
+    "max_trials": 100
+  },
+  "controls": {
+    "slippage_bps": 2.0,
+    "fee_bps": 1.0,
+    "max_positions": 5,
+    "rebalance_days": 5,
+    "wf_folds": 3,
+    "warmup_days": 60,
+    "objective": "Sharpe",
+    "risk_model": "None",
+    "capital": 100000.0,
+    "max_exposure_per_trade": 0.05,
+    "max_leverage": 2.0,
+    "seed": 1337,
+    "FF_SHAP_ENABLE": true,
+    "FF_CLUSTERING_ENABLE": true,
+    "FF_META_OPT": false,
+    "FF_TELEMETRY_WANDB": false,
+    "FF_VOL_REGIME_HMM": false,
+    "FF_DOWNLOAD_REPORTS": true,
+    "FF_GPU_ACCEL": false
+  },
+  "feature_flags": {
+    "FF_SHAP_ENABLE": true,
+    "FF_CLUSTERING_ENABLE": true,
+    "FF_META_OPT": false,
+    "FF_TELEMETRY_WANDB": false,
+    "FF_VOL_REGIME_HMM": false,
+    "FF_DOWNLOAD_REPORTS": true,
+    "FF_GPU_ACCEL": false
+  }
+}
