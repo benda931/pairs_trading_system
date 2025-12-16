@@ -1,0 +1,488 @@
+{
+  "version": "2.2.0",
+  "last_updated": "2025-12-10T18:58:24Z",
+  "metadata": {
+    "author": "Omri",
+    "created": "2025-06-12",
+    "note": "HF-grade config: environment, data sources, universe, optimization, risk, dashboard, agents (SqlStore unified on cache.duckdb)"
+  },
+  "environment": {
+    "default_env": "dev",
+    "default_profile": "research",
+    "envs": {
+      "dev": {
+        "description": "Development / research (matches Streamlit env=dev)",
+        "read_only": false,
+        "allow_live_trading": false
+      },
+      "local": {
+        "description": "Legacy local research / development (alias of dev)",
+        "read_only": false,
+        "allow_live_trading": false
+      },
+      "paper": {
+        "description": "IBKR paper trading",
+        "read_only": false,
+        "allow_live_trading": false
+      },
+      "live": {
+        "description": "Production live trading",
+        "read_only": false,
+        "allow_live_trading": true
+      }
+    }
+  },
+  "paths": {
+    "project_root": "C:/Users/omrib/OneDrive/Desktop/pairs_trading_system",
+    "data_dir": "data",
+    "logs_dir": "logs",
+    "studies_dir": "studies",
+    "duckdb_cache_path": "C:/Users/omrib/AppData/Local/pairs_trading_system/cache.duckdb",
+    "sql_store_url": "duckdb:///C:/Users/omrib/AppData/Local/pairs_trading_system/cache.duckdb"
+  },
+  "data": {
+    "primary_source": "sql_store",
+    "fallback_source": "none",
+    "sql_store": {
+      "url": "duckdb:///C:/Users/omrib/AppData/Local/pairs_trading_system/cache.duckdb",
+      "engine_url": "duckdb:///C:/Users/omrib/AppData/Local/pairs_trading_system/cache.duckdb",
+      "schema_version": "1.0.0",
+      "tables": {
+        "prices": "prices",
+        "dq_pairs": "dq_pairs",
+        "signals": "signals",
+        "signals_universe": "signals_universe",
+        "pair_quality": "pair_quality",
+        "risk_state": "risk_state",
+        "risk_timeline": "risk_timeline",
+        "backtests": "backtests",
+        "experiments": "experiments",
+        "universe_snapshots": "universe_snapshots",
+        "dashboard_snapshots": "dashboard_snapshots",
+        "kv_store": "kv_store",
+        "equity_curve": "equity_curve",
+        "positions": "positions"
+      }
+    },
+    "duckdb_cache": {
+      "path": "C:/Users/omrib/AppData/Local/pairs_trading_system/cache.duckdb",
+      "use_wal": true,
+      "auto_maintenance": true,
+      "max_db_size_mb": 2048
+    },
+    "yahoo": {
+      "enabled": false,
+      "max_lookback_years": 10
+    }
+  },
+  "ingestion": {
+    "engine": "ibkr",
+    "historical": {
+      "enabled": true,
+      "max_years_back": 10,
+      "bar_size": "1 day",
+      "what_to_show": "TRADES",
+      "store_to_sql": true,
+      "chunk_days": 365
+    },
+    "intraday": {
+      "enabled": false,
+      "bar_size": "5 mins",
+      "store_to_sql": true,
+      "max_concurrent_symbols": 20
+    }
+  },
+  "universe": {
+    "source": "csv",
+    "csv_file": "data/pairs_universe.csv",
+    "sql_table": "dq_pairs",
+    "auto_sync_to_sql": true,
+    "min_history_days": 750,
+    "min_liquidity_daily_usd": 1000000.0,
+    "min_price": 5.0,
+    "exclude_leveraged_etf": true,
+    "scoring": {
+      "weight_corr": 0.25,
+      "weight_half_life": 0.15,
+      "weight_sharpe": 0.2,
+      "weight_drawdown": 0.1,
+      "weight_regime_stability": 0.2,
+      "weight_data_quality": 0.1,
+      "min_total_score": 0.5
+    },
+    "profiles": {
+      "research": {
+        "max_pairs": 300,
+        "min_correlation": 0.6
+      },
+      "live": {
+        "max_pairs": 120,
+        "min_correlation": 0.7
+      }
+    }
+  },
+  "strategy": {
+    "name": "pairs_mean_reversion",
+    "z_open": 2.0,
+    "z_close": 0.5,
+    "max_exposure_per_trade": 0.1,
+    "rolling_window": 60,
+    "atr_window": 14,
+    "use_volatility_adjustment": true,
+    "auto_rebalance": true,
+    "dry_run": false,
+    "log_trades": true,
+    "slippage_bps": 1.0,
+    "commission_bps": 0.5,
+    "min_hold_days": 1,
+    "max_hold_days": 30
+  },
+  "filters": {
+    "min_correlation": 0.7,
+    "min_edge": 1.2,
+    "min_half_life": 1,
+    "max_half_life": 200,
+    "min_volatility_zscore": -1.5,
+    "max_volatility_zscore": 1.5,
+    "max_correlation_drift": 0.2,
+    "max_spread_tail_prob": 0.01,
+    "max_outlier_ratio": 0.05,
+    "min_cointegration_pvalue": 0.0,
+    "max_cointegration_pvalue": 0.1
+  },
+  "volatility_profiles": {
+    "default": {
+      "min_z": -1.5,
+      "max_z": 1.5
+    },
+    "tech": {
+      "min_z": -2.0,
+      "max_z": 2.0
+    },
+    "etf": {
+      "min_z": -1.0,
+      "max_z": 1.0
+    },
+    "crypto": {
+      "min_z": -2.5,
+      "max_z": 2.5
+    }
+  },
+  "backtest": {
+    "start": "2020-01-01",
+    "end": "2024-12-31",
+    "frequency": "D",
+    "capital_base": 1000000.0,
+    "benchmark_symbol": "SPY",
+    "transaction_cost_bps": 1.0,
+    "slippage_model": "simple_bps",
+    "use_sql_store": true,
+    "write_results_to_sql": true
+  },
+  "optimization": {
+    "enabled": true,
+    "min_quality_score": 0.5,
+    "max_drawdown_threshold": 0.15,
+    "std_threshold": 0.01,
+    "median_diff_threshold": 0.02,
+    "z_of_atr": 1.0,
+    "price_ratio_dev": 0.03,
+    "volatility_spike": 0.2,
+    "percentile_rank_spread": 85,
+    "rolling_corr_drop": 0.1,
+    "price_ratio_z": 1.5,
+    "log_price_ratio_z": 1.2,
+    "standardized_residual": 1.0,
+    "kalman_residual": 1.1,
+    "cointegration_deviation": 0.05,
+    "engine": {
+      "max_trials": 100,
+      "n_jobs": 1,
+      "sampler": "tpe",
+      "pruner": "median",
+      "use_gpu_if_available": false,
+      "sampler_params": {
+        "tpe_n_startup_trials": 20,
+        "tpe_n_ei_candidates": 24,
+        "cmaes_sigma0": 0.25
+      },
+      "pruner_params": {
+        "warmup_steps": 20,
+        "min_trials": 40
+      },
+      "study_name_prefix": "pairs_opt"
+    },
+    "zoom_campaign": {
+      "enabled": true,
+      "default_zoom_stages": 3,
+      "study_prefix": "zoom",
+      "save_to_duckdb": true,
+      "use_dq_pairs_universe": true
+    }
+  },
+  "risk": {
+    "max_gross_exposure": 1000000.0,
+    "max_leverage": 5.0,
+    "per_pair_risk_budget": 0.01,
+    "target_annual_vol": 0.12,
+    "max_portfolio_drawdown": 0.2,
+    "max_daily_loss": 0.03,
+    "kill_switch": {
+      "enabled": true,
+      "intraday_drawdown": 0.08,
+      "daily_drawdown": 0.05,
+      "breach_action": "halt_trading"
+    },
+    "intra_day_limits": {
+      "max_intra_day_drawdown": 0.06,
+      "max_intra_day_notional_turnover": 5.0
+    },
+    "bucket_risk_limits": {
+      "etf": {
+        "max_gross_exposure": 0.6,
+        "max_leverage": 3.0
+      },
+      "sector": {
+        "max_gross_exposure": 0.3,
+        "max_leverage": 2.0
+      },
+      "crypto": {
+        "max_gross_exposure": 0.1,
+        "max_leverage": 1.5
+      }
+    }
+  },
+  "portfolio": {
+    "default_portfolio_id": "default",
+    "currency": "USD",
+    "buckets": {
+      "etf": {
+        "max_weight": 0.6
+      },
+      "sector": {
+        "max_weight": 0.3
+      },
+      "crypto": {
+        "max_weight": 0.1
+      }
+    }
+  },
+  "macro_engine": {
+    "enabled": false,
+    "factors": [
+      "slope_10y_3m",
+      "vix_term",
+      "credit_spread_ig_hy",
+      "usd_index",
+      "inflation_swap_5y",
+      "growth_nowcast"
+    ],
+    "default_regime_model": "simple_4_regimes",
+    "regime_labels": [
+      "Risk-On",
+      "Risk-Off",
+      "Neutral",
+      "Crisis"
+    ],
+    "update_frequency": "daily",
+    "data_sources": [
+      "sql_store",
+      "external_api"
+    ]
+  },
+  "ibkr": {
+    "enabled": false,
+    "host": "127.0.0.1",
+    "port": 7497,
+    "client_id": 1,
+    "mode": "paper",
+    "base_currency": "USD",
+    "max_parallel_requests": 5,
+    "min_reconnect_interval_sec": 5
+  },
+  "execution": {
+    "broker": "ibkr",
+    "allow_auto_trade": false,
+    "min_order_value_usd": 500.0,
+    "max_orders_per_minute": 20,
+    "default_time_in_force": "DAY"
+  },
+  "dashboard": {
+    "theme": "light",
+    "accent": "Blue",
+    "language": "he",
+    "compact_layout": false,
+    "default_tab": "Dashboard",
+    "show_experimental_tabs": false,
+    "enable_heavy_panels": false,
+    "max_rows_per_table": 5000,
+    "cache_ttl_minutes": 30,
+    "profiles": {
+      "trading": {
+        "default_tab": "home",
+        "show_risk_banner": true,
+        "show_macro_banner": true
+      },
+      "research": {
+        "default_tab": "matrix",
+        "show_risk_banner": false,
+        "show_macro_banner": true
+      },
+      "risk": {
+        "default_tab": "risk",
+        "show_risk_banner": true,
+        "show_macro_banner": true
+      }
+    }
+  },
+  "agents": {
+    "code_agent_enabled": true,
+    "execution_agent_enabled": false,
+    "max_parallel_tasks": 2,
+    "models": {
+      "code": "gpt-5.1-thinking",
+      "analysis": "gpt-5.1-thinking",
+      "execution": "gpt-5.1-thinking"
+    },
+    "timeouts_sec": {
+      "code": 120,
+      "analysis": 90,
+      "execution": 60
+    },
+    "max_retries": 1,
+    "safety": {
+      "require_human_confirm_live_trades": true,
+      "allow_config_edits": true
+    }
+  },
+  "telemetry": {
+    "log_level": "INFO",
+    "log_rotation_mb": 20,
+    "keep_log_backups": 5,
+    "sentry_enabled": false,
+    "wandb_enabled": false,
+    "sql_store_logging": {
+      "enabled": true,
+      "table": "dashboard_logs",
+      "min_level": "INFO"
+    }
+  },
+  "maintenance": {
+    "auto_backup_duckdb": true,
+    "backup_dir": "logs/db_backups",
+    "max_backups": 10,
+    "run_integrity_checks": true,
+    "auto_vacuum_duckdb": true,
+    "auto_prune_old_backtests": {
+      "enabled": true,
+      "keep_days": 365
+    }
+  },
+  "pairs_file": "pairs_universe.csv",
+  "pairs": [],
+  "theme": "light",
+  "accent": "Blue",
+  "language": "he",
+  "compact_layout": false,
+  "default_tab": "Dashboard",
+  "show_experimental_tabs": false,
+  "enable_heavy_panels": false,
+  "max_rows_per_table": 5000,
+  "cache_ttl_minutes": 30,
+  "data_dir": "data",
+  "logs_dir": "logs",
+  "studies_dir": "studies",
+  "backtest_start": "2020-01-01",
+  "backtest_end": "2024-12-31",
+  "default_frequency": "D",
+  "benchmark_symbol": "SPY",
+  "max_trials": 100,
+  "n_jobs": 1,
+  "sampler": "tpe",
+  "pruner": "median",
+  "enable_ml_analysis": true,
+  "enable_shap": true,
+  "enable_xgboost": true,
+  "enable_gpu": false,
+  "ib_enable": false,
+  "ib_host": "127.0.0.1",
+  "ib_port": 7497,
+  "ib_client_id": 1,
+  "max_gross_exposure": 1000000.0,
+  "max_leverage": 5.0,
+  "per_pair_risk_budget": 0.01,
+  "pair_scoring": {
+    "profile": "live",
+    "w_risk_return": 1.2,
+    "w_stats_quality": 0.8,
+    "w_macro": 0.4,
+    "w_fundamental": 0.4,
+    "w_structure": 0.3,
+    "w_sharpe": 1.0,
+    "w_sortino": 0.8,
+    "w_quality_core": 0.6,
+    "penalty_high_corr": 0.8,
+    "penalty_huge_dd": 0.6,
+    "penalty_too_long_hl": 0.7,
+    "penalty_too_short_hl": 0.3,
+    "penalty_clone_like": 1.2,
+    "penalty_low_n_obs": 0.7,
+    "bonus_commodity": 0.25,
+    "bonus_crypto": 0.3,
+    "bonus_sector": 0.15,
+    "bonus_factor": 0.15,
+    "bonus_mixed_style": 0.1,
+    "min_n_obs": 250,
+    "soft_min_n_obs": 600,
+    "min_half_life": 3.0,
+    "max_half_life": 250.0,
+    "min_spread_vol": 0.4,
+    "min_spread_sharpe": -0.2,
+    "max_allowed_corr": 0.99,
+    "high_corr_soft_threshold": 0.97,
+    "sweet_corr_min": 0.7,
+    "sweet_corr_max": 0.95
+  },
+  "fair_value_api": {
+    "enabled": true,
+    "profile": "local",
+    "base_url": "http://localhost:8000",
+    "api_key": "",
+    "connect_timeout_sec": 3.0,
+    "read_timeout_sec": 20.0,
+    "total_timeout_sec": 30.0,
+    "max_retries": 2,
+    "backoff_factor": 0.3,
+    "verify_tls": false,
+    "max_concurrent_requests": 8,
+    "max_requests_per_minute": 300,
+    "log_requests": true,
+    "log_payloads": false,
+    "log_failures": true
+  },
+  "sql_store": {
+    "engine_url": "duckdb:///C:/Users/omrib/AppData/Local/pairs_trading_system/cache.duckdb",
+    "env": "dev",
+    "read_only": false,
+    "schema_version": "1.0.0",
+    "prefix": "",
+    "tables": {
+      "prices": "prices",
+      "dq_pairs": "dq_pairs",
+      "signals": "signals",
+      "signals_universe": "signals_universe",
+      "pair_quality": "pair_quality",
+      "risk_state": "risk_state",
+      "risk_timeline": "risk_timeline",
+      "backtests": "backtests",
+      "experiments": "experiments",
+      "universe_snapshots": "universe_snapshots",
+      "dashboard_snapshots": "dashboard_snapshots",
+      "kv_store": "kv_store",
+      "equity_curve": "equity_curve",
+      "positions": "positions"
+    }
+  },
+  "engine_url": "duckdb:///C:/Users/omrib/AppData/Local/pairs_trading_system/cache.duckdb",
+  "sql_store_url": null
+}

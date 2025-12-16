@@ -1,0 +1,278 @@
+# -*- coding: utf-8 -*-
+"""
+common/ui_helpers.py — Unified Streamlit UI helpers (no use_container_width)
+===========================================================================
+
+מטרה
+-----
+שכבת עטיפה חכמה ל־Streamlit שתמנע:
+    - שימוש מפוזר ב-use_container_width.
+    - כפילויות בקוד UI.
+    - תלות חזקה ב-API של Streamlit בכל מקום.
+
+במקום:
+    st.dataframe(df, use_container_width=True)
+    st.plotly_chart(fig, use_container_width=True)
+    st.line_chart(series, use_container_width=True)
+
+נשתמש ב:
+    from common.ui_helpers import st_table, st_table_styled, st_line, st_plotly
+
+וההחלטה לגבי width='stretch' / 'content' תרוכז כאן בלבד.
+"""
+
+from __future__ import annotations
+
+from typing import Any, Mapping, Optional, Sequence
+
+import pandas as pd
+import streamlit as st
+
+
+# =====================
+# Core width resolver
+# =====================
+
+def _resolve_width(prefer_stretch: bool = True) -> str:
+    """
+    מחליט על ערך width עבור רכיב UI:
+
+    לוגיקה:
+    --------
+    1. אם יש "Dense layout" פעיל (למשל מה-toolbar בדשבורד):
+           st.session_state["toolbar_dense_layout"] == True
+       → תמיד נחזיר 'stretch' כדי לנצל את כל הרוחב.
+
+    2. אחרת:
+       - אם prefer_stretch=True  → 'stretch'
+       - אם prefer_stretch=False → 'content'
+
+    יתרון:
+    -------
+    אם בעתיד תרצה לשנות מדיניות (למשל לפי tab או לפי theme),
+    נעשה את זה רק כאן.
+    """
+    dense = False
+    try:
+        # המפתח הזה מגיע מה-toolbar בדשבורד (render_dashboard_shell)
+        dense = bool(st.session_state.get("toolbar_dense_layout", False))
+    except Exception:
+        dense = False
+
+    if dense:
+        return "stretch"
+
+    return "stretch" if prefer_stretch else "content"
+
+
+# =====================
+# DataFrame helpers
+# =====================
+
+def st_table(
+    df: pd.DataFrame,
+    *,
+    stretch: bool = True,
+    height: Optional[int] = None,
+    key: Optional[str] = None,
+) -> None:
+    """
+    עטיפה ל-st.dataframe עבור DataFrame "רגיל":
+
+    פרמטרים:
+    ---------
+    df:
+        DataFrame להצגה.
+    stretch:
+        אם True → נעדיף width='stretch'.
+        אם False → width='content' (לשולחנות קטנות/טכניות).
+    height:
+        גובה אופציונלי (pixels).
+    key:
+        מפתח Streamlit (לשליטה ב-state).
+
+    שימוש טיפוסי:
+    --------------
+        from common.ui_helpers import st_table
+        st_table(df)  # במקום st.dataframe(df, use_container_width=True)
+    """
+    width = _resolve_width(prefer_stretch=stretch)
+    st.dataframe(df, width=width, height=height, key=key)
+
+
+def st_table_styled(
+    styled: Any,
+    *,
+    stretch: bool = True,
+    height: Optional[int] = None,
+    key: Optional[str] = None,
+) -> None:
+    """
+    עטיפה ל-st.dataframe עבור DataFrame עם .style (Styler):
+
+    לדוגמה:
+        st_table_styled(
+            df.style.background_gradient(axis=None)
+        )
+    """
+    width = _resolve_width(prefer_stretch=stretch)
+    st.dataframe(styled, width=width, height=height, key=key)
+
+
+def st_static_table(
+    df: pd.DataFrame,
+    *,
+    stretch: bool = True,
+) -> None:
+    """
+    עטיפה ל-st.table (טבלה סטטית, לא אינטראקטיבית):
+
+    טובה לתצוגות קטנות / טבלאות לוג.
+    """
+    width = _resolve_width(prefer_stretch=stretch)
+    # st.table לא תומך ב-width, אבל אפשר לעטוף ב-container אם תרצה בעתיד.
+    # לעת עתה פשוט משתמשים בו ישירות.
+    st.table(df)
+
+
+# =====================
+# Charts helpers (line / area / bar)
+# =====================
+
+def st_line(
+    data: Any,
+    *,
+    stretch: bool = True,
+    height: Optional[int] = None,
+    key: Optional[str] = None,
+) -> None:
+    """
+    עטיפה ל-st.line_chart בלי use_container_width.
+
+    data:
+        Series / DataFrame / dict / numpy array וכו'.
+    """
+    width = _resolve_width(prefer_stretch=stretch)
+    st.line_chart(data, width=width, height=height, key=key)
+
+
+def st_area(
+    data: Any,
+    *,
+    stretch: bool = True,
+    height: Optional[int] = None,
+    key: Optional[str] = None,
+) -> None:
+    """
+    עטיפה ל-st.area_chart.
+    """
+    width = _resolve_width(prefer_stretch=stretch)
+    st.area_chart(data, width=width, height=height, key=key)
+
+
+def st_bar(
+    data: Any,
+    *,
+    stretch: bool = True,
+    height: Optional[int] = None,
+    key: Optional[str] = None,
+) -> None:
+    """
+    עטיפה ל-st.bar_chart.
+    """
+    width = _resolve_width(prefer_stretch=stretch)
+    st.bar_chart(data, width=width, height=height, key=key)
+
+
+# =====================
+# Plotly helper
+# =====================
+
+def st_plotly(
+    fig: Any,
+    *,
+    stretch: bool = True,
+    height: Optional[int] = None,
+    key: Optional[str] = None,
+    config: Optional[Mapping[str, Any]] = None,
+) -> None:
+    """
+    עטיפה ל-st.plotly_chart:
+
+    - אין use_container_width.
+    - width נשלט דרך _resolve_width().
+    - מאפשר להעביר config ל-Plotly (hovermode, modeBar וכו').
+
+    שימוש:
+    -------
+        from common.ui_helpers import st_plotly
+        st_plotly(fig)  # במקום st.plotly_chart(fig, use_container_width=True)
+    """
+    width = _resolve_width(prefer_stretch=stretch)
+    st.plotly_chart(fig, width=width, height=height, key=key, config=config)
+
+
+# =====================
+# Convenience: generic dispatchers (future proof)
+# =====================
+
+def st_auto_table(
+    obj: Any,
+    *,
+    stretch: bool = True,
+    height: Optional[int] = None,
+    key: Optional[str] = None,
+) -> None:
+    """
+    עטיפה "אוטומטית" – אם קיבלת:
+        - DataFrame → st_table
+        - Styler     → st_table_styled
+        - dict/list  → נמיר ל-DataFrame ונציג.
+
+    נוח למקומות שבהם אתה לא תמיד יודע מה יחזור.
+    """
+    width = _resolve_width(prefer_stretch=stretch)
+
+    # DataFrame רגיל
+    if isinstance(obj, pd.DataFrame):
+        st.dataframe(obj, width=width, height=height, key=key)
+        return
+
+    # Styler
+    from pandas.io.formats.style import Styler  # type: ignore[import]
+    if isinstance(obj, Styler):
+        st.dataframe(obj, width=width, height=height, key=key)
+        return
+
+    # dict / list -> DataFrame
+    if isinstance(obj, dict):
+        try:
+            df = pd.DataFrame([obj])
+        except Exception:
+            df = pd.DataFrame({"value": [str(obj)]})
+        st.dataframe(df, width=width, height=height, key=key)
+        return
+
+    if isinstance(obj, Sequence) and not isinstance(obj, (str, bytes)):
+        try:
+            df = pd.DataFrame(obj)
+        except Exception:
+            df = pd.DataFrame({"value": [str(x) for x in obj]})
+        st.dataframe(df, width=width, height=height, key=key)
+        return
+
+    # fallback – נהפוך לכל היותר ל-DataFrame עם עמודה אחת
+    df = pd.DataFrame({"value": [str(obj)]})
+    st.dataframe(df, width=width, height=height, key=key)
+
+
+__all__ = [
+    "st_table",
+    "st_table_styled",
+    "st_static_table",
+    "st_line",
+    "st_area",
+    "st_bar",
+    "st_plotly",
+    "st_auto_table",
+]
