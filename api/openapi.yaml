@@ -1,0 +1,580 @@
+openapi: 3.1.0
+info:
+  title: Fair Value Pairs Trading API
+  version: 1.2.0
+  description: |
+    Programmatic API for the Fair Value engine, optimizer, and artifacts.
+    All numeric arrays are expected in chronological order (oldest → newest).
+    This spec includes synchronous and asynchronous optimization flows,
+    artifact listing/downloading, and consistent error handling.
+
+servers:
+  - url: https://api.example.com/v1
+    description: Production
+  - url: https://staging.api.example.com/v1
+    description: Staging
+
+security:
+  - bearerAuth: []
+
+x-tagGroups:
+  - name: Core
+    tags: [System, Engine]
+  - name: Optimization
+    tags: [Optimizer, Jobs, Artifacts]
+  - name: Integrations
+    tags: [Webhooks]
+
+tags:
+  - name: System
+    description: Health and metadata
+  - name: Engine
+    description: Fair Value Engine endpoints
+  - name: Optimizer
+    description: Synchronous optimization (blocking) and study queries
+  - name: Jobs
+    description: Asynchronous optimization jobs
+  - name: Artifacts
+    description: Per-trial / per-fold artifacts (Parquet/CSV) and best JSON
+  - name: Webhooks
+    description: Integration callbacks (async job completion)
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+
+  parameters:
+    StudyId:
+      name: studyId
+      in: path
+      required: true
+      schema: { type: string }
+    JobId:
+      name: jobId
+      in: path
+      required: true
+      schema: { type: string }
+    ArtifactId:
+      name: artifactId
+      in: path
+      required: true
+      schema: { type: string }
+    Page:
+      name: page
+      in: query
+      required: false
+      schema: { type: integer, minimum: 1, default: 1 }
+    PageSize:
+      name: pageSize
+      in: query
+      required: false
+      schema: { type: integer, minimum: 1, maximum: 500, default: 100 }
+    Cursor:
+      name: cursor
+      in: query
+      required: false
+      schema: { type: string }
+
+  schemas:
+    # ---------- Core business objects ----------
+    Ticker:
+      type: string
+      example: XLY
+    Pair:
+      type: array
+      minItems: 2
+      maxItems: 2
+      items:
+        $ref: '#/components/schemas/Ticker'
+      example: ["XLY", "XLP"]
+
+    PricesWide:
+      type: object
+      additionalProperties:
+        type: array
+        items:
+          type: number
+      description: |
+        Wide price matrix keyed by ticker. All arrays MUST be equal length
+        and aligned by time index supplied in `timeIndex`.
+      example:
+        XLY: [100.1, 100.7, 101.2]
+        XLP: [ 98.3,  98.9,  99.1]
+    TimeIndex:
+      type: array
+      items:
+        type: string
+        format: date-time
+      example:
+        - "2024-12-30T00:00:00Z"
+        - "2024-12-31T00:00:00Z"
+        - "2025-01-02T00:00:00Z"
+
+    EngineConfigOverrides:
+      type: object
+      description: Optional overrides for engine configuration (subset of Config).
+      properties:
+        window: { type: integer, example: 252 }
+        min_overlap: { type: integer, example: 60 }
+        log_mode: { type: boolean, example: true }
+        secondary_windows:
+          type: array
+          items: { type: integer }
+          example: [63, 126]
+        use_winsor: { type: boolean, example: true }
+        winsor_p: { type: number, example: 0.01 }
+        zscore_clip:
+          type: array
+          items: { type: number }
+          minItems: 2
+          maxItems: 2
+          example: [-6, 6]
+        volatility_adjust: { type: boolean, example: true }
+        ensemble_mode: { type: string, enum: [none, weighted], example: weighted }
+        ensemble_target: { type: string, enum: [zscore, mispricing], example: mispricing }
+        costs_bps: { type: number, example: 2.0 }
+        slippage_bps: { type: number, example: 2.0 }
+        borrow_bps: { type: number, example: 0.0 }
+        z_in: { type: number, example: 1.25 }
+        z_out: { type: number, example: 0.75 }
+        target_vol_ann: { type: number, example: 0.12 }
+        kelly_fraction: { type: number, example: 0.5 }
+        rp_method: { type: string, enum: [invvol, erc, hrp], example: hrp }
+        cov_method: { type: string, enum: [sample, ridge, lw], example: ridge }
+        cov_shrink_lambda: { type: number, example: 0.2 }
+        beta_mode: { type: string, enum: [static, kalman], example: kalman }
+        kalman_q: { type: number, example: 1e-6 }
+        kalman_r: { type: number, example: 1e-3 }
+
+    PairRow:
+      type: object
+      properties:
+        pair: { $ref: '#/components/schemas/Pair' }
+        window: { type: integer, description: "-1 indicates ensemble row" }
+        y_fair: { type: number }
+        mispricing: { type: number }
+        vol_adj_mispricing: { type: number, nullable: true }
+        zscore: { type: number, nullable: true }
+        band_lower: { type: number, nullable: true }
+        band_upper: { type: number, nullable: true }
+        band_p95: { type: number, nullable: true }
+        halflife: { oneOf: [ { type: number }, { type: string, enum: ["inf"] } ] }
+        adf_p: { type: number, nullable: true }
+        residual_adf_p: { type: number, nullable: true }
+        is_coint: { type: boolean, nullable: true }
+        rolling_corr: { type: number, nullable: true }
+        distance_corr: { type: number, nullable: true }
+        action: { type: string, enum: [long_spread, short_spread, flat] }
+        target_pos_units: { type: number }
+        cost_spread_units: { type: number }
+        net_edge_z: { type: number, nullable: true }
+        sr_net: { type: number, nullable: true }
+        psr_net: { type: number, nullable: true }
+        dsr_net: { type: number, nullable: true }
+        turnover_est: { type: number, nullable: true }
+        avg_hold_days: { type: number, nullable: true }
+        rp_weight: { type: number, nullable: true }
+        reason: { type: string, nullable: true }
+
+    EngineMeta:
+      type: object
+      properties:
+        asof: { type: string, format: date-time }
+        window: { type: integer }
+        secondary_windows:
+          type: array
+          items: { type: integer }
+        log_mode: { type: boolean }
+        ensemble_mode: { type: string, nullable: true }
+
+    EngineResult:
+      type: object
+      properties:
+        meta: { $ref: '#/components/schemas/EngineMeta' }
+        rows:
+          type: array
+          items: { $ref: '#/components/schemas/PairRow' }
+
+    OptConfig:
+      type: object
+      properties:
+        n_trials: { type: integer, default: 100 }
+        timeout_sec: { type: integer, nullable: true }
+        sampler: { type: string, enum: [tpe, cmaes], default: tpe }
+        seed: { type: integer, nullable: true, default: 42 }
+        pruner: { type: string, enum: [none, median, sha], default: median }
+        include_tags:
+          type: array
+          items: { type: string }
+          default: [signal, window, volatility]
+        exclude_tags:
+          type: array
+          items: { type: string }
+        target: { type: string, enum: [dsr_net, psr_net, sr_net], default: dsr_net }
+        use_ensemble: { type: boolean, default: false }
+        agg: { type: string, enum: [mean, median, trimmed_mean], default: median }
+        trim_alpha: { type: number, default: 0.1 }
+        penalty_turnover: { type: number, default: 0.0 }
+        min_avg_hold: { type: number, default: 0.0 }
+        n_folds: { type: integer, default: 3 }
+        test_frac: { type: number, default: 0.2 }
+        purge_frac: { type: number, default: 0.02 }
+
+    OptimizeResult:
+      type: object
+      properties:
+        studyId: { type: string }
+        bestParams: { type: object }
+        bestScore: { type: number }
+        artifacts:
+          type: array
+          items: { type: string, format: uri }
+
+    Artifact:
+      type: object
+      properties:
+        id: { type: string }
+        studyId: { type: string }
+        type: { type: string, enum: [foldRows, bestParams, log] }
+        uri: { type: string, format: uri }
+        size: { type: integer }
+        createdAt: { type: string, format: date-time }
+        checksum: { type: string }
+
+    Job:
+      type: object
+      properties:
+        id: { type: string }
+        type: { type: string, enum: [optimize] }
+        status: { type: string, enum: [queued, running, completed, failed, canceled] }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+        studyId: { type: string, nullable: true }
+        resultRef: { type: string, nullable: true, description: "Artifact URI or studyId" }
+        error: { type: string, nullable: true }
+
+    PageMeta:
+      type: object
+      properties:
+        page: { type: integer }
+        pageSize: { type: integer }
+        total: { type: integer }
+        nextCursor: { type: string, nullable: true }
+
+    Error:
+      type: object
+      required: [code, message]
+      properties:
+        code: { type: string }
+        message: { type: string }
+        details: { type: object, nullable: true }
+
+x-codeSamples:
+  - lang: Python
+    label: Engine (sync)
+    source: |
+      import requests
+      base = "https://api.example.com/v1"
+      token = "YOUR_TOKEN"
+      payload = {
+          "timeIndex": ["2024-12-30T00:00:00Z","2024-12-31T00:00:00Z","2025-01-02T00:00:00Z"],
+          "pricesWide": {"XLY": [100.1, 100.7, 101.2], "XLP": [98.3, 98.9, 99.1]},
+          "pairs": [["XLY","XLP"]],
+          "configOverrides": {"window": 252, "log_mode": True}
+      }
+      r = requests.post(f"{base}/engine/run", json=payload, headers={"Authorization": f"Bearer {token}"})
+      r.raise_for_status()
+      print(r.json())
+  - lang: TypeScript
+    label: Optimizer (sync)
+    source: |
+      const base = "https://api.example.com/v1";
+      const token = "YOUR_TOKEN";
+      const body = {
+        timeIndex: ["2024-12-30T00:00:00Z","2024-12-31T00:00:00Z","2025-01-02T00:00:00Z"],
+        pricesWide: { XLY: [100.1,100.7,101.2], XLP: [98.3,98.9,99.1] },
+        pairs: [["XLY","XLP"],["XLI","XLB"]],
+        optConfig: { n_trials: 50, use_ensemble: true }
+      };
+      const res = await fetch(`${base}/optimizer/run`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      console.log(await res.json());
+
+paths:
+  /health:
+    get:
+      summary: Health check
+      tags: [System]
+      responses:
+        '200':
+          description: OK
+          headers:
+            X-RateLimit-Limit: { description: Calls allowed in the current window, schema: { type: integer } }
+            X-RateLimit-Remaining: { description: Calls remaining in the current window, schema: { type: integer } }
+            X-RateLimit-Reset: { description: Epoch seconds to window reset, schema: { type: integer } }
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: ok }
+                  version: { type: string, example: 1.2.0 }
+        '429': { description: Too Many Requests, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+
+  /engine/run:
+    post:
+      summary: Run Fair Value Engine on a price matrix
+      tags: [Engine]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [timeIndex, pricesWide, pairs]
+              properties:
+                timeIndex: { $ref: '#/components/schemas/TimeIndex' }
+                pricesWide: { $ref: '#/components/schemas/PricesWide' }
+                pairs:
+                  type: array
+                  items: { $ref: '#/components/schemas/Pair' }
+                configOverrides: { $ref: '#/components/schemas/EngineConfigOverrides' }
+            examples:
+              simple:
+                summary: Minimal example
+                value:
+                  timeIndex: ["2024-12-30T00:00:00Z","2024-12-31T00:00:00Z","2025-01-02T00:00:00Z"]
+                  pricesWide:
+                    XLY: [100.1, 100.7, 101.2]
+                    XLP: [ 98.3,  98.9,  99.1]
+                  pairs: [["XLY","XLP"]]
+                  configOverrides: { window: 252, log_mode: true, ensemble_mode: weighted }
+      responses:
+        '200':
+          description: Engine result
+          headers:
+            X-RateLimit-Limit: { description: Calls allowed in the current window, schema: { type: integer } }
+            X-RateLimit-Remaining: { description: Calls remaining in the current window, schema: { type: integer } }
+            X-RateLimit-Reset: { description: Epoch seconds to window reset, schema: { type: integer } }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/EngineResult' }
+        '400': { description: Bad request, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+        '401': { description: Unauthorized, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+        '422': { description: Unprocessable entity, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+        '429': { description: Too Many Requests, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+
+  /optimizer/run:
+    post:
+      summary: Run Optuna optimization over the engine (synchronous job)
+      tags: [Optimizer]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [timeIndex, pricesWide, pairs]
+              properties:
+                timeIndex: { $ref: '#/components/schemas/TimeIndex' }
+                pricesWide: { $ref: '#/components/schemas/PricesWide' }
+                pairs:
+                  type: array
+                  items: { $ref: '#/components/schemas/Pair' }
+                optConfig: { $ref: '#/components/schemas/OptConfig' }
+                includeSpecs:
+                  type: array
+                  items: { type: string }
+                bridgeOverrides:
+                  type: object
+                  additionalProperties: { type: string }
+            examples:
+              default:
+                value:
+                  timeIndex: ["2024-12-30T00:00:00Z","2024-12-31T00:00:00Z","2025-01-02T00:00:00Z"]
+                  pricesWide:
+                    XLY: [100.1, 100.7, 101.2]
+                    XLP: [ 98.3,  98.9,  99.1]
+                  pairs: [["XLY","XLP"],["XLI","XLB"]]
+                  optConfig:
+                    n_trials: 50
+                    use_ensemble: true
+                    agg: trimmed_mean
+                    trim_alpha: 0.1
+                    penalty_turnover: 0.2
+                    min_avg_hold: 3
+                  includeSpecs: ["signal","window","volatility"]
+      responses:
+        '200':
+          description: Optimization result
+          headers:
+            X-RateLimit-Limit: { description: Calls allowed in the current window, schema: { type: integer } }
+            X-RateLimit-Remaining: { description: Calls remaining in the current window, schema: { type: integer } }
+            X-RateLimit-Reset: { description: Epoch seconds to window reset, schema: { type: integer } }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OptimizeResult' }
+        '400': { description: Bad request, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+        '401': { description: Unauthorized, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+        '422': { description: Unprocessable entity, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+        '429': { description: Too Many Requests, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+
+  /optimizer/studies/{studyId}:
+    get:
+      summary: Get study status and best params
+      tags: [Optimizer]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/StudyId'
+      responses:
+        '200':
+          description: Study summary
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OptimizeResult' }
+        '404': { description: Not found, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+        '429': { description: Too Many Requests, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+
+  /jobs:
+    post:
+      summary: Create async optimization job
+      tags: [Jobs]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [timeIndex, pricesWide, pairs]
+              properties:
+                timeIndex: { $ref: '#/components/schemas/TimeIndex' }
+                pricesWide: { $ref: '#/components/schemas/PricesWide' }
+                pairs:
+                  type: array
+                  items: { $ref: '#/components/schemas/Pair' }
+                optConfig: { $ref: '#/components/schemas/OptConfig' }
+                includeSpecs:
+                  type: array
+                  items: { type: string }
+                bridgeOverrides:
+                  type: object
+                  additionalProperties: { type: string }
+      responses:
+        '202':
+          description: Job accepted
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Job' }
+        '400': { description: Bad request, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+        '401': { description: Unauthorized, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+        '429': { description: Too Many Requests, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+
+  /jobs/{jobId}:
+    get:
+      summary: Get job status
+      tags: [Jobs]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/JobId'
+      responses:
+        '200':
+          description: Job status
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Job' }
+        '404': { description: Not found, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+        '429': { description: Too Many Requests, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+
+  /jobs/{jobId}/cancel:
+    post:
+      summary: Cancel a running job
+      tags: [Jobs]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/JobId'
+      responses:
+        '202': { description: Cancel requested, content: { application/json: { schema: { $ref: '#/components/schemas/Job' } } } }
+        '404': { description: Not found, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+        '429': { description: Too Many Requests, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+
+  /artifacts:
+    get:
+      summary: List artifacts
+      tags: [Artifacts]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/StudyId'
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PageSize'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: Artifact list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  meta: { $ref: '#/components/schemas/PageMeta' }
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/Artifact' }
+        '429': { description: Too Many Requests, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+
+  /artifacts/{artifactId}:
+    get:
+      summary: Download artifact (Parquet/CSV/JSON)
+      tags: [Artifacts]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ArtifactId'
+      responses:
+        '200':
+          description: Artifact content
+          headers:
+            Content-Disposition: { description: Download filename, schema: { type: string } }
+          content:
+            application/octet-stream:
+              schema: { type: string, format: binary }
+        '404': { description: Not found, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+        '429': { description: Too Many Requests, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+
+x-webhooks:
+  job.completed:
+    post:
+      summary: Job completion callback (async)
+      description: Sent by the API when a job reaches a terminal state.
+      tags: [Webhooks]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [id, status]
+              properties:
+                id: { type: string }
+                status: { type: string, enum: [completed, failed, canceled] }
+                studyId: { type: string, nullable: true }
+                resultRef: { type: string, nullable: true }
+                error: { type: string, nullable: true }
+                emittedAt: { type: string, format: date-time }
+      responses:
+        '200': { description: Your server acknowledged the webhook }

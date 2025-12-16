@@ -1,0 +1,40 @@
+core/
+├── backtesting.py
+├── optimizer.py
+├── signals.py
+├── analytics.py
+├── visualization.py
+├── feature_selection.py
+├── clustering.py
+├── meta_optimizer.py
+│
+├── statistics/
+│   ├── cointegration.py
+│   ├── stationarity.py
+│   └── zscore_models.py
+│
+├── feature_engineering/
+│   ├── rolling_features.py
+│   ├── entropy.py
+│   └── hurst_exponent.py
+│
+├── anomaly_detection/
+│   ├── mahalanobis.py
+│   ├── isolation_forest.py
+│   └── change_point_detection.py
+│
+├── forecasting/
+│   ├── arima_models.py
+│   ├── kalman.py
+│   ├── fbprophet_wrapper.py
+│   └── fourier_trend.py
+│
+├── risk_models/
+│   ├── var_cvar.py
+│   ├── drawdown.py
+│   └── position_sizing.py
+│
+├── causal/
+│   ├── granger.py
+│   ├── pcmci.py
+│   └── transfer_entropy.py

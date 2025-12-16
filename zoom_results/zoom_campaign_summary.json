@@ -1,0 +1,1391 @@
+{
+  "pairs": [
+    "XLY-XLP"
+  ],
+  "summary": {
+    "XLY-XLP": {
+      "pair": "XLY-XLP",
+      "stages": [
+        {
+          "stage": 0,
+          "study_id": 1764950038437,
+          "zoom_factor": 0.8,
+          "ranges": {
+            "z_entry": {
+              "lo": 1.125,
+              "hi": 2.375,
+              "step": 0.1
+            },
+            "z_exit": {
+              "lo": 0.45000000000000007,
+              "hi": 1.15,
+              "step": 0.1
+            },
+            "lookback": {
+              "lo": 78.0,
+              "hi": 194.0,
+              "step": 5.0
+            },
+            "entry_decay": {
+              "lo": 0.32500000000000007,
+              "hi": 0.775,
+              "step": 0.05
+            },
+            "exit_decay": {
+              "lo": 0.45000000000000007,
+              "hi": 1.15,
+              "step": 0.05
+            },
+            "min_trade_distance": {
+              "lo": 5.75,
+              "hi": 15.25,
+              "step": 1.0
+            },
+            "max_trade_duration": {
+              "lo": 18.75,
+              "hi": 46.25,
+              "step": 1.0
+            },
+            "cointegration_deviation": {
+              "lo": 0.75,
+              "hi": 2.25,
+              "step": 0.1
+            },
+            "spread_mean": {
+              "lo": -2.5,
+              "hi": 2.5,
+              "step": 0.1
+            },
+            "spread_std": {
+              "lo": 1.2574999999999998,
+              "hi": 3.7525,
+              "step": 0.05
+            },
+            "half_life": {
+              "lo": 30.75,
+              "hi": 90.25,
+              "step": 1.0
+            },
+            "mean_reversion_speed": {
+              "lo": 0.25,
+              "hi": 0.75,
+              "step": 0.02
+            },
+            "hurst": {
+              "lo": 0.25,
+              "hi": 0.75,
+              "step": 0.02
+            },
+            "rolling_skewness": {
+              "lo": -1.0,
+              "hi": 1.0,
+              "step": 0.05
+            },
+            "rolling_kurtosis": {
+              "lo": 2.5,
+              "hi": 7.5,
+              "step": 0.1
+            },
+            "percentile_95": {
+              "lo": 0.75,
+              "hi": 2.25,
+              "step": 0.05
+            },
+            "percentile_05": {
+              "lo": -2.25,
+              "hi": -0.75,
+              "step": 0.05
+            },
+            "z_momentum": {
+              "lo": -1.5,
+              "hi": 1.5,
+              "step": 0.1
+            },
+            "time_in_band": {
+              "lo": 0.25,
+              "hi": 0.75,
+              "step": 0.05
+            },
+            "ema_spread": {
+              "lo": -2.5,
+              "hi": 2.5,
+              "step": 0.1
+            },
+            "cusum_spread": {
+              "lo": -2.5,
+              "hi": 2.5,
+              "step": 0.1
+            },
+            "spread_drawdown": {
+              "lo": -3.75,
+              "hi": -1.25,
+              "step": 0.1
+            },
+            "vol_adj_spread": {
+              "lo": -2.5,
+              "hi": 2.5,
+              "step": 0.1
+            },
+            "ADF_pval": {
+              "lo": 0.075,
+              "hi": 0.22499999999999998,
+              "step": 0.01
+            },
+            "hedge_ratio": {
+              "lo": -1.5,
+              "hi": 1.5,
+              "step": 0.05
+            },
+            "ECM_coeff": {
+              "lo": -0.75,
+              "hi": -0.25,
+              "step": 0.02
+            },
+            "kalman_beta": {
+              "lo": -1.5,
+              "hi": 1.5,
+              "step": 0.05
+            },
+            "copula_tail": {
+              "lo": 0.25,
+              "hi": 0.75,
+              "step": 0.02
+            },
+            "ml_pred": {
+              "lo": -0.5,
+              "hi": 0.5,
+              "step": 0.01
+            },
+            "meta_score": {
+              "lo": 0.25,
+              "hi": 0.75,
+              "step": 0.01
+            },
+            "shap_importance": {
+              "lo": 0.25,
+              "hi": 0.75,
+              "step": 0.01
+            },
+            "pca_1": {
+              "lo": -1.5,
+              "hi": 1.5,
+              "step": 0.1
+            },
+            "pca_2": {
+              "lo": -1.5,
+              "hi": 1.5,
+              "step": 0.1
+            },
+            "pca_3": {
+              "lo": -1.5,
+              "hi": 1.5,
+              "step": 0.1
+            },
+            "rolling_corr": {
+              "lo": -0.5,
+              "hi": 0.5,
+              "step": 0.01
+            },
+            "beta_OLS": {
+              "lo": -1.0,
+              "hi": 1.0,
+              "step": 0.05
+            },
+            "price_ratio": {
+              "lo": 2.5749999999999997,
+              "hi": 7.525,
+              "step": 0.01
+            },
+            "z_score_trend": {
+              "lo": -0.25,
+              "hi": 0.25,
+              "step": 0.01
+            },
+            "realized_vol_30d": {
+              "lo": 0.5074999999999998,
+              "hi": 1.5025,
+              "step": 0.01
+            },
+            "implied_realized_spread": {
+              "lo": -0.5,
+              "hi": 0.5,
+              "step": 0.01
+            },
+            "corr_half_life": {
+              "lo": 25.75,
+              "hi": 75.25,
+              "step": 1.0
+            },
+            "pair_spread_percentile": {
+              "lo": 0.25,
+              "hi": 0.75,
+              "step": 0.01
+            },
+            "cross_section_rank": {
+              "lo": 25.75,
+              "hi": 75.25,
+              "step": 1.0
+            },
+            "z_spread_skew": {
+              "lo": -1.5,
+              "hi": 1.5,
+              "step": 0.05
+            },
+            "roll_ic": {
+              "lo": -0.5,
+              "hi": 0.5,
+              "step": 0.01
+            },
+            "beta_kalman_vol": {
+              "lo": 0.5074999999999998,
+              "hi": 1.5025,
+              "step": 0.02
+            },
+            "adf_tstat": {
+              "lo": -7.5,
+              "hi": -2.5,
+              "step": 0.1
+            },
+            "spread_entropy": {
+              "lo": 0.25,
+              "hi": 0.75,
+              "step": 0.01
+            },
+            "wavelet_energy": {
+              "lo": 0.25,
+              "hi": 0.75,
+              "step": 0.01
+            },
+            "fractal_dimension": {
+              "lo": 1.25,
+              "hi": 1.75,
+              "step": 0.01
+            },
+            "cointegration_t50": {
+              "lo": 50.75,
+              "hi": 150.25,
+              "step": 1.0
+            },
+            "vol_of_vol": {
+              "lo": 0.2575,
+              "hi": 0.7525,
+              "step": 0.01
+            },
+            "kalman_q_ratio": {
+              "lo": 2.5075,
+              "hi": 7.5024999999999995,
+              "step": 0.01
+            },
+            "order_flow_imbalance": {
+              "lo": -2.5,
+              "hi": 2.5,
+              "step": 0.1
+            },
+            "amihud_illiq": {
+              "lo": 0.0025007499999999995,
+              "hi": 0.00750025,
+              "step": null
+            },
+            "bid_ask_spread_pct": {
+              "lo": 0.2575,
+              "hi": 0.7525,
+              "step": 0.01
+            },
+            "intraday_vol_ratio": {
+              "lo": 0.9000000000000001,
+              "hi": 2.3,
+              "step": 0.05
+            },
+            "autocorr_lag1": {
+              "lo": -0.5,
+              "hi": 0.5,
+              "step": 0.05
+            },
+            "drawdown_half_life": {
+              "lo": 15.75,
+              "hi": 45.25,
+              "step": 1.0
+            },
+            "pca_residual_vol": {
+              "lo": 0.2575,
+              "hi": 0.7525,
+              "step": null
+            },
+            "beta_market_dynamic": {
+              "lo": -1.0,
+              "hi": 1.0,
+              "step": 0.05
+            },
+            "news_sentiment_score": {
+              "lo": -0.5,
+              "hi": 0.5,
+              "step": 0.01
+            },
+            "resid_lb_pval_max": {
+              "lo": 0.0625,
+              "hi": 0.1875,
+              "step": 0.01
+            },
+            "resid_arch_pval_min": {
+              "lo": 0.0625,
+              "hi": 0.1875,
+              "step": 0.01
+            },
+            "chow_pval_min": {
+              "lo": 0.0625,
+              "hi": 0.1875,
+              "step": 0.01
+            },
+            "cusum_break_penalty": {
+              "lo": 0.5,
+              "hi": 1.5,
+              "step": 0.05
+            },
+            "johansen_rank_min": {
+              "lo": 0.5,
+              "hi": 1.5,
+              "step": 1.0
+            },
+            "slippage_bps": {
+              "lo": 2.5,
+              "hi": 7.5,
+              "step": 0.1
+            },
+            "impact_k": {
+              "lo": 2.5,
+              "hi": 7.5,
+              "step": 0.1
+            },
+            "fill_ratio_floor": {
+              "lo": 0.625,
+              "hi": 0.875,
+              "step": 0.01
+            },
+            "heat_cap_pct": {
+              "lo": 0.0325,
+              "hi": 0.0775,
+              "step": 0.005
+            },
+            "max_consec_losers": {
+              "lo": 3.25,
+              "hi": 7.75,
+              "step": 1.0
+            },
+            "gate_vix_q": {
+              "lo": 0.38749999999999996,
+              "hi": 0.7625,
+              "step": 0.01
+            },
+            "gate_move_q": {
+              "lo": 0.38749999999999996,
+              "hi": 0.7625,
+              "step": 0.01
+            },
+            "gate_credit_q": {
+              "lo": 0.38749999999999996,
+              "hi": 0.7625,
+              "step": 0.01
+            },
+            "stop_band_sigma": {
+              "lo": 0.9375,
+              "hi": 2.3125,
+              "step": 0.05
+            },
+            "time_stop_days": {
+              "lo": 5.75,
+              "hi": 15.25,
+              "step": 1.0
+            },
+            "anti_cluster_penalty": {
+              "lo": 0.25,
+              "hi": 0.75,
+              "step": 0.05
+            },
+            "psr_min": {
+              "lo": 0.125,
+              "hi": 0.375,
+              "step": 0.01
+            },
+            "oos_window_frac": {
+              "lo": 0.22499999999999998,
+              "hi": 0.475,
+              "step": 0.05
+            },
+            "cv_kfolds": {
+              "lo": 3.5,
+              "hi": 6.5,
+              "step": 1.0
+            },
+            "bagging_k": {
+              "lo": 3.25,
+              "hi": 7.75,
+              "step": 1.0
+            },
+            "bagging_alpha": {
+              "lo": 0.25,
+              "hi": 0.75,
+              "step": 0.05
+            },
+            "z_entry_regime_mult": {
+              "lo": 0.875,
+              "hi": 1.625,
+              "step": 0.05
+            },
+            "z_exit_trailing_frac": {
+              "lo": 0.32500000000000007,
+              "hi": 0.775,
+              "step": 0.05
+            },
+            "pnl_stop_loss_sigma": {
+              "lo": 1.625,
+              "hi": 3.875,
+              "step": 0.1
+            },
+            "vol_target_smoothing_lambda": {
+              "lo": 0.6225,
+              "hi": 0.8674999999999999,
+              "step": 0.01
+            },
+            "order_book_depth_pct": {
+              "lo": 0.16250000000000003,
+              "hi": 0.3875,
+              "step": 0.05
+            },
+            "regime_min_confidence": {
+              "lo": 0.25,
+              "hi": 0.75,
+              "step": 0.05
+            },
+            "correlation_regime_threshold": {
+              "lo": 0.37500000000000006,
+              "hi": 0.7250000000000001,
+              "step": 0.05
+            },
+            "min_shap_importance_pct": {
+              "lo": 0.125,
+              "hi": 0.375,
+              "step": 0.01
+            },
+            "max_intraday_trades_per_pair": {
+              "lo": 12.5,
+              "hi": 37.5,
+              "step": 1.0
+            },
+            "max_concurrent_pairs": {
+              "lo": 50.75,
+              "hi": 150.25,
+              "step": 1.0
+            },
+            "min_backtest_years": {
+              "lo": 2.875,
+              "hi": 7.625,
+              "step": 0.5
+            },
+            "min_oos_years": {
+              "lo": 1.625,
+              "hi": 3.875,
+              "step": 0.5
+            },
+            "spread_momentum": {
+              "lo": -1.5,
+              "hi": 1.5,
+              "step": 0.1
+            },
+            "cluster_label": {
+              "lo": 2.5,
+              "hi": 7.5,
+              "step": 1.0
+            },
+            "volatility_regime": {
+              "lo": 0.5750000000000001,
+              "hi": 1.525,
+              "step": 0.1
+            },
+            "trend_strength": {
+              "lo": 0.25,
+              "hi": 0.75,
+              "step": 0.05
+            },
+            "vix_level": {
+              "lo": 20.0,
+              "hi": 40.0,
+              "step": 1.0
+            },
+            "var_confidence": {
+              "lo": 0.9225000000000001,
+              "hi": 0.9675,
+              "step": 0.01
+            },
+            "cvar_confidence": {
+              "lo": 0.9225000000000001,
+              "hi": 0.9675,
+              "step": 0.01
+            },
+            "drawdown_recovery": {
+              "lo": 18.75,
+              "hi": 46.25,
+              "step": 5.0
+            },
+            "interest_rate_diff": {
+              "lo": 0.0125,
+              "hi": 0.037500000000000006,
+              "step": 0.001
+            },
+            "fx_rate_volatility": {
+              "lo": 0.05750000000000001,
+              "hi": 0.15250000000000002,
+              "step": 0.01
+            },
+            "max_leverage": {
+              "lo": 3.25,
+              "hi": 7.75,
+              "step": 0.5
+            },
+            "position_sizing_pct": {
+              "lo": 0.05750000000000001,
+              "hi": 0.15250000000000002,
+              "step": 0.01
+            },
+            "sortino_ratio": {
+              "lo": 0.75,
+              "hi": 2.25,
+              "step": 0.1
+            },
+            "omega_ratio": {
+              "lo": 0.875,
+              "hi": 1.625,
+              "step": 0.1
+            },
+            "avg_hold_time": {
+              "lo": 8.25,
+              "hi": 22.75,
+              "step": 1.0
+            },
+            "std_hold_time": {
+              "lo": 8.25,
+              "hi": 22.75,
+              "step": 1.0
+            },
+            "trade_frequency": {
+              "lo": 5.75,
+              "hi": 15.25,
+              "step": 1.0
+            },
+            "concept_drift_score": {
+              "lo": 0.25,
+              "hi": 0.75,
+              "step": 0.01
+            },
+            "meta_model_confidence": {
+              "lo": 0.625,
+              "hi": 0.875,
+              "step": 0.01
+            },
+            "slippage_pct": {
+              "lo": 0.00125,
+              "hi": 0.00375,
+              "step": 0.0001
+            },
+            "commission_pct": {
+              "lo": 0.0005,
+              "hi": 0.0015,
+              "step": 0.0001
+            },
+            "bid_ask_spread": {
+              "lo": 0.0025,
+              "hi": 0.0075,
+              "step": 0.0001
+            },
+            "avg_daily_volume": {
+              "lo": 2507500.0,
+              "hi": 7502500.0,
+              "step": 10000.0
+            },
+            "market_depth": {
+              "lo": 250750.0,
+              "hi": 750250.0,
+              "step": 1000.0
+            },
+            "time_of_day_factor": {
+              "lo": 0.75,
+              "hi": 1.25,
+              "step": 0.1
+            },
+            "dow_bias": {
+              "lo": 0.95,
+              "hi": 1.05,
+              "step": 0.01
+            },
+            "regime_cluster_count": {
+              "lo": 2.75,
+              "hi": 4.25,
+              "step": 1.0
+            },
+            "regime_switch_penalty": {
+              "lo": 0.125,
+              "hi": 0.375,
+              "step": 0.01
+            },
+            "stopout_level": {
+              "lo": 0.16250000000000003,
+              "hi": 0.3875,
+              "step": 0.01
+            },
+            "dynamic_sl_multiplier": {
+              "lo": 0.875,
+              "hi": 1.625,
+              "step": 0.1
+            },
+            "drift_window": {
+              "lo": 162.5,
+              "hi": 387.5,
+              "step": 50.0
+            },
+            "drift_sensitivity": {
+              "lo": 0.32500000000000007,
+              "hi": 0.775,
+              "step": 0.1
+            },
+            "volatility_skew": {
+              "lo": -1.0,
+              "hi": 1.0,
+              "step": 0.1
+            },
+            "liquidity_ratio": {
+              "lo": 1.3249999999999997,
+              "hi": 3.775,
+              "step": 0.1
+            },
+            "momentum_decay": {
+              "lo": 0.75,
+              "hi": 1.25,
+              "step": 0.05
+            },
+            "execution_risk": {
+              "lo": 0.005,
+              "hi": 0.015,
+              "step": 0.0005
+            },
+            "carry_trade_score": {
+              "lo": -0.5,
+              "hi": 0.5,
+              "step": 0.01
+            }
+          },
+          "validation": {
+            "ok": true,
+            "issues": [],
+            "summary": {
+              "rows": 50,
+              "cols": 147,
+              "has_Score": true,
+              "has_Sharpe": true,
+              "has_Drawdown": true,
+              "score_max": 0.22222222222222224,
+              "score_min": 0.22222222222222224,
+              "sharpe_max": 0.0,
+              "sharpe_min": 0.0,
+              "dd_max": 0.0,
+              "dd_min": 0.0
+            }
+          },
+          "elite_rows": 50,
+          "best_score": 0.22222222222222224
+        },
+        {
+          "stage": 1,
+          "study_id": 1764950064189,
+          "zoom_factor": 0.65,
+          "ranges": {
+            "z_entry": {
+              "lo": 1.125,
+              "hi": 2.075,
+              "step": 0.1
+            },
+            "z_exit": {
+              "lo": 0.45000000000000007,
+              "hi": 0.9300000000000002,
+              "step": 0.1
+            },
+            "lookback": {
+              "lo": 84.975,
+              "hi": 177.775,
+              "step": 5.0
+            },
+            "entry_decay": {
+              "lo": 0.34500000000000003,
+              "hi": 0.7050000000000001,
+              "step": 0.05
+            },
+            "exit_decay": {
+              "lo": 0.47000000000000003,
+              "hi": 1.03,
+              "step": 0.05
+            },
+            "min_trade_distance": {
+              "lo": 6.949999999999999,
+              "hi": 14.55,
+              "step": 1.0
+            },
+            "max_trade_duration": {
+              "lo": 18.75,
+              "hi": 39.4,
+              "step": 1.0
+            },
+            "cointegration_deviation": {
+              "lo": 1.0675,
+              "hi": 2.25,
+              "step": 0.1
+            },
+            "spread_mean": {
+              "lo": -1.8849999999999998,
+              "hi": 2.115,
+              "step": 0.1
+            },
+            "spread_std": {
+              "lo": 1.3507499999999997,
+              "hi": 3.34675,
+              "step": 0.05
+            },
+            "half_life": {
+              "lo": 30.75,
+              "hi": 73.875,
+              "step": 1.0
+            },
+            "mean_reversion_speed": {
+              "lo": 0.3535,
+              "hi": 0.75,
+              "step": 0.02
+            },
+            "hurst": {
+              "lo": 0.29,
+              "hi": 0.69,
+              "step": 0.02
+            },
+            "rolling_skewness": {
+              "lo": -0.71625,
+              "hi": 0.88375,
+              "step": 0.05
+            },
+            "rolling_kurtosis": {
+              "lo": 3.085,
+              "hi": 7.085,
+              "step": 0.1
+            },
+            "percentile_95": {
+              "lo": 1.03375,
+              "hi": 2.23375,
+              "step": 0.05
+            },
+            "percentile_05": {
+              "lo": -1.88375,
+              "hi": -0.75,
+              "step": 0.05
+            },
+            "z_momentum": {
+              "lo": -1.0350000000000001,
+              "hi": 1.3650000000000002,
+              "step": 0.1
+            },
+            "time_in_band": {
+              "lo": 0.34125,
+              "hi": 0.74125,
+              "step": 0.05
+            },
+            "ema_spread": {
+              "lo": -2.0324999999999998,
+              "hi": 1.9675,
+              "step": 0.1
+            },
+            "cusum_spread": {
+              "lo": -2.2325,
+              "hi": 1.7675,
+              "step": 0.1
+            },
+            "spread_drawdown": {
+              "lo": -3.5,
+              "hi": -1.5,
+              "step": 0.1
+            },
+            "vol_adj_spread": {
+              "lo": -2.4825,
+              "hi": 1.5175,
+              "step": 0.1
+            },
+            "ADF_pval": {
+              "lo": 0.08500000000000002,
+              "hi": 0.20500000000000002,
+              "step": 0.01
+            },
+            "hedge_ratio": {
+              "lo": -1.2337500000000001,
+              "hi": 1.1662500000000002,
+              "step": 0.05
+            },
+            "ECM_coeff": {
+              "lo": -0.75,
+              "hi": -0.35000000000000003,
+              "step": 0.02
+            },
+            "kalman_beta": {
+              "lo": -1.2262500000000003,
+              "hi": 1.17375,
+              "step": 0.05
+            },
+            "copula_tail": {
+              "lo": 0.32349999999999995,
+              "hi": 0.7235,
+              "step": 0.02
+            },
+            "ml_pred": {
+              "lo": -0.39025000000000004,
+              "hi": 0.40975,
+              "step": 0.01
+            },
+            "meta_score": {
+              "lo": 0.3299999999999999,
+              "hi": 0.73,
+              "step": 0.01
+            },
+            "shap_importance": {
+              "lo": 0.285,
+              "hi": 0.685,
+              "step": 0.01
+            },
+            "pca_1": {
+              "lo": -1.0825,
+              "hi": 1.3175000000000003,
+              "step": 0.1
+            },
+            "pca_2": {
+              "lo": -1.5,
+              "hi": 0.9000000000000001,
+              "step": 0.1
+            },
+            "pca_3": {
+              "lo": -1.3850000000000002,
+              "hi": 1.0150000000000001,
+              "step": 0.1
+            },
+            "rolling_corr": {
+              "lo": -0.43625,
+              "hi": 0.36375,
+              "step": 0.01
+            },
+            "beta_OLS": {
+              "lo": -0.83375,
+              "hi": 0.7662500000000001,
+              "step": 0.05
+            },
+            "price_ratio": {
+              "lo": 2.9979999999999993,
+              "hi": 6.958,
+              "step": 0.01
+            },
+            "z_score_trend": {
+              "lo": -0.16825,
+              "hi": 0.23175,
+              "step": 0.01
+            },
+            "realized_vol_30d": {
+              "lo": 0.5842499999999997,
+              "hi": 1.38025,
+              "step": 0.01
+            },
+            "implied_realized_spread": {
+              "lo": -0.4200000000000001,
+              "hi": 0.37999999999999995,
+              "step": 0.01
+            },
+            "corr_half_life": {
+              "lo": 32.599999999999994,
+              "hi": 72.2,
+              "step": 1.0
+            },
+            "pair_spread_percentile": {
+              "lo": 0.3585,
+              "hi": 0.75,
+              "step": 0.01
+            },
+            "cross_section_rank": {
+              "lo": 25.75,
+              "hi": 60.55,
+              "step": 1.0
+            },
+            "z_spread_skew": {
+              "lo": -1.08375,
+              "hi": 1.3162500000000004,
+              "step": 0.05
+            },
+            "roll_ic": {
+              "lo": -0.43174999999999997,
+              "hi": 0.3682500000000001,
+              "step": 0.01
+            },
+            "beta_kalman_vol": {
+              "lo": 0.5759999999999998,
+              "hi": 1.3719999999999999,
+              "step": 0.02
+            },
+            "adf_tstat": {
+              "lo": -7.1675,
+              "hi": -3.1675000000000004,
+              "step": 0.1
+            },
+            "spread_entropy": {
+              "lo": 0.37000000000000005,
+              "hi": 0.75,
+              "step": 0.01
+            },
+            "wavelet_energy": {
+              "lo": 0.25675,
+              "hi": 0.65675,
+              "step": 0.01
+            },
+            "fractal_dimension": {
+              "lo": 1.3484999999999998,
+              "hi": 1.7484999999999997,
+              "step": 0.01
+            },
+            "cointegration_t50": {
+              "lo": 60.949999999999996,
+              "hi": 140.55,
+              "step": 1.0
+            },
+            "vol_of_vol": {
+              "lo": 0.33125000000000004,
+              "hi": 0.72725,
+              "step": 0.01
+            },
+            "kalman_q_ratio": {
+              "lo": 3.1165,
+              "hi": 7.112499999999999,
+              "step": 0.01
+            },
+            "order_flow_imbalance": {
+              "lo": -1.9,
+              "hi": 2.1,
+              "step": 0.1
+            },
+            "amihud_illiq": {
+              "lo": 0.0026242167545168643,
+              "hi": 0.006623816754516865,
+              "step": null
+            },
+            "bid_ask_spread_pct": {
+              "lo": 0.27449999999999997,
+              "hi": 0.6705,
+              "step": 0.01
+            },
+            "intraday_vol_ratio": {
+              "lo": 0.9400000000000001,
+              "hi": 2.06,
+              "step": 0.05
+            },
+            "autocorr_lag1": {
+              "lo": -0.3,
+              "hi": 0.5,
+              "step": 0.05
+            },
+            "drawdown_half_life": {
+              "lo": 16.275,
+              "hi": 39.875,
+              "step": 1.0
+            },
+            "pca_residual_vol": {
+              "lo": 0.3536665075522093,
+              "hi": 0.7496665075522092,
+              "step": null
+            },
+            "beta_market_dynamic": {
+              "lo": -0.78375,
+              "hi": 0.8162500000000001,
+              "step": 0.05
+            },
+            "news_sentiment_score": {
+              "lo": -0.3865,
+              "hi": 0.41350000000000003,
+              "step": 0.01
+            },
+            "resid_lb_pval_max": {
+              "lo": 0.0625,
+              "hi": 0.16249999999999998,
+              "step": 0.01
+            },
+            "resid_arch_pval_min": {
+              "lo": 0.06749999999999999,
+              "hi": 0.16749999999999998,
+              "step": 0.01
+            },
+            "chow_pval_min": {
+              "lo": 0.0625,
+              "hi": 0.16249999999999998,
+              "step": 0.01
+            },
+            "cusum_break_penalty": {
+              "lo": 0.6162499999999999,
+              "hi": 1.4162499999999998,
+              "step": 0.05
+            },
+            "johansen_rank_min": {
+              "lo": 0.5,
+              "hi": 1.5,
+              "step": 1.0
+            },
+            "slippage_bps": {
+              "lo": 3.2325,
+              "hi": 7.2325,
+              "step": 0.1
+            },
+            "impact_k": {
+              "lo": 2.9175000000000004,
+              "hi": 6.9175,
+              "step": 0.1
+            },
+            "fill_ratio_floor": {
+              "lo": 0.66175,
+              "hi": 0.8617499999999999,
+              "step": 0.01
+            },
+            "heat_cap_pct": {
+              "lo": 0.03699999999999999,
+              "hi": 0.073,
+              "step": 0.005
+            },
+            "max_consec_losers": {
+              "lo": 3.95,
+              "hi": 7.55,
+              "step": 1.0
+            },
+            "gate_vix_q": {
+              "lo": 0.39074999999999993,
+              "hi": 0.69075,
+              "step": 0.01
+            },
+            "gate_move_q": {
+              "lo": 0.42099999999999993,
+              "hi": 0.721,
+              "step": 0.01
+            },
+            "gate_credit_q": {
+              "lo": 0.43574999999999997,
+              "hi": 0.73575,
+              "step": 0.01
+            },
+            "stop_band_sigma": {
+              "lo": 1.0625,
+              "hi": 2.1625,
+              "step": 0.05
+            },
+            "time_stop_days": {
+              "lo": 5.949999999999999,
+              "hi": 13.55,
+              "step": 1.0
+            },
+            "anti_cluster_penalty": {
+              "lo": 0.3499999999999999,
+              "hi": 0.75,
+              "step": 0.05
+            },
+            "psr_min": {
+              "lo": 0.14675000000000002,
+              "hi": 0.34675,
+              "step": 0.01
+            },
+            "oos_window_frac": {
+              "lo": 0.22499999999999998,
+              "hi": 0.4,
+              "step": 0.05
+            },
+            "cv_kfolds": {
+              "lo": 4.3,
+              "hi": 6.5,
+              "step": 1.0
+            },
+            "bagging_k": {
+              "lo": 4.125,
+              "hi": 7.725,
+              "step": 1.0
+            },
+            "bagging_alpha": {
+              "lo": 0.3087499999999999,
+              "hi": 0.70875,
+              "step": 0.05
+            },
+            "z_entry_regime_mult": {
+              "lo": 1.10875,
+              "hi": 1.625,
+              "step": 0.05
+            },
+            "z_exit_trailing_frac": {
+              "lo": 0.32500000000000007,
+              "hi": 0.6637500000000001,
+              "step": 0.05
+            },
+            "pnl_stop_loss_sigma": {
+              "lo": 1.9425000000000003,
+              "hi": 3.7425,
+              "step": 0.1
+            },
+            "vol_target_smoothing_lambda": {
+              "lo": 0.6395000000000001,
+              "hi": 0.8355,
+              "step": 0.01
+            },
+            "order_book_depth_pct": {
+              "lo": 0.19750000000000004,
+              "hi": 0.37750000000000006,
+              "step": 0.05
+            },
+            "regime_min_confidence": {
+              "lo": 0.3249999999999999,
+              "hi": 0.7249999999999999,
+              "step": 0.05
+            },
+            "correlation_regime_threshold": {
+              "lo": 0.41000000000000003,
+              "hi": 0.6900000000000001,
+              "step": 0.05
+            },
+            "min_shap_importance_pct": {
+              "lo": 0.125,
+              "hi": 0.31825000000000003,
+              "step": 0.01
+            },
+            "max_intraday_trades_per_pair": {
+              "lo": 12.5,
+              "hi": 32.5,
+              "step": 1.0
+            },
+            "max_concurrent_pairs": {
+              "lo": 76.82499999999999,
+              "hi": 150.25,
+              "step": 1.0
+            },
+            "min_backtest_years": {
+              "lo": 3.2249999999999996,
+              "hi": 7.025,
+              "step": 0.5
+            },
+            "min_oos_years": {
+              "lo": 1.625,
+              "hi": 3.275,
+              "step": 0.5
+            },
+            "spread_momentum": {
+              "lo": -1.2325000000000004,
+              "hi": 1.1675,
+              "step": 0.1
+            },
+            "cluster_label": {
+              "lo": 2.5,
+              "hi": 6.0,
+              "step": 1.0
+            },
+            "volatility_regime": {
+              "lo": 0.5750000000000001,
+              "hi": 1.3050000000000002,
+              "step": 0.1
+            },
+            "trend_strength": {
+              "lo": 0.27499999999999997,
+              "hi": 0.675,
+              "step": 0.05
+            },
+            "vix_level": {
+              "lo": 22.0,
+              "hi": 38.0,
+              "step": 1.0
+            },
+            "var_confidence": {
+              "lo": 0.9295000000000001,
+              "hi": 0.9655000000000001,
+              "step": 0.01
+            },
+            "cvar_confidence": {
+              "lo": 0.9225000000000001,
+              "hi": 0.9625000000000001,
+              "step": 0.01
+            },
+            "drawdown_recovery": {
+              "lo": 20.25,
+              "hi": 42.25,
+              "step": 5.0
+            },
+            "interest_rate_diff": {
+              "lo": 0.0175,
+              "hi": 0.037500000000000006,
+              "step": 0.001
+            },
+            "fx_rate_volatility": {
+              "lo": 0.0695,
+              "hi": 0.14550000000000002,
+              "step": 0.01
+            },
+            "max_leverage": {
+              "lo": 3.45,
+              "hi": 7.05,
+              "step": 0.5
+            },
+            "position_sizing_pct": {
+              "lo": 0.0695,
+              "hi": 0.14550000000000002,
+              "step": 0.01
+            },
+            "sortino_ratio": {
+              "lo": 1.1,
+              "hi": 2.25,
+              "step": 0.1
+            },
+            "omega_ratio": {
+              "lo": 0.925,
+              "hi": 1.5250000000000001,
+              "step": 0.1
+            },
+            "avg_hold_time": {
+              "lo": 9.774999999999999,
+              "hi": 21.375,
+              "step": 1.0
+            },
+            "std_hold_time": {
+              "lo": 10.95,
+              "hi": 22.55,
+              "step": 1.0
+            },
+            "trade_frequency": {
+              "lo": 7.949999999999999,
+              "hi": 15.25,
+              "step": 1.0
+            },
+            "concept_drift_score": {
+              "lo": 0.29,
+              "hi": 0.69,
+              "step": 0.01
+            },
+            "meta_model_confidence": {
+              "lo": 0.64675,
+              "hi": 0.84675,
+              "step": 0.01
+            },
+            "slippage_pct": {
+              "lo": 0.0017000000000000003,
+              "hi": 0.0037,
+              "step": 0.0001
+            },
+            "commission_pct": {
+              "lo": 0.0005,
+              "hi": 0.00125,
+              "step": 0.0001
+            },
+            "bid_ask_spread": {
+              "lo": 0.003117500000000001,
+              "hi": 0.0071175000000000006,
+              "step": 0.0001
+            },
+            "avg_daily_volume": {
+              "lo": 3158000.0,
+              "hi": 7154000.0,
+              "step": 10000.0
+            },
+            "market_depth": {
+              "lo": 258325.0,
+              "hi": 657925.0,
+              "step": 1000.0
+            },
+            "time_of_day_factor": {
+              "lo": 0.8500000000000001,
+              "hi": 1.25,
+              "step": 0.1
+            },
+            "dow_bias": {
+              "lo": 0.95,
+              "hi": 1.03,
+              "step": 0.01
+            },
+            "regime_cluster_count": {
+              "lo": 2.75,
+              "hi": 3.6749999999999994,
+              "step": 1.0
+            },
+            "regime_switch_penalty": {
+              "lo": 0.145,
+              "hi": 0.345,
+              "step": 0.01
+            },
+            "stopout_level": {
+              "lo": 0.18250000000000002,
+              "hi": 0.36250000000000004,
+              "step": 0.01
+            },
+            "dynamic_sl_multiplier": {
+              "lo": 0.9749999999999999,
+              "hi": 1.575,
+              "step": 0.1
+            },
+            "drift_window": {
+              "lo": 197.5,
+              "hi": 377.5,
+              "step": 50.0
+            },
+            "drift_sensitivity": {
+              "lo": 0.34500000000000014,
+              "hi": 0.7050000000000001,
+              "step": 0.1
+            },
+            "volatility_skew": {
+              "lo": -0.7,
+              "hi": 0.9000000000000001,
+              "step": 0.1
+            },
+            "liquidity_ratio": {
+              "lo": 1.4274999999999998,
+              "hi": 3.3874999999999997,
+              "step": 0.1
+            },
+            "momentum_decay": {
+              "lo": 0.8,
+              "hi": 1.2,
+              "step": 0.05
+            },
+            "execution_risk": {
+              "lo": 0.006087500000000002,
+              "hi": 0.0140875,
+              "step": 0.0005
+            },
+            "carry_trade_score": {
+              "lo": -0.36850000000000005,
+              "hi": 0.4315,
+              "step": 0.01
+            }
+          },
+          "validation": {
+            "ok": true,
+            "issues": [],
+            "summary": {
+              "rows": 50,
+              "cols": 147,
+              "has_Score": true,
+              "has_Sharpe": true,
+              "has_Drawdown": true,
+              "score_max": 0.22222222222222224,
+              "score_min": 0.22222222222222224,
+              "sharpe_max": 0.0,
+              "sharpe_min": 0.0,
+              "dd_max": 0.0,
+              "dd_min": 0.0
+            }
+          },
+          "elite_rows": 50,
+          "best_score": 0.22222222222222224
+        }
+      ],
+      "final_stage": 1,
+      "final_best_score": 0.22222222222222224,
+      "status": "ok",
+      "error_message": null,
+      "duration_sec": 53.21939206123352,
+      "paramspace_hash_initial": "4558e299ebb8cb856fb1abf657759a9309e175e6",
+      "paramspace_hash_final": "0b4683c03d682fb76a5a26873429506afc52cd73"
+    }
+  }
+}

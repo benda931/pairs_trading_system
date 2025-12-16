@@ -1,0 +1,51 @@
+# configs/default.yaml
+
+# === Signal Generator Settings ===
+signals:
+  generator: SignalGenerator
+  ranges:
+    zscore_window: [10, 60]
+    entry_threshold: [1.0, 3.0]
+    exit_threshold: [0.5, 2.0]
+    bollinger_window: [10, 50]
+    num_std: [1.5, 3.5]
+    rsi_window: [5, 30]
+    lower: [20.0, 35.0]
+    upper: [65.0, 80.0]
+    spread_window: [10, 60]
+    spread_entry_threshold: [1.0, 3.0]
+    spread_exit_threshold: [0.5, 2.0]
+    hedge_ratio: [0.5, 1.5]
+    correlation_window: [15, 60]
+    correlation_entry_threshold: [0.5, 0.9]
+    correlation_exit_threshold: [0.4, 0.8]
+    cointegration_window: [30, 90]
+    entry_pval: [0.01, 0.05]
+    exit_pval: [0.05, 0.2]
+    adf_window: [20, 90]
+    adf_entry_pval: [0.01, 0.05]
+    adf_exit_pval: [0.05, 0.2]
+    cusum_threshold: [0.3, 1.0]
+    cusum_drift: [0.0, 0.2]
+
+# === Data Sources ===
+data:
+  price_csv: data/price_series.csv
+  hedge_csv: data/hedge_series.csv
+
+# === Backtest Parameters ===
+backtest_params:
+  initial_capital: 100000
+  max_exposure_per_trade: 0.1
+  commission: 0.001
+  slippage: 0.0005
+  z_exit_on_cross: true
+  max_trade_duration: 10
+  rolling_window: 20
+  volatility_filter: true
+
+# === Notes ===
+meta:
+  author: Omri Ben David
+  created: 2025-06-21
+  description: Full configuration for optimization pipeline using advanced statistical signals
