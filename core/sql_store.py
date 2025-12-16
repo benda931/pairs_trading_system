@@ -2919,6 +2919,95 @@ class SqlStore:
             return df[cols_keep]
         return df
 
+    def get_price_range(
+        self,
+        symbol: str,
+        *,
+        table_name: Optional[str] = None,
+        env: Optional[str] = None,
+    ) -> tuple[Optional[pd.Timestamp], Optional[pd.Timestamp]]:
+        """
+        מחזיר את טווח התאריכים הזמין בטבלת המחירים עבור סימבול נתון.
+
+        Parameters
+        ----------
+        symbol : str
+            שם הסימבול (למשל "SPY", "XLY", "BTC-USD").
+        table_name : Optional[str], default=None
+            שם טבלת המחירים (ללא prefix). ברירת מחדל: "prices"
+            → בפועל ייעשה self._tbl("prices").
+        env : Optional[str], default=None
+            סינון לפי עמודת env אם קיימת. אם None → ללא סינון env.
+
+        Returns
+        -------
+        (min_date, max_date) : Tuple[Optional[pd.Timestamp], Optional[pd.Timestamp]]
+            min_date – התאריך הראשון שקיים עבור הסימבול (כולל),
+            max_date – התאריך האחרון שקיים עבור הסימבול (כולל).
+            אם אין שום רשומות → (None, None).
+
+        הערות (HF-grade):
+        ------------------
+        - לא זורק שגיאות החוצה; במקרה של כשל ב-SQL מחזיר (None, None) + לוג אזהרה.
+        - מתאים לשימוש ע"י שכבת ingestion (למשל ensure_prices_for_symbol/ensure_prices_for_pair),
+          כדי למשוך רק את החלק החסר מהברוקר (IBKR) ולא להעמיס דאטה כפול.
+        """
+        tbl = self._tbl(table_name or "prices")
+        symbol = str(symbol).strip()
+        if not symbol:
+            logger.warning("get_price_range called with empty symbol.")
+            return None, None
+
+        try:
+            with self.engine.connect() as conn:
+                sql = f"""
+                    SELECT
+                        MIN(date) AS min_date,
+                        MAX(date) AS max_date
+                    FROM {tbl}
+                    WHERE symbol = :sym
+                """
+                params: Dict[str, Any] = {"sym": symbol}
+
+                if env is not None:
+                    sql += " AND env = :env"
+                    params["env"] = env
+
+                res = conn.execute(text(sql), params)
+                row = res.fetchone()
+        except Exception as exc:
+            self._last_error = str(exc)
+            logger.warning(
+                "get_price_range(%s) failed on table '%s': %s",
+                symbol,
+                tbl,
+                exc,
+                exc_info=True,
+            )
+            return None, None
+
+        if not row:
+            # אין בכלל רשומות לסימבול הזה
+            return None, None
+
+        min_raw, max_raw = row[0], row[1]
+
+        if min_raw is None or max_raw is None:
+            # אין מועדי min/max תקפים
+            return None, None
+
+        try:
+            min_ts = pd.to_datetime(min_raw)
+        except Exception:
+            min_ts = None
+
+        try:
+            max_ts = pd.to_datetime(max_raw)
+        except Exception:
+            max_ts = None
+
+        return min_ts, max_ts
+
     # ------------------------------------------------------------------
     # SQLite Optimization (optional)
     # ------------------------------------------------------------------

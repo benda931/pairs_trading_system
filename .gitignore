@@ -1,23 +1,32 @@
 # Python
 __pycache__/
-*.pyc
-*.pyo
+*.py[cod]
 *.pyd
+*.pyo
+*.pdb
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
 
-# venv
+# Envs
 .venv/
 venv/
+.env
+.env.*
 
-# OS/IDE
-.vscode/
+# OS / IDE
 .DS_Store
+Thumbs.db
+.vscode/
+.idea/
 
-# Logs / results / local data
+# Data / logs / artifacts
 logs/
-results/
 *.log
-
-# Local DB / caches (אם אצלך זה קבצים מקומיים ולא רוצים בגיט)
-*.duckdb
-*.sqlite
 *.db
+*.duckdb
+zoom_results/
+studies/
+*.bak
+*.gpt_backup
