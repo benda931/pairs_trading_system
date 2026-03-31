@@ -1,10 +1,12 @@
 # Portfolio Architecture
 
-> **Integration Status: SCAFFOLD**
+> **Integration Status: INTEGRATED**
 > The portfolio package (allocator, ranking, sizing, exposure, risk ops) is implemented
-> and tested (82 tests pass). As of 2026-03-31, **PortfolioAllocator.run_cycle() never
-> receives real signals from System A.** It is only called from `agents/portfolio_agents.py`
-> (which itself is never dispatched operationally).
+> and tested (82+ tests pass). As of 2026-03-31, `PortfolioAllocator.run_cycle()` receives
+> real `EntryIntent` objects from the signal pipeline via `core/portfolio_bridge.py`.
+> The bridge extracts non-blocked intents from `SignalDecision` outputs, enriches them
+> with quality/regime metadata, and feeds them to the allocator for ranking, sizing,
+> and constraint checking.
 > See: `docs/INTEGRATION_STATUS.md`, `docs/remediation/remediation_ledger.md:P1-PORTINT`
 
 ## Overview

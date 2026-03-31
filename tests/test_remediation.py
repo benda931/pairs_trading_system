@@ -497,6 +497,163 @@ class TestP1SignalPipeline:
 
 
 # ---------------------------------------------------------------------------
+# P1-PORTINT: Portfolio receives real signal intents
+# ---------------------------------------------------------------------------
+
+class TestP1PortfolioIntegration:
+    """P1-PORTINT: PortfolioAllocator receives real signal intents via bridge."""
+
+    def test_bridge_module_importable(self):
+        """P1-PORTINT: core.portfolio_bridge must be importable."""
+        try:
+            from core.portfolio_bridge import (
+                extract_entry_intents,
+                bridge_signals_to_allocator,
+            )
+        except ImportError as e:
+            pytest.fail(f"P1-PORTINT: core.portfolio_bridge not importable: {e}")
+
+    def test_extract_entry_intents_from_decisions(self):
+        """P1-PORTINT: extract_entry_intents filters blocked and non-entry decisions."""
+        from core.portfolio_bridge import extract_entry_intents
+        from core.signal_pipeline import SignalDecision
+        from core.contracts import PairId
+        from core.intents import EntryIntent
+        from datetime import datetime
+
+        pair = PairId("AAPL", "MSFT")
+        now = datetime.utcnow()
+
+        # One valid entry intent
+        d1 = SignalDecision(
+            pair_id=pair, as_of=now, z_score=2.5, regime="MEAN_REVERTING",
+            quality_grade="A", intent=EntryIntent(pair_id=pair, confidence=0.7, z_score=2.5),
+            blocked=False, size_multiplier=1.0,
+        )
+        # One blocked decision
+        d2 = SignalDecision(
+            pair_id=pair, as_of=now, z_score=1.0, regime="CRISIS",
+            quality_grade="F", intent=None,
+            blocked=True, block_reasons=["quality F"],
+        )
+        # One with no intent (z below threshold)
+        d3 = SignalDecision(
+            pair_id=PairId("GOOG", "META"), as_of=now, z_score=0.5,
+            regime="MEAN_REVERTING", quality_grade="B", intent=None,
+            blocked=False,
+        )
+
+        intents = extract_entry_intents([d1, d2, d3])
+        assert len(intents) == 1, (
+            f"P1-PORTINT: Expected 1 eligible intent, got {len(intents)}"
+        )
+        assert isinstance(intents[0], EntryIntent)
+        assert intents[0].pair_id == pair
+        # Check enrichment
+        assert getattr(intents[0], "quality_grade", None) == "A"
+        assert getattr(intents[0], "regime", None) == "MEAN_REVERTING"
+
+    def test_bridge_runs_allocation_cycle(self):
+        """P1-PORTINT: bridge_signals_to_allocator produces allocation decisions."""
+        from core.portfolio_bridge import bridge_signals_to_allocator
+        from core.signal_pipeline import SignalDecision
+        from core.contracts import PairId, SignalDirection
+        from core.intents import EntryIntent
+        from datetime import datetime
+
+        pair = PairId("AAPL", "MSFT")
+        now = datetime.utcnow()
+
+        decisions = [
+            SignalDecision(
+                pair_id=pair, as_of=now, z_score=2.5, regime="MEAN_REVERTING",
+                quality_grade="A",
+                intent=EntryIntent(
+                    pair_id=pair, confidence=0.7, z_score=2.5,
+                    direction=SignalDirection.LONG_SPREAD,
+                    entry_z_threshold=2.0, exit_z_target=0.5, stop_z=4.0,
+                ),
+                blocked=False, size_multiplier=1.0,
+                metadata={"half_life": 15.0},
+            ),
+        ]
+
+        allocations, diagnostics = bridge_signals_to_allocator(
+            signal_decisions=decisions,
+            capital=1_000_000.0,
+        )
+
+        # Must produce at least one allocation decision (funded or unfunded)
+        assert len(allocations) >= 1, (
+            f"P1-PORTINT: Expected at least 1 allocation decision, got {len(allocations)}"
+        )
+        # Diagnostics should record the intent
+        assert diagnostics.n_intents_received >= 1, (
+            "P1-PORTINT: diagnostics must record intents received"
+        )
+
+    def test_bridge_empty_decisions_returns_empty(self):
+        """P1-PORTINT: No eligible intents produces empty allocation with diagnostics."""
+        from core.portfolio_bridge import bridge_signals_to_allocator
+        from core.signal_pipeline import SignalDecision
+        from core.contracts import PairId
+        from datetime import datetime
+
+        pair = PairId("AAPL", "MSFT")
+        now = datetime.utcnow()
+
+        # All blocked
+        decisions = [
+            SignalDecision(
+                pair_id=pair, as_of=now, z_score=1.0, regime="CRISIS",
+                quality_grade="F", intent=None, blocked=True,
+                block_reasons=["quality F"],
+            ),
+        ]
+
+        allocations, diagnostics = bridge_signals_to_allocator(decisions, capital=1_000_000.0)
+        assert len(allocations) == 0
+        assert diagnostics.n_intents_received == 1
+
+    def test_unfunded_has_rationale(self):
+        """P1-PORTINT: Unfunded allocations carry explicit rationale."""
+        from core.portfolio_bridge import bridge_signals_to_allocator
+        from core.signal_pipeline import SignalDecision
+        from core.contracts import PairId, SignalDirection
+        from core.intents import EntryIntent
+        from datetime import datetime
+
+        # Create 10 intents — allocator has limited capital, some must be unfunded
+        decisions = []
+        for i in range(10):
+            pair = PairId(f"SYM{i:02d}A", f"SYM{i:02d}B")
+            decisions.append(SignalDecision(
+                pair_id=pair,
+                as_of=datetime.utcnow(),
+                z_score=2.0 + i * 0.1,
+                regime="MEAN_REVERTING",
+                quality_grade="B",
+                intent=EntryIntent(
+                    pair_id=pair, confidence=0.6, z_score=2.0 + i * 0.1,
+                    direction=SignalDirection.LONG_SPREAD,
+                ),
+                blocked=False, size_multiplier=1.0,
+            ))
+
+        allocations, diagnostics = bridge_signals_to_allocator(
+            decisions, capital=100_000.0,  # small capital → some must be unfunded
+        )
+
+        # Some must be approved, some rejected (capital-limited)
+        assert len(allocations) > 0, "P1-PORTINT: Expected allocation decisions"
+        # Check that all decisions have rationale
+        for a in allocations:
+            assert a.rationale is not None, (
+                f"P1-PORTINT: Allocation for {a.pair_id} missing rationale"
+            )
+
+
+# ---------------------------------------------------------------------------
 # P1-GOV: Governance gate on model promotion
 # ---------------------------------------------------------------------------
 

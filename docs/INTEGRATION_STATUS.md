@@ -38,7 +38,7 @@ and awaiting integration with System A.
 | `core/signal_quality.py` | Signal quality grading (A+ to F) | Tested | **Not called** from operational path |
 | `core/regime_engine.py` | Regime classification engine | Tested | **Not called** from operational path |
 | `core/lifecycle.py` | Trade lifecycle state machine | Tested | **Not called** from operational path |
-| `portfolio/allocator.py` | Portfolio construction engine | 82 tests pass | **Never receives** real signals (P1-PORTINT) |
+| `portfolio/allocator.py` | Portfolio construction engine | 82+ tests pass | **Integrated**: receives real EntryIntents via `core/portfolio_bridge.py` (P1-PORTINT COMPLETE) |
 | `portfolio/ranking.py` | Opportunity ranking (7 dimensions) | Tested | Only called from agents (not System A) |
 | `portfolio/risk_ops.py` | Drawdown/kill-switch managers | Tested | Kill-switch bridge incomplete (P0-KS) |
 | `ml/features/` | 61 feature definitions | Tested | No feature compute-correctness tests |
