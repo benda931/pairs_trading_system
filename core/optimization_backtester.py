@@ -1578,6 +1578,33 @@ def _bt_build_signal_frame(
     max_holding = int(params["max_holding_days"])
     max_abs_pos = float(params["max_position_abs"])
 
+    # ── Canonical signal pipeline integration (P1-PIPE) ──────────
+    # When use_signal_pipeline=True, entry/exit decisions are delegated to
+    # core.signal_pipeline.SignalPipeline which applies regime classification,
+    # adaptive thresholds, and signal quality gating.  The backtester still
+    # computes z-score, but the pipeline decides whether to trade.
+    use_pipeline = bool(params.get("use_signal_pipeline", False))
+    _pipeline = None
+    if use_pipeline:
+        try:
+            from core.signal_pipeline import SignalPipeline
+            from core.contracts import PairId
+            _pipeline = SignalPipeline(pair_id=PairId(cfg.symbol_a, cfg.symbol_b))
+            # Prime the regime cache with whatever data we have
+            spread_s = df["spread"]
+            px_a_s = df["px_a"] if "px_a" in df.columns else pd.Series(dtype=float)
+            px_b_s = df["px_b"] if "px_b" in df.columns else pd.Series(dtype=float)
+            if len(spread_s) > 20 and len(px_a_s) > 20 and len(px_b_s) > 20:
+                _pipeline._refresh_regime_cache(
+                    spread_s, px_a_s, px_b_s,
+                    conviction=0.5, mr_score=0.5,
+                    half_life=float(params.get("half_life", 20)),
+                )
+        except Exception as _pipe_err:
+            logger.warning("Signal pipeline init failed: %s — falling back to legacy", _pipe_err)
+            _pipeline = None
+            use_pipeline = False
+
     # Defensive: z_close should be smaller than z_open
     if abs(z_close) > abs(z_open):
         z_close = z_open * 0.5
@@ -1598,14 +1625,55 @@ def _bt_build_signal_frame(
 
         prev_pos = current_pos
 
-        # If not valid (too low sigma) → prefer to flatten
+        # If not valid (too low sigma) or NaN → prefer to flatten
         if not valid or np.isnan(z):
             current_pos = 0.0
+
+        # ── Pipeline path: delegate to canonical signal pipeline ──
+        elif use_pipeline and _pipeline is not None:
+            bar_decision = _pipeline.evaluate_bar(
+                z_score=z,
+                current_pos=current_pos,
+                holding_days=current_hold,
+                max_holding=max_holding,
+                conviction=0.5,
+                mr_score=0.5,
+            )
+            new_pos = bar_decision.action * max_abs_pos
+            if current_pos == 0.0 and new_pos != 0.0:
+                # New entry
+                current_trade_id += 1
+                current_hold = 0
+                entry_equity_anchor = 1.0
+                current_pos = new_pos
+            elif current_pos != 0.0 and new_pos == 0.0:
+                # Exit
+                current_pos = 0.0
+            elif current_pos != 0.0:
+                # Hold (update holding counter)
+                current_hold += 1
+
+            # Refresh regime cache periodically with recent data
+            if i % 20 == 0 and i >= lb + 60:
+                try:
+                    window_end = i + 1
+                    window_start = max(0, window_end - 252)
+                    _pipeline._refresh_regime_cache(
+                        df["spread"].iloc[window_start:window_end],
+                        (df["px_a"].iloc[window_start:window_end]
+                         if "px_a" in df.columns
+                         else pd.Series(dtype=float)),
+                        (df["px_b"].iloc[window_start:window_end]
+                         if "px_b" in df.columns
+                         else pd.Series(dtype=float)),
+                        conviction=0.5, mr_score=0.5,
+                        half_life=float(params.get("half_life", 20)),
+                    )
+                except Exception:
+                    pass  # Regime refresh failure is non-fatal
+
+        # ── Legacy path: direct z-score thresholds ────────────────
         else:
-            # Long spread: buy A, sell B
-            # Short spread: sell A, buy B
-            # z > 0 → spread מעל הממוצע → short spread
-            # z < 0 → spread מתחת לממוצע → long spread
             if current_pos == 0.0:
                 # Entry rules
                 if z <= -z_open:
@@ -1626,7 +1694,6 @@ def _bt_build_signal_frame(
                 if current_pos > 0:
                     exit_revert = (z >= -z_close)
                     exit_stop = (z <= -abs(stop_z))
-                    # take_z לפי Z יעד (אופציונלי) – אם מוגדר כערך חיובי
                     exit_take = (take_z > 0.0 and z >= -abs(take_z))
                 else:
                     # For short spread: expect z to revert down towards 0

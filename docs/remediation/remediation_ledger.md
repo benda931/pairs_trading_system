@@ -24,7 +24,7 @@
 
 | ID | Title | Severity | Status | Strategy | Evidence Files |
 |----|-------|----------|--------|----------|---------------|
-| P1-PIPE | No canonical signal pipeline (ThresholdEngine → RegimeEngine → QualityEngine → EntryIntent) | P1 | PLANNED | Implement core/signal_pipeline.py | core/signals_engine.py, core/threshold_engine.py |
+| P1-PIPE | Canonical signal pipeline wired to backtester | P1 | COMPLETE | SignalPipeline.evaluate_bar() called from backtester when use_signal_pipeline=True | core/signal_pipeline.py, core/optimization_backtester.py |
 | P1-PORTINT | PortfolioAllocator never receives real signals | P1 | PLANNED | Wire signal pipeline to allocator | portfolio/allocator.py |
 | P1-MINOBS | Minimum observation count too low (60 days) for AR(1) reliability | P1 | IN_PROGRESS | Raise to 252 | research/pair_validator.py |
 | P1-SAFE | is_safe_to_trade() never called in execution paths | P1 | PLANNED | Wire into at least one execution path | runtime/state.py |

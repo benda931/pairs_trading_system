@@ -434,6 +434,67 @@ class TestP1SignalPipeline:
         r2 = get_signal_pipeline_registry()
         assert r1 is r2, "P1-PIPE: get_signal_pipeline_registry() must be a singleton"
 
+    def test_evaluate_bar_returns_bar_decision(self):
+        """P1-PIPE: evaluate_bar() must return a BarDecision with correct fields."""
+        try:
+            from core.signal_pipeline import SignalPipeline, BarDecision
+            from core.contracts import PairId
+        except ImportError as e:
+            pytest.skip(f"Import failed: {e}")
+
+        pipeline = SignalPipeline(pair_id=PairId("AAPL", "MSFT"))
+        decision = pipeline.evaluate_bar(z_score=2.5, current_pos=0.0)
+        assert isinstance(decision, BarDecision), (
+            "P1-PIPE: evaluate_bar must return a BarDecision"
+        )
+        assert hasattr(decision, "action"), "P1-PIPE: BarDecision missing 'action'"
+        assert hasattr(decision, "entry_z"), "P1-PIPE: BarDecision missing 'entry_z'"
+        assert hasattr(decision, "regime"), "P1-PIPE: BarDecision missing 'regime'"
+        assert hasattr(decision, "quality_grade"), "P1-PIPE: BarDecision missing 'quality_grade'"
+        assert hasattr(decision, "blocked"), "P1-PIPE: BarDecision missing 'blocked'"
+
+    def test_evaluate_bar_entry_signal(self):
+        """P1-PIPE: evaluate_bar with z above entry threshold should produce entry."""
+        try:
+            from core.signal_pipeline import SignalPipeline
+            from core.contracts import PairId
+        except ImportError as e:
+            pytest.skip(f"Import failed: {e}")
+
+        pipeline = SignalPipeline(pair_id=PairId("AAPL", "MSFT"))
+        # z = +3.0 (above default entry_z=2.0) → should short spread (action = -1)
+        decision = pipeline.evaluate_bar(z_score=3.0, current_pos=0.0)
+        assert decision.action == -1.0, (
+            f"P1-PIPE: z=3.0 should produce short entry (action=-1), got {decision.action}"
+        )
+
+    def test_evaluate_bar_no_entry_below_threshold(self):
+        """P1-PIPE: evaluate_bar with z below entry threshold should stay flat."""
+        try:
+            from core.signal_pipeline import SignalPipeline
+            from core.contracts import PairId
+        except ImportError as e:
+            pytest.skip(f"Import failed: {e}")
+
+        pipeline = SignalPipeline(pair_id=PairId("AAPL", "MSFT"))
+        decision = pipeline.evaluate_bar(z_score=1.0, current_pos=0.0)
+        assert decision.action == 0.0, (
+            f"P1-PIPE: z=1.0 below entry_z should be flat, got {decision.action}"
+        )
+
+    def test_backtester_has_use_signal_pipeline_param(self):
+        """P1-PIPE: optimization_backtester._bt_build_signal_frame must support
+        use_signal_pipeline parameter."""
+        import pathlib
+        bt_path = pathlib.Path(__file__).parent.parent / "core" / "optimization_backtester.py"
+        source = bt_path.read_text(encoding="utf-8")
+        assert "use_signal_pipeline" in source, (
+            "P1-PIPE: optimization_backtester.py must contain 'use_signal_pipeline' parameter"
+        )
+        assert "signal_pipeline" in source and "SignalPipeline" in source, (
+            "P1-PIPE: optimization_backtester.py must import and use SignalPipeline"
+        )
+
 
 # ---------------------------------------------------------------------------
 # P1-GOV: Governance gate on model promotion

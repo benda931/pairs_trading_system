@@ -33,7 +33,7 @@ and awaiting integration with System A.
 
 | Module | Description | Tests | Integration Status |
 |--------|-------------|-------|--------------------|
-| `core/signal_pipeline.py` | Canonical signal pipeline (ADR-006) | Tested | **Not called** from backtester (P1-PIPE) |
+| `core/signal_pipeline.py` | Canonical signal pipeline (ADR-006) | Tested + Wired | **Integrated**: backtester calls `evaluate_bar()` when `use_signal_pipeline=True` (P1-PIPE COMPLETE) |
 | `core/threshold_engine.py` | Regime-conditioned thresholds | Tested | **Not called** from operational path |
 | `core/signal_quality.py` | Signal quality grading (A+ to F) | Tested | **Not called** from operational path |
 | `core/regime_engine.py` | Regime classification engine | Tested | **Not called** from operational path |

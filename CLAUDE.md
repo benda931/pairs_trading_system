@@ -272,7 +272,7 @@ WalkForwardHarness(
 |------|----------------------|------------------|
 | `root/backtest.py:TradeSide` | `core/contracts.py:SignalDirection` | Migrate internal references, then remove |
 | `root/trade_logic.py:TradeSide` | `core/contracts.py:SignalDirection` | Migrate internal references, then remove |
-| `core/signals_engine.py` | `core/signal_pipeline.py` (ADR-006) | Wire signal_pipeline to backtester (P1-PIPE), then deprecate |
+| `core/signals_engine.py` | `core/signal_pipeline.py` (ADR-006) | P1-PIPE COMPLETE: pipeline wired to backtester via `use_signal_pipeline=True`. signals_engine.py still used by orchestrator/sql_store — deprecate after full migration |
 
 ### Walk-Forward Disambiguation
 
