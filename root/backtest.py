@@ -3043,7 +3043,7 @@ def _render_backtest_advanced_panels(
         # נשמור היסטוריה ב-session
         history: List[Dict[str, Any]] = st.session_state.get("bt_run_history", [])
         snap = {
-            "ts": datetime.now(timezone.utc)().isoformat(),
+            "ts": _utc_now_z(),
             "sym_x": sym_x,
             "sym_y": sym_y,
             "Sharpe": float(result.metrics.get("Sharpe", 0.0)),
@@ -3051,8 +3051,6 @@ def _render_backtest_advanced_panels(
             "Drawdown": float(result.metrics.get("Drawdown", 0.0)),
             "Trades": int(result.metrics.get("Trades", 0)),
         }
-        history.append(snap)
-        st.session_state["bt_run_history"] = history[-50:]  # נשמור רק 50 אחרונות
 
         hist_df = pd.DataFrame(st.session_state["bt_run_history"])
         if hist_df.empty:
@@ -3084,6 +3082,9 @@ def _render_backtest_advanced_panels(
             except Exception:
                 pass
 
+        history.append(snap)
+        st.session_state["bt_run_history"] = history[-50:]  # נשמור רק 50 אחרונות
+
 # -----------------------------------------------------------------------
 # 5.1 — Result panels: trades table, exports, history, audit
 # -----------------------------------------------------------------------
@@ -3091,7 +3092,7 @@ def _render_backtest_advanced_panels(
 def _build_bt_run_snapshot(result: BacktestResult) -> Dict[str, Any]:
     """יוצר snapshot קטן לריצה, לשימוש ב־history / audit."""
     return {
-        "ts_utc": datetime.now(timezone.utc)().isoformat() + "Z",
+        "ts": _utc_now_z(),
         "symbols": list(result.symbols),
         "window": (
             result.window[0].isoformat() if result.window[0] else None,
@@ -3153,7 +3154,7 @@ def push_backtest_metrics_to_ctx(
             "window": window_str,
         }
         try:
-            payload["last_run_utc"] = datetime.now(timezone.utc)().isoformat(timespec="seconds") + "Z"
+            payload["last_run_utc"] = _utc_now_z()
         except Exception:
             payload["last_run_utc"] = None
 
@@ -3161,6 +3162,52 @@ def push_backtest_metrics_to_ctx(
     except Exception:
         # לא מפילים את הטאב בגלל שמירת מטא
         logger.debug("push_backtest_metrics_to_ctx failed", exc_info=True)
+
+def _utc_now_z() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def _safe_rows_selector(
+    *,
+    label: str,
+    n_rows: int,
+    key: str,
+    default: int = 200,
+    step: int = 20,
+    hard_cap: int = 2000,
+) -> int:
+    """
+    Safe selector for number of rows to display.
+    Avoids Streamlit slider errors when n_rows is small.
+    """
+    if st is None:
+        return int(min(max(1, n_rows), hard_cap))
+
+    cap = int(min(int(hard_cap), int(max(1, n_rows))))
+    if cap <= 1:
+        return 1
+
+    # If too few rows for a meaningful slider, return cap
+    if cap <= step:
+        return cap
+
+    # Slider must have min < max
+    mn = int(step)
+    mx = int(cap)
+    if mn >= mx:
+        return mx
+
+    v = int(min(max(mn, default), mx))
+    return int(
+        st.slider(
+            label,
+            min_value=mn,
+            max_value=mx,
+            value=v,
+            step=int(step),
+            key=key,
+        )
+    )
 
 def _render_backtest_result_panels(
     result: BacktestResult,
@@ -3189,6 +3236,30 @@ def _render_backtest_result_panels(
 
     # ===== Trades table =====
     st.subheader("📋 Trades")
+
+    # --- Trades table rows control (robust) ---
+    n_trades = 0
+    try:
+        n_trades = int(len(trades_df))  # trades_df = df של הטריידים בפאנל
+    except Exception:
+        n_trades = 0
+
+    min_rows_default = 5
+    if n_trades <= 0:
+        max_rows = 0
+        st.info("אין טריידים להצגה.")
+    elif n_trades <= min_rows_default:
+        max_rows = n_trades
+        st.caption(f"מציג את כל הטריידים ({n_trades}) — אין טווח ל-slider.")
+    else:
+        max_rows = st.slider(
+            "מספר שורות להצגה",
+            min_value=min_rows_default,
+            max_value=n_trades,
+            value=min(50, n_trades),
+            step=1,
+            key="bt_trades_rows",
+        )
 
     # בחירה כמה שורות להציג
     max_rows = st.slider(
@@ -4469,7 +4540,7 @@ def log_result_to_duckdb(
         return
 
     try:
-        rid = run_id or result.run_id or f"run_{datetime.now(timezone.utc)().isoformat()}"
+        rid = run_id or result.run_id or f"run_{_utc_now_z()}"
 
         # --- Runs table: שורה אחת לכל ריצה ---
         run_row = pd.DataFrame(

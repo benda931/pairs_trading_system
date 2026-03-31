@@ -1,22 +1,22 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """
-common/data_providers.py ג€” Unified Market-Data Providers Layer (HF-grade)
+common/data_providers.py — Unified Market-Data Providers Layer (HF-grade)
 ========================================================================
 
-׳׳˜׳¨׳× ׳”׳§׳•׳‘׳¥:
+מטרת הקובץ:
 -----------
 
-1. ׳׳¡׳₪׳§ ׳©׳›׳‘׳” ׳׳—׳™׳“׳” ׳׳›׳ ׳׳§׳•׳¨׳•׳× ׳”׳“׳׳˜׳” (IBKR, Yahoo, ׳¡׳₪׳§׳™׳ ׳׳§׳¦׳•׳¢׳™׳™׳ ׳ ׳•׳¡׳₪׳™׳).
-2. ׳׳”׳¡׳×׳™׳¨ ׳׳× ׳”׳₪׳¨׳˜׳™׳ ׳©׳ ׳›׳ ׳¡׳₪׳§ (API / Rate Limits / ׳₪׳•׳¨׳׳˜), ׳•׳׳”׳—׳–׳™׳¨ ׳×׳׳™׳“ DataFrame ׳׳—׳™׳“.
-3. ׳׳׳₪׳©׳¨ ׳‘׳—׳™׳¨׳” ׳“׳™׳ ׳׳™׳× ׳©׳ ׳¡׳₪׳§ (׳¢"׳™ ׳”׳׳©׳×׳׳© ׳׳• ׳׳•׳˜׳•׳׳˜׳™׳× ׳¢"׳™ Router ׳—׳™׳¦׳•׳ ׳™).
-4. ׳׳׳₪׳©׳¨ ׳”׳¨׳—׳‘׳” ׳¢׳×׳™׳“׳™׳× (Polygon, Tiingo, Alpaca ׳•׳›׳•') ׳‘׳׳™ ׳׳’׳¢׳× ׳‘׳§׳•׳“ ׳©׳ ׳”׳˜׳׳‘׳™׳/׳”׳׳•׳’׳™׳§׳”.
+1. לספק שכבה אחידה לכל מקורות הדאטה (IBKR, Yahoo, ספקים מקצועיים נוספים).
+2. להסתיר את הפרטים של כל ספק (API / Rate Limits / פורמט), ולהחזיר תמיד DataFrame אחיד.
+3. לאפשר בחירה דינמית של ספק (ע"י המשתמש או אוטומטית ע"י Router חיצוני).
+4. לאפשר הרחבה עתידית (Polygon, Tiingo, Alpaca וכו') בלי לגעת בקוד של הטאבים/הלוגיקה.
 
-׳₪׳•׳¨׳׳˜ ׳׳—׳™׳“ ׳©׳ DataFrame (wide "standardized"):
+פורמט אחיד של DataFrame (wide "standardized"):
 -----------------------------------------------
 
-׳›׳ Provider ׳׳—׳–׳™׳¨ DataFrame ׳‘׳₪׳•׳¨׳׳˜ ׳”׳‘׳ (׳׳₪׳—׳•׳×):
+כל Provider מחזיר DataFrame בפורמט הבא (לפחות):
     - columns:
-        symbol      : str   ג€” ׳¡׳™׳׳‘׳•׳ (QQQ, XLY, ׳•׳›׳•')
+        symbol      : str   — סימבול (QQQ, XLY, וכו')
         datetime    : datetime64[ns]
         open        : float
         high        : float
@@ -24,11 +24,11 @@ common/data_providers.py ג€” Unified Market-Data Providers Layer (HF-grade)
         close       : float
         volume      : float | int | NaN
 
-    - index: RangeIndex (׳׳ ׳—׳•׳‘׳” MultiIndex)
+    - index: RangeIndex (לא חובה MultiIndex)
 
-׳©׳׳¨ ׳”׳¢׳׳•׳“׳•׳× (dividends, average_price, etc) ׳”׳ ׳׳•׳₪׳¦׳™׳•׳ ׳׳™׳•׳×.
+שאר העמודות (dividends, average_price, etc) הן אופציונליות.
 
-׳©׳™׳׳•׳© ׳‘׳¡׳™׳¡׳™:
+שימוש בסיסי:
 ------------
 
     from common.data_providers import IBKRProvider, YahooProvider, normalize_symbols
@@ -38,7 +38,7 @@ common/data_providers.py ג€” Unified Market-Data Providers Layer (HF-grade)
 
     df = ib_provider.get_history(["XLY", "XLC"], period="6mo", bar_size="1d")
 
-Router ׳—׳›׳ (׳‘׳—׳™׳¨׳” ׳‘׳™׳ ׳¡׳₪׳§׳™׳) ׳׳•׳׳׳¥ ׳׳™׳™׳©׳ ׳‘׳§׳•׳‘׳¥ ׳ ׳₪׳¨׳“:
+Router חכם (בחירה בין ספקים) מומלץ ליישם בקובץ נפרד:
     common/market_data_router.py
 """
 
@@ -56,7 +56,7 @@ import pandas as pd
 
 logger = logging.getLogger("MarketData")
 if not logger.handlers:
-    # ׳׳ ׳×׳”׳¨׳•׳¡ ׳§׳•׳ ׳₪׳™׳’ ׳’׳׳•׳‘׳׳™, ׳¨׳§ ׳“׳™׳₪׳•׳׳˜ ׳¢׳“׳™׳
+    # אל תהרוס קונפיג גלובלי, רק דיפולט עדין
     handler = logging.StreamHandler()
     formatter = logging.Formatter(
         "[%(asctime)s] [%(name)s] [%(levelname)s] %(message)s"
@@ -87,7 +87,7 @@ class MarketDataProvider(ABC):
     """
 
     name: str = "abstract"
-    priority: int = 100  # ׳ ׳׳•׳ ׳™׳•׳×׳¨ = ׳¢׳“׳™׳₪׳•׳× ׳’׳‘׳•׳”׳” ׳™׳•׳×׳¨
+    priority: int = 100  # נמוך יותר = עדיפות גבוהה יותר
 
     @abstractmethod
     def get_history(
@@ -141,44 +141,44 @@ class MarketDataProvider(ABC):
 def normalize_symbols(raw: Any) -> list[str]:
     """Normalize any messy symbol input into a clean ``list[str]``.
 
-    Supports ׳‘׳™׳ ׳”׳™׳×׳¨:
+    Supports בין היתר:
     --------------------
     - "QQQ"
     - ["QQQ", "XLY"]
     - {"SYMBOLS": ["QQQ", "XLY"]}
-    - "['QQQ', 'XLY']"      (list ׳׳׳•׳¨׳©׳¨)
-    - "{'SYMBOLS': ['QQQ', 'XLY']}" (dict ׳׳׳•׳¨׳©׳¨)
+    - "['QQQ', 'XLY']"      (list ממורשר)
+    - "{'SYMBOLS': ['QQQ', 'XLY']}" (dict ממורשר)
 
-    ׳•׳›׳ ׳׳—׳¨׳•׳–׳•׳× ׳׳¨׳•׳‘׳•׳× ׳˜׳™׳§׳¨׳™׳ ׳›׳׳•:
+    וכן מחרוזות מרובות טיקרים כמו:
     - "XLY XLC"
     - "XLY,XLC"
 
-    ׳©׳“׳¨׳•׳’ ׳—׳©׳•׳‘: ׳”׳₪׳•׳ ׳§׳¦׳™׳” ׳׳ ׳¡׳” ׳׳×׳§׳ ׳’׳ ׳׳§׳¨׳™׳ "׳׳׳•׳›׳׳›׳™׳" ׳›׳׳•:
-    - ["{'SYMBOLS': ['XLY', 'XLC']}"]  ג† list ׳¢׳ ׳׳—׳¨׳•׳–׳× ׳׳—׳× ׳©׳ ׳¨׳׳™׳× ׳›׳׳• dict
+    שדרוג חשוב: הפונקציה מנסה לתקן גם מקרים "מלוכלכים" כמו:
+    - ["{'SYMBOLS': ['XLY', 'XLC']}"]  ← list עם מחרוזת אחת שנראית כמו dict
 
-    ׳›׳ ׳”׳˜׳™׳§׳¨׳™׳ ׳׳•׳›׳ ׳¡׳™׳ ׳-UPPERCASE ׳•׳׳ ׳•׳§׳™׳ ׳׳¨׳•׳•׳—׳™׳.
+    כל הטיקרים מוכנסים ל-UPPERCASE ומנוקים מרווחים.
     """
 
     import ast
 
-    # None ג†’ empty list
+    # None → empty list
     if raw is None:
         return []
 
-    # Mapping ׳¢׳ ׳׳₪׳×׳— SYMBOLS / symbols (׳§׳•׳ ׳₪׳™׳’׳™׳ ׳‘׳¡׳’׳ ׳•׳ {"SYMBOLS": [...]} ׳׳• {"symbols": [...]})
+    # Mapping עם מפתח SYMBOLS / symbols (קונפיגים בסגנון {"SYMBOLS": [...]} או {"symbols": [...]})
     if isinstance(raw, Mapping):
         for k, v in raw.items():
             if str(k).upper() == "SYMBOLS":
-                # ׳ ׳–׳¨׳•׳§ ׳׳× ׳”׳¢׳¨׳ ׳—׳–׳¨׳” ׳׳ ׳•׳¨׳׳׳™׳–׳¦׳™׳” ׳”׳¨׳’׳™׳׳”
+                # נזרוק את הערך חזרה לנורמליזציה הרגילה
                 return normalize_symbols(v)
 
-    # Iterable (list/tuple/set ...) ׳׳‘׳ ׳׳ str/bytes/Mapping
+    # Iterable (list/tuple/set ...) אבל לא str/bytes/Mapping
     if isinstance(raw, Iterable) and not isinstance(raw, (str, bytes, Mapping)):
         seq = list(raw)
         if not seq:
             return []
 
-        # ׳׳§׳¨׳” ׳׳׳•׳›׳׳ ׳ ׳₪׳•׳¥: ["{'SYMBOLS': ['XLY', 'XLC']}"] ׳׳• "['XLY','XLC']"
+        # מקרה מלוכלך נפוץ: ["{'SYMBOLS': ['XLY', 'XLC']}"] או "['XLY','XLC']"
         if len(seq) == 1 and isinstance(seq[0], str):
             cleaned = seq[0].strip()
             if cleaned.startswith(("{", "[")):
@@ -192,13 +192,13 @@ def normalize_symbols(raw: Any) -> list[str]:
                     )
                     return [cleaned.upper()]
 
-        # ׳׳§׳¨׳” ׳¨׳’׳™׳: ׳›׳ ׳׳™׳‘׳¨ ׳”׳•׳ ׳˜׳™׳§׳¨ ׳‘׳₪׳ ׳™ ׳¢׳¦׳׳•
+        # מקרה רגיל: כל איבר הוא טיקר בפני עצמו
         out: list[str] = []
         for s in seq:
             text = str(s).strip().upper()
             if text:
                 out.append(text)
-        # ׳”׳¡׳¨׳× ׳›׳₪׳•׳׳™׳ ׳×׳•׳ ׳©׳׳™׳¨׳” ׳¢׳ ׳¡׳“׳¨
+        # הסרת כפולים תוך שמירה על סדר
         seen: set[str] = set()
         uniq: list[str] = []
         for t in out:
@@ -207,13 +207,13 @@ def normalize_symbols(raw: Any) -> list[str]:
                 uniq.append(t)
         return uniq
 
-    # String input ג€” ׳™׳›׳•׳ ׳׳”׳™׳•׳× ׳’׳ ׳˜׳™׳§׳¨ ׳‘׳•׳“׳“ ׳•׳’׳ list/dict ׳׳׳•׳¨׳©׳¨
+    # String input — יכול להיות גם טיקר בודד וגם list/dict ממורשר
     if isinstance(raw, str):
         cleaned = raw.strip()
         if not cleaned:
             return []
 
-        # ׳׳ ׳–׳” ׳ ׳¨׳׳” ׳›׳׳• list/dict ג†’ ׳ ׳ ׳¡׳” literal_eval
+        # אם זה נראה כמו list/dict → ננסה literal_eval
         if cleaned.startswith(("{", "[")):
             try:
                 parsed = ast.literal_eval(cleaned)
@@ -222,12 +222,12 @@ def normalize_symbols(raw: Any) -> list[str]:
                 logger.debug("normalize_symbols: literal_eval failed for %r", cleaned)
                 return [cleaned.upper()]
 
-        # ׳×׳׳™׳›׳” ׳‘׳׳₪׳¨׳™׳“׳™׳: ׳₪׳¡׳™׳§׳™׳, ׳ ׳§׳•׳“׳”-׳₪׳¡׳™׳§, ׳¨׳•׳•׳—׳™׳
+        # תמיכה במפרידים: פסיקים, נקודה-פסיק, רווחים
         tmp = cleaned.replace(";", ",")
         if "," in tmp:
             parts = [p.strip().upper() for p in tmp.split(",") if p.strip()]
             if len(parts) > 1:
-                # ׳”׳¡׳¨׳× ׳›׳₪׳•׳׳™׳ ׳×׳•׳ ׳©׳׳™׳¨׳” ׳¢׳ ׳¡׳“׳¨
+                # הסרת כפולים תוך שמירה על סדר
                 seen: set[str] = set()
                 uniq: list[str] = []
                 for t in parts:
@@ -236,7 +236,7 @@ def normalize_symbols(raw: Any) -> list[str]:
                         uniq.append(t)
                 return uniq
 
-        # ׳׳ ׳׳™׳ ׳₪׳¡׳™׳§׳™׳ ג€“ ׳ ׳‘׳“׳•׳§ ׳¨׳•׳•׳—׳™׳ ("XLY XLC")
+        # אם אין פסיקים – נבדוק רווחים ("XLY XLC")
         if " " in cleaned:
             parts = [p.strip().upper() for p in cleaned.split() if p.strip()]
             if len(parts) > 1:
@@ -248,10 +248,10 @@ def normalize_symbols(raw: Any) -> list[str]:
                         uniq.append(t)
                 return uniq
 
-        # ׳˜׳™׳§׳¨ ׳‘׳•׳“׳“
+        # טיקר בודד
         return [cleaned.upper()]
 
-    # Last resort: stringify ׳›׳ ׳“׳‘׳¨ ׳׳—׳¨
+    # Last resort: stringify כל דבר אחר
     s = str(raw).strip()
     return [s.upper()] if s else []
 
@@ -260,62 +260,62 @@ def normalize_symbols(raw: Any) -> list[str]:
  
 
 try:
-    # ib_insync ׳”׳•׳ ׳׳•׳₪׳¦׳™׳•׳ ׳׳™ ג€“ ׳׳ ׳׳ ׳׳•׳×׳§׳, IBKRProvider ׳׳ ׳™׳”׳™׳” ׳₪׳¢׳™׳
+    # ib_insync הוא אופציונלי – אם לא מותקן, IBKRProvider לא יהיה פעיל
     from ib_insync import IB, Stock, Future, util as ib_util  # type: ignore[import]
 except Exception:  # pragma: no cover - optional dep
     IB = None          # type: ignore[assignment]
     Stock = None       # type: ignore[assignment]
     Future = None      # type: ignore[assignment]
     ib_util = None     # type: ignore[assignment]
-    logger.warning("ib_insync is not available ג€” IBKRProvider will be disabled.")
+    logger.warning("ib_insync is not available — IBKRProvider will be disabled.")
 
 
 @dataclass
 class IBKRContractConfig:
     """
-    ׳”׳’׳“׳¨׳•׳× ׳׳‘׳ ׳™׳™׳× ׳—׳•׳–׳” IBKR ׳׳×׳•׳ ׳¡׳™׳׳‘׳•׳.
+    הגדרות לבניית חוזה IBKR מתוך סימבול.
 
-    ׳׳₪׳©׳¨ ׳׳”׳¨׳—׳™׳‘ ׳‘׳¢׳×׳™׳“ ׳:
+    אפשר להרחיב בעתיד ל:
     - Futures
     - FX
     - Options
-    - ׳”׳’׳“׳¨׳•׳× ׳©׳•׳ ׳•׳× ׳ײ¾exchange/currency ׳•׳›׳•'.
+    - הגדרות שונות ל־exchange/currency וכו'.
     """
 
     sec_type: Literal["STK", "FUT"] = "STK"
     exchange: str = "SMART"
     currency: str = "USD"
-    primary_exchange: str | None = None  # ׳׳“׳•׳’׳׳” "NASDAQ"
+    primary_exchange: str | None = None  # לדוגמה "NASDAQ"
 
 
 class IBKRProvider(MarketDataProvider):
     """
     Interactive Brokers market-data provider.
 
-    ׳“׳¨׳™׳©׳•׳×:
+    דרישות:
     --------
-    - ׳׳•׳‘׳™׳™׳§׳˜ IB (ib_insync.IB) ׳׳—׳•׳‘׳¨ ׳›׳‘׳¨ ׳ײ¾TWS / Gateway.
-    - ׳”׳×׳§׳ ׳× ib_insync.
+    - אובייקט IB (ib_insync.IB) מחובר כבר ל־TWS / Gateway.
+    - התקנת ib_insync.
 
-    ׳”׳”׳—׳–׳¨׳”:
+    ההחזרה:
     -------
-    DataFrame ׳׳—׳™׳“ ׳¢׳ ׳¢׳׳•׳“׳•׳×:
+    DataFrame אחיד עם עמודות:
     symbol, datetime, open, high, low, close, volume
     """
 
     name: str = "ibkr"
-    priority: int = 10  # ׳¢׳“׳™׳₪׳•׳× ׳’׳‘׳•׳”׳” (׳׳¡׳₪׳¨ ׳ ׳׳•׳ ׳™׳•׳×׳¨ ׳˜׳•׳‘)
+    priority: int = 10  # עדיפות גבוהה (מספר נמוך יותר טוב)
 
     def __init__(
         self,
-        ib: Any,  # ׳‘׳׳§׳•׳ "IB" ׳›׳“׳™ ׳׳ ׳׳¢׳¦׳‘׳ ׳׳× Pylance
+        ib: Any,  # במקום "IB" כדי לא לעצבן את Pylance
         *,
         contract_config: IBKRContractConfig | None = None,
         max_lookback_days: int = 365,
         ignore_empty: bool = True,
     ) -> None:
         if ib_util is None:
-            # ׳׳™׳ ib_insync ׳׳•׳×׳§׳
+            # אין ib_insync מותקן
             raise RuntimeError(
                 "IBKRProvider cannot be used because ib_insync is not installed."
             )
@@ -528,7 +528,7 @@ class IBKRProvider(MarketDataProvider):
             if not bars:
                 logger.warning("IBKRProvider: no data for %s", sym)
                 if not self.ignore_empty:
-                    # ׳ ׳—׳–׳™׳¨ ׳©׳•׳¨׳” ׳¨׳™׳§׳” ׳¨׳§ ׳¢׳ ׳¡׳׳
+                    # נחזיר שורה ריקה רק עם סמל
                     frames.append(
                         pd.DataFrame(
                             {
@@ -561,7 +561,7 @@ class IBKRProvider(MarketDataProvider):
             )
 
             cols = ["symbol", "datetime", "open", "high", "low", "close", "volume"]
-            # ׳©׳׳™׳¨׳” ׳¢׳ ׳¡׳“׳¨ ׳§׳‘׳•׳¢, ׳’׳ ׳׳ ׳™׳© ׳¢׳׳•׳“׳•׳× ׳ ׳•׳¡׳₪׳•׳×
+            # שמירה על סדר קבוע, גם אם יש עמודות נוספות
             df = df[[c for c in cols if c in df.columns] + [c for c in df.columns if c not in cols]]
 
             frames.append(df)
@@ -570,7 +570,7 @@ class IBKRProvider(MarketDataProvider):
             return pd.DataFrame()
 
         out = pd.concat(frames, ignore_index=True)
-        # ׳•׳“׳ ׳© datetime ׳‘׳₪׳•׳¨׳׳˜ ׳“׳™׳™׳˜-׳˜׳™׳™׳
+        # ודא ש datetime בפורמט דייט-טיים
         if "datetime" in out.columns:
             out["datetime"] = pd.to_datetime(out["datetime"], utc=False)
 
@@ -578,7 +578,7 @@ class IBKRProvider(MarketDataProvider):
 
     def healthcheck(self) -> bool:
         try:
-            # ׳ ׳™׳¡׳™׳•׳ ׳§׳˜׳ ׳׳§׳‘׳ server time
+            # ניסיון קטן לקבל server time
             _ = self.ib.reqCurrentTime()
             return True
         except Exception as exc:  # pragma: no cover - best effort
@@ -597,7 +597,7 @@ class IBKRProvider(MarketDataProvider):
                 primaryExchange=cfg.primary_exchange,
             )
         elif cfg.sec_type == "FUT":
-            # future example ג€“ ׳¦׳¨׳™׳ ׳׳”׳×׳׳™׳ ׳ײ¾symbol/expiry ׳©׳׳
+            # future example – צריך להתאים ל־symbol/expiry שלך
             c = Future(symbol, cfg.exchange, cfg.currency)
         else:
             raise ValueError(f"Unsupported sec_type for IBKR: {cfg.sec_type}")
@@ -629,9 +629,9 @@ class IBKRProvider(MarketDataProvider):
         Simplified logic:
         -----------------
         - If explicit start/end given, prefer a days-based duration with cap.
-        - Else use `period` like '6mo' ג†’ '6 M', '1y' ג†’ '1 Y', etc.
+        - Else use `period` like '6mo' → '6 M', '1y' → '1 Y', etc.
         """
-        # TODO: ׳׳₪׳©׳¨ ׳׳”׳¨׳—׳™׳‘ ׳₪׳” ׳׳•׳’׳™׳§׳” ׳׳“׳•׳™׳™׳§׳× ׳™׳•׳×׳¨ ׳׳₪׳™ ׳”׳¦׳•׳¨׳
+        # TODO: אפשר להרחיב פה לוגיקה מדוייקת יותר לפי הצורך
         if period:
             p = period.lower()
             if p.endswith("mo"):
@@ -645,7 +645,7 @@ class IBKRProvider(MarketDataProvider):
             # default fallback
             return "6 M"
 
-        # ׳׳ ׳׳™׳ period ׳׳‘׳ ׳™׳© start/end ג€“ estimated days
+        # אם אין period אבל יש start/end – estimated days
         if isinstance(start, datetime) and isinstance(end, datetime):
             days = (end - start).days
             days = max(1, min(days, self.max_lookback_days))
@@ -661,7 +661,7 @@ try:
     import yfinance as yf  # type: ignore[import]
 except Exception:  # pragma: no cover - optional dep
     yf = None
-    logger.warning("yfinance is not available ג€” YahooProvider will be disabled.")
+    logger.warning("yfinance is not available — YahooProvider will be disabled.")
 
 
 class YahooProvider(MarketDataProvider):
@@ -675,7 +675,7 @@ class YahooProvider(MarketDataProvider):
     """
 
     name: str = "yahoo"
-    priority: int = 50  # ׳ ׳׳•׳ ׳™׳•׳×׳¨ ׳ײ¾IBKR, ׳’׳‘׳•׳” ׳׳¡׳₪׳§׳™׳ "׳©׳•׳׳™׳™׳"
+    priority: int = 50  # נמוך יותר מ־IBKR, גבוה מספקים "שוליים"
 
     def __init__(
         self,
@@ -709,7 +709,7 @@ class YahooProvider(MarketDataProvider):
         if not tickers:
             return pd.DataFrame()
 
-        # yfinance ׳׳ ׳×׳•׳׳ ׳‘׳‘׳¨ ׳’׳“׳׳™׳ ׳›׳׳• IB, ׳׳– ׳ ׳×׳¢׳׳ ׳ײ¾bar_size ׳›׳׳ (׳׳• ׳ ׳׳₪׳” ׳ײ¾interval ׳‘׳”׳¨׳—׳‘׳” ׳¢׳×׳™׳“׳™׳×)
+        # yfinance לא תומך בבר גדלים כמו IB, אז נתעלם מ־bar_size כאן (או נמפה ל־interval בהרחבה עתידית)
         if start is not None or end is not None:
             df = yf.download(
                 " ".join(tickers),
@@ -732,14 +732,14 @@ class YahooProvider(MarketDataProvider):
             logger.warning("YahooProvider: empty data for %s", tickers)
             return pd.DataFrame()
 
-        # ׳׳ ׳™׳© ׳›׳׳” ׳˜׳™׳§׳¨׳™׳ ג€“ yfinance ׳׳—׳–׳™׳¨ MultiIndex columns
+        # אם יש כמה טיקרים – yfinance מחזיר MultiIndex columns
         if isinstance(df.columns, pd.MultiIndex):
             frames: list[pd.DataFrame] = []
             for sym in tickers:
                 if (sym, "Close") not in df.columns:
                     continue
                 sub = df.xs(sym, axis=1, level=1, drop_level=False)
-                # columns like ('Open','QQQ') ג†’ ׳ ׳™׳§׳•׳™ ׳׳©׳׳•׳× ׳¡׳˜׳ ׳“׳¨׳˜׳™׳™׳
+                # columns like ('Open','QQQ') → ניקוי לשמות סטנדרטיים
                 sub = sub.droplevel(1, axis=1)
                 sub = sub.rename(
                     columns={
@@ -772,7 +772,7 @@ class YahooProvider(MarketDataProvider):
             ).reset_index().rename(columns={"Date": "datetime"})
             out["symbol"] = sym
 
-        # ׳©׳׳™׳¨׳” ׳¢׳ ׳₪׳•׳¨׳׳˜ ׳׳—׳™׳“
+        # שמירה על פורמט אחיד
         cols = ["symbol", "datetime", "open", "high", "low", "close", "volume"]
         out = out[[c for c in cols if c in out.columns] + [c for c in out.columns if c not in cols]]
 
@@ -782,8 +782,84 @@ class YahooProvider(MarketDataProvider):
         return out
 
     def healthcheck(self) -> bool:
-        # ׳׳₪׳©׳¨ ׳׳¢׳©׳•׳× ping ׳§׳¦׳¨ ׳¢׳ ׳˜׳™׳§׳¨ ׳™׳“׳•׳¢, ׳׳‘׳ ׳–׳” ׳¢׳׳•׳ ׳׳”׳™׳•׳× ׳׳™׳˜׳™/׳׳™׳•׳×׳¨
+        # אפשר לעשות ping קצר על טיקר ידוע, אבל זה עלול להיות איטי/מיותר
         return True
+
+
+# ========================= FMP Provider ===========================
+
+
+class FMPProvider(MarketDataProvider):
+    """
+    FinancialModelingPrep market-data provider.
+
+    Features:
+    ---------
+    - Historical daily OHLCV via stable API with v3 fallback
+    - Concurrent batch fetching for multiple symbols
+    - Integrated with FMPClient (retry, cache, circuit-breaker)
+    """
+
+    name: str = "fmp"
+    priority: int = 25  # between IBKR (10) and Yahoo (50)
+
+    def __init__(self, api_key: str | None = None) -> None:
+        from common.fmp_client import FMPClient, get_fmp_client
+        self._client = get_fmp_client(api_key)
+
+    def get_history(
+        self,
+        symbols: Sequence[str],
+        *,
+        start: str | datetime | None = None,
+        end: str | datetime | None = None,
+        period: str | None = "6mo",
+        bar_size: BarSize = "1d",
+        what_to_show: WhatToShow = "TRADES",
+        use_rth: bool = True,
+        **kwargs: Any,
+    ) -> pd.DataFrame:
+        if not symbols:
+            return pd.DataFrame()
+
+        tickers = normalize_symbols(symbols)
+        if not tickers:
+            return pd.DataFrame()
+
+        # resolve start date from period if needed
+        start_str = None
+        end_str = None
+        if start:
+            start_str = pd.Timestamp(start).strftime("%Y-%m-%d")
+        elif period:
+            p = period.lower()
+            days = 180  # default 6mo
+            if p.endswith("y"):
+                days = int(p[:-1]) * 365
+            elif p.endswith("mo"):
+                days = int(p[:-2]) * 30
+            elif p.endswith("d"):
+                days = int(p[:-1])
+            elif p.endswith("w"):
+                days = int(p[:-1]) * 7
+            start_str = (datetime.now() - pd.Timedelta(days=days)).strftime("%Y-%m-%d")
+
+        if end:
+            end_str = pd.Timestamp(end).strftime("%Y-%m-%d")
+
+        logger.info(
+            "FMPProvider.get_history: %d symbols, start=%s, end=%s",
+            len(tickers), start_str, end_str,
+        )
+
+        return self._client.get_batch_prices(tickers, start=start_str, end=end_str)
+
+    def healthcheck(self) -> bool:
+        try:
+            return self._client.healthcheck()
+        except Exception as exc:
+            logger.warning("FMPProvider.healthcheck failed: %s", exc)
+            return False
 
 
 # ========================= Placeholders for pro feeds ============
@@ -801,7 +877,7 @@ class PolygonProvider(MarketDataProvider):
     """
 
     name: str = "polygon"
-    priority: int = 30  # ׳ ׳׳•׳ ׳ײ¾IBKR, ׳’׳‘׳•׳” ׳ײ¾Yahoo (׳׳₪׳™ ׳”׳”׳¢׳“׳₪׳” ׳©׳׳)
+    priority: int = 30  # נמוך מ־IBKR, גבוה מ־Yahoo (לפי ההעדפה שלך)
 
     def __init__(self, api_key: str) -> None:
         self.api_key = api_key
@@ -870,7 +946,7 @@ def available_providers_summary() -> pd.DataFrame:
     Utility: return a small DataFrame describing which providers are available
     in the current runtime (based on installed deps).
 
-    This ׳™׳›׳•׳ ׳׳”׳™׳•׳× ׳©׳™׳׳•׳©׳™ ׳׳‘׳“׳™׳§׳•׳× / ׳˜׳׳‘ ׳§׳•׳ ׳₪׳™׳’ ׳‘׳“׳©׳‘׳•׳¨׳“.
+    This יכול להיות שימושי לבדיקות / טאב קונפיג בדשבורד.
     """
     rows: list[dict[str, Any]] = []
 
@@ -896,11 +972,21 @@ def available_providers_summary() -> pd.DataFrame:
 
     rows.append(
         {
+            "name": "fmp",
+            "class": "FMPProvider",
+            "available": True,
+            "priority_default": FMPProvider.priority,
+            "notes": "FinancialModelingPrep: prices, fundamentals, macro, ETF holdings",
+        }
+    )
+
+    rows.append(
+        {
             "name": "polygon",
             "class": "PolygonProvider",
             "available": False,
             "priority_default": PolygonProvider.priority,
-            "notes": "Skeleton only ג€” implement when Polygon API is configured",
+            "notes": "Skeleton only — implement when Polygon API is configured",
         }
     )
 
@@ -910,7 +996,7 @@ def available_providers_summary() -> pd.DataFrame:
             "class": "TiingoProvider",
             "available": False,
             "priority_default": TiingoProvider.priority,
-            "notes": "Skeleton only ג€” implement when Tiingo API is configured",
+            "notes": "Skeleton only — implement when Tiingo API is configured",
         }
     )
 

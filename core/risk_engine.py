@@ -1028,6 +1028,14 @@ def evaluate_kill_switch(
         severity += 15.0
         actions.append("Frequent anomalies in returns – freeze new risk, investigate anomalies / data.")
 
+    # intraday loss rule (max_intraday_loss_pct is defined in limits but was not checked)
+    if state.daily_pnl_pct is not None and state.daily_pnl_pct <= -dyn_limits.max_intraday_loss_pct:
+        rules.append(
+            f"intraday_loss {state.daily_pnl_pct*100:.2f}% ≤ -{dyn_limits.max_intraday_loss_pct*100:.2f}%"
+        )
+        severity += 20.0
+        actions.append("Intraday loss limit breached – halt new trades and review open positions.")
+
     # tail risk / liquidity sensitivity
     if state.tail_risk_score is not None and state.tail_risk_score > 0:
         severity += min(15.0, float(state.tail_risk_score))
@@ -1087,6 +1095,73 @@ def evaluate_kill_switch(
         time_to_recheck_sec=recheck,
         scaling_factor=scaling_factor,
     )
+
+# ========= Risk Breach Helper =========
+
+def check_risk_breaches(
+    state: RiskState,
+    limits: RiskLimits,
+) -> List[str]:
+    """
+    Return a list of human-readable breach descriptions.
+    Empty list means all clear – no limits breached.
+
+    This is a lightweight helper that mirrors the checks inside
+    evaluate_kill_switch but returns plain strings instead of a full
+    KillSwitchDecision.  Useful for dashboards & alerts.
+    """
+    breaches: List[str] = []
+
+    # drawdown
+    if state.max_dd_pct is not None and state.max_dd_pct <= -limits.max_drawdown_pct:
+        breaches.append(
+            f"Max drawdown breached: {state.max_dd_pct*100:.2f}% <= -{limits.max_drawdown_pct*100:.2f}%"
+        )
+
+    # daily loss
+    if state.daily_pnl_pct is not None and state.daily_pnl_pct <= -limits.max_daily_loss_pct:
+        breaches.append(
+            f"Daily loss breached: {state.daily_pnl_pct*100:.2f}% <= -{limits.max_daily_loss_pct*100:.2f}%"
+        )
+
+    # intraday loss
+    if state.daily_pnl_pct is not None and state.daily_pnl_pct <= -limits.max_intraday_loss_pct:
+        breaches.append(
+            f"Intraday loss breached: {state.daily_pnl_pct*100:.2f}% <= -{limits.max_intraday_loss_pct*100:.2f}%"
+        )
+
+    # weekly loss
+    if state.weekly_pnl_pct is not None and state.weekly_pnl_pct <= -limits.max_weekly_loss_pct:
+        breaches.append(
+            f"Weekly loss breached: {state.weekly_pnl_pct*100:.2f}% <= -{limits.max_weekly_loss_pct*100:.2f}%"
+        )
+
+    # monthly loss
+    if state.monthly_pnl_pct is not None and state.monthly_pnl_pct <= -limits.max_monthly_loss_pct:
+        breaches.append(
+            f"Monthly loss breached: {state.monthly_pnl_pct*100:.2f}% <= -{limits.max_monthly_loss_pct*100:.2f}%"
+        )
+
+    # gross leverage
+    if state.gross_leverage is not None and state.gross_leverage > limits.max_gross_leverage:
+        breaches.append(
+            f"Gross leverage breached: {state.gross_leverage:.2f}x > {limits.max_gross_leverage:.2f}x"
+        )
+
+    # net leverage
+    if state.net_leverage is not None and state.net_leverage > limits.max_net_leverage:
+        breaches.append(
+            f"Net leverage breached: {state.net_leverage:.2f}x > {limits.max_net_leverage:.2f}x"
+        )
+
+    # VIX
+    if state.vix is not None and state.vix >= limits.vix_kill_threshold:
+        breaches.append(
+            f"VIX kill threshold breached: {state.vix:.2f} >= {limits.vix_kill_threshold:.2f}"
+        )
+
+    return breaches
+
 
 # ========= Scenario / Stress Testing & Advanced Risk Utilities (חלק 4 מורחב) =========
 

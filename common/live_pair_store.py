@@ -1,55 +1,55 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """
-common/live_pair_store.py ג€” Live Pair Profile Store (DuckDB, HF-Grade)
+common/live_pair_store.py — Live Pair Profile Store (DuckDB, HF-Grade)
 ======================================================================
 
-׳©׳›׳‘׳× ׳׳—׳¡׳•׳ ׳׳§׳¦׳•׳¢׳™׳× ׳-LivePairProfile ׳׳¢׳ DuckDB.
+שכבת אחסון מקצועית ל-LivePairProfile מעל DuckDB.
 
-׳×׳₪׳§׳™׳“
+תפקיד
 ------
-׳”׳§׳•׳‘׳¥ ׳”׳–׳” ׳”׳•׳ "׳׳¡׳“ ׳”׳ ׳×׳•׳ ׳™׳" ׳©׳ ׳”ײ¾*Live Universe* ׳©׳׳:
-    - ׳׳—׳–׳™׳§ ׳׳× ׳›׳ ׳”-LivePairProfile (׳§׳•׳‘׳¥ live_profiles.py).
-    - ׳׳©׳׳© ׳›׳’׳©׳¨ ׳‘׳™׳:
-        ג€¢ Research / Optimization / ML  ג†’ ׳›׳×׳™׳‘׳” (bulk_upsert)
-        ג€¢ Live Trading Engine           ג†’ ׳§׳¨׳™׳׳” (load_for_engine / load_active)
-        ג€¢ Dashboard / Tabs              ג†’ ׳§׳¨׳™׳׳” + ׳¢׳“׳›׳•׳ ׳™׳ (suspend/activate/priority)
+הקובץ הזה הוא "מסד הנתונים" של ה־*Live Universe* שלך:
+    - מחזיק את כל ה-LivePairProfile (קובץ live_profiles.py).
+    - משמש כגשר בין:
+        • Research / Optimization / ML  → כתיבה (bulk_upsert)
+        • Live Trading Engine           → קריאה (load_for_engine / load_active)
+        • Dashboard / Tabs              → קריאה + עדכונים (suspend/activate/priority)
 
-׳¢׳§׳¨׳•׳ ׳•׳× ׳×׳›׳ ׳•׳
+עקרונות תכנון
 --------------
-1. **Source of Truth ׳׳—׳“** ׳׳›׳ ׳”׳–׳•׳’׳•׳× ׳”׳—׳™׳™׳:
-   - ׳׳™ ׳׳׳•׳©׳¨ ׳׳׳¡׳—׳¨ (is_active),
-   - ׳׳™ ׳׳•׳©׳”׳” (is_suspended + reason),
-   - ׳׳” ׳”׳₪׳¨׳•׳₪׳™׳ ׳”׳׳׳ (׳–, ׳¡׳˜׳•׳₪׳™׳, sizing, ML, Regime, QA ׳•׳›׳•').
+1. **Source of Truth אחד** לכל הזוגות החיים:
+   - מי מאושר למסחר (is_active),
+   - מי מושהה (is_suspended + reason),
+   - מה הפרופיל המלא (ז, סטופים, sizing, ML, Regime, QA וכו').
 
-2. **׳’׳׳™׳©׳•׳× ׳§׳“׳™׳׳”**:
-   - ׳›׳ ׳”׳₪׳¨׳•׳₪׳™׳ ׳ ׳©׳׳¨ ׳’׳ ׳›-JSON ׳‘-column `profile_json`.
-   - ׳׳₪׳©׳¨ ׳׳”׳•׳¡׳™׳£ ׳©׳“׳•׳× ׳-LivePairProfile ׳‘׳¢׳×׳™׳“ ׳‘׳׳™ ׳׳©׳‘׳•׳¨ ׳׳× DB.
+2. **גמישות קדימה**:
+   - כל הפרופיל נשמר גם כ-JSON ב-column `profile_json`.
+   - אפשר להוסיף שדות ל-LivePairProfile בעתיד בלי לשבור את DB.
 
-3. **׳©׳׳™׳׳×׳•׳× ׳™׳¢׳™׳׳•׳×**:
-   - ׳¢׳׳•׳“׳•׳× ׳™׳¢׳•׳“׳™׳•׳× ׳׳¡׳™׳ ׳•׳/׳׳™׳•׳:
+3. **שאילתות יעילות**:
+   - עמודות יעודיות לסינון/מיון:
      pair_id, sym_x, sym_y,
      is_active, is_suspended, priority_rank,
      score_total, ml_edge_score, ml_confidence, regime_id,
      model_version, last_* timestamps.
 
-4. **API ׳ ׳§׳™ ׳•׳₪׳©׳•׳˜**:
+4. **API נקי ופשוט**:
    - load_all / load_active / load_for_engine
    - get_by_id / find_by_symbols
    - upsert / bulk_upsert
    - activate / deactivate / suspend / unsuspend
-   - summary() ׳׳“׳©׳‘׳•׳¨׳“
+   - summary() לדשבורד
 
-׳©׳™׳׳•׳© ׳˜׳™׳₪׳•׳¡׳™
+שימוש טיפוסי
 -------------
     from common.live_profiles import LivePairProfile
     from common.live_pair_store import LivePairStore
 
     store = LivePairStore("data/live_pairs.duckdb")
 
-    # ׳›׳×׳™׳‘׳” ׳׳׳•׳₪׳˜׳™׳׳™׳–׳¦׳™׳” / ML:
+    # כתיבה מאופטימיזציה / ML:
     store.bulk_upsert(profiles_from_opt)
 
-    # ׳§׳¨׳™׳׳” ׳׳׳ ׳•׳¢ ׳׳¡׳—׳¨ ׳—׳™:
+    # קריאה למנוע מסחר חי:
     profiles_for_engine = store.load_for_engine(
         min_score=0.0,
         min_ml_edge=None,
@@ -57,7 +57,7 @@ common/live_pair_store.py ג€” Live Pair Profile Store (DuckDB, HF-Grade)
         limit=50,
     )
 
-    # ׳§׳¨׳™׳׳” ׳׳“׳©׳‘׳•׳¨׳“:
+    # קריאה לדשבורד:
     all_profiles = store.load_all()
     summary = store.summary()
 """
@@ -79,23 +79,23 @@ logger = logging.getLogger(__name__)
 
 class LivePairStore:
     """
-    ׳׳—׳¡׳ ׳₪׳¨׳•׳₪׳™׳׳™ ׳׳™׳™׳‘ ׳׳¢׳ DuckDB.
+    מחסן פרופילי לייב מעל DuckDB.
 
     Design:
-        - ׳˜׳‘׳׳” ׳׳—׳×: live_pairs_profile
+        - טבלה אחת: live_pairs_profile
         - primary key: pair_id
-        - profile_json: JSON ׳׳׳ ׳©׳ LivePairProfile (׳׳’׳׳™׳©׳•׳× ׳§׳“׳™׳׳”)
-        - ׳¢׳׳•׳“׳•׳× ׳׳₪׳×׳— ׳׳§׳•׳•׳¨׳™:
+        - profile_json: JSON מלא של LivePairProfile (לגמישות קדימה)
+        - עמודות מפתח לקוורי:
             sym_x, sym_y,
             is_active, is_suspended, priority_rank,
             score_total, ml_edge_score, ml_confidence, regime_id,
             model_version, last_optimized_at, last_backtest_at, last_ml_update_at
 
-    ׳”׳¢׳¨׳•׳×:
-        - ׳”׳—׳™׳‘׳•׳¨ ׳ ׳©׳׳¨ ׳₪׳×׳•׳— ׳׳׳•׳¨׳ ׳—׳™׳™ ׳”׳׳•׳‘׳™׳™׳§׳˜ (׳׳×׳”׳׳™׳ ׳׳—׳“).
-        - ׳”׳׳™׳׳•׳© **׳׳** ׳׳™׳•׳¢׳“ ׳‘׳• ׳–׳׳ ׳™׳× ׳׳›׳׳” ׳×׳”׳׳™׳›׳™׳ ׳©׳›׳•׳×׳‘׳™׳ ׳‘׳׳§׳‘׳™׳ (׳–׳” DuckDB),
-          ׳׳‘׳ ׳–׳” ׳׳’׳׳¨׳™ ׳׳¡׳₪׳™׳§ ׳׳׳—׳§׳¨ + ׳׳ ׳•׳¢ ׳—׳™ ׳‘׳×׳”׳׳™׳ ׳׳—׳“, ׳׳• Live Engine + Dashboard
-          ׳‘׳×׳¦׳•׳¨׳” ׳©׳׳•׳’׳“׳¨׳× ׳”׳™׳˜׳‘.
+    הערות:
+        - החיבור נשמר פתוח לאורך חיי האובייקט (לתהליך אחד).
+        - המימוש **לא** מיועד בו זמנית לכמה תהליכים שכותבים במקביל (זה DuckDB),
+          אבל זה לגמרי מספיק למחקר + מנוע חי בתהליך אחד, או Live Engine + Dashboard
+          בתצורה שמוגדרת היטב.
     """
 
     def __init__(
@@ -106,7 +106,7 @@ class LivePairStore:
         self.db_path = Path(db_path)
         self.table_name = table_name
 
-        # ׳ ׳•׳•׳“׳ ׳©׳”׳×׳™׳§׳™׳™׳” ׳§׳™׳™׳׳× (׳׳׳©׳ data/)
+        # נוודא שהתיקייה קיימת (למשל data/)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
 
         logger.debug("Opening DuckDB connection at %s", self.db_path)
@@ -124,7 +124,7 @@ class LivePairStore:
         self.close()
 
     def close(self) -> None:
-        """׳¡׳’׳™׳¨׳× ׳—׳™׳‘׳•׳¨ ׳”-DuckDB (׳׳ ׳—׳™)."""
+        """סגירת חיבור ה-DuckDB (אם חי)."""
         if getattr(self, "_conn", None) is not None:
             try:
                 self._conn.close()
@@ -134,14 +134,14 @@ class LivePairStore:
                 self._conn = None  # type: ignore[assignment]
 
     # ======================================================================
-    # ׳¡׳›׳™׳׳” ׳•׳׳™׳ ׳“׳§׳¡׳™׳
+    # סכימה ואינדקסים
     # ======================================================================
     def _ensure_schema(self) -> None:
         """
-        ׳׳•׳•׳“׳ ׳©׳”׳˜׳‘׳׳” ׳§׳™׳™׳׳× ׳¢׳ ׳¡׳›׳™׳׳” ׳׳™׳ ׳™׳׳׳™׳×.
+        מוודא שהטבלה קיימת עם סכימה מינימלית.
 
-        ׳›׳ ׳”׳×׳•׳›׳ ׳”׳׳׳ ׳©׳ LivePairProfile ׳ ׳©׳׳¨ ׳’׳ ׳‘-profile_json (JSON).
-        ׳¢׳׳•׳“׳•׳× ׳ ׳₪׳¨׳“׳•׳× ׳׳©׳׳©׳•׳× ׳׳©׳׳™׳׳×׳•׳× ׳™׳¢׳™׳׳•׳×.
+        כל התוכן המלא של LivePairProfile נשמר גם ב-profile_json (JSON).
+        עמודות נפרדות משמשות לשאילתות יעילות.
         """
         t = self.table_name
 
@@ -153,30 +153,30 @@ class LivePairStore:
                 sym_x TEXT NOT NULL,
                 sym_y TEXT NOT NULL,
 
-                -- ׳–׳”׳•׳× ׳‘׳¡׳™׳¡׳™׳×
+                -- זהות בסיסית
                 asset_class   TEXT,
                 base_currency TEXT,
                 timeframe     TEXT,
                 cluster_id    TEXT,
 
-                -- ׳¡׳˜׳˜׳•׳¡
+                -- סטטוס
                 is_active    BOOLEAN,
                 is_suspended BOOLEAN,
                 priority_rank BIGINT,
 
-                -- ׳¦׳™׳•׳ ׳™׳ ׳•-ML
+                -- ציונים ו-ML
                 score_total      DOUBLE,
                 ml_edge_score    DOUBLE,
                 ml_confidence    DOUBLE,
                 regime_id        TEXT,
                 model_version    TEXT,
 
-                -- ׳–׳׳ ׳™ ׳¢׳“׳›׳•׳
+                -- זמני עדכון
                 last_optimized_at TIMESTAMP,
                 last_backtest_at  TIMESTAMP,
                 last_ml_update_at TIMESTAMP,
 
-                -- ׳”׳₪׳¨׳•׳₪׳™׳ ׳”׳׳׳ ׳›-JSON
+                -- הפרופיל המלא כ-JSON
                 profile_json TEXT NOT NULL
             );
             """
@@ -184,8 +184,8 @@ class LivePairStore:
 
     def _ensure_indexes(self) -> None:
         """
-        ׳׳•׳•׳“׳ ׳׳™׳ ׳“׳§׳¡׳™׳ ׳‘׳¡׳™׳¡׳™׳™׳ ׳׳©׳׳™׳׳×׳•׳× ׳ ׳₪׳•׳¦׳•׳×.
-        DuckDB ׳׳ ׳×׳׳™׳“ ׳“׳•׳¨׳© ׳׳™׳ ׳“׳§׳¡׳™׳, ׳׳‘׳ ׳–׳” ׳¢׳•׳–׳¨ ׳-ORDER BY / WHERE.
+        מוודא אינדקסים בסיסיים לשאילתות נפוצות.
+        DuckDB לא תמיד דורש אינדקסים, אבל זה עוזר ל-ORDER BY / WHERE.
         """
         t = self.table_name
         try:
@@ -193,20 +193,20 @@ class LivePairStore:
             self._conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{t}_score ON {t}(score_total);")
             self._conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{t}_ml_edge ON {t}(ml_edge_score);")
             self._conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{t}_regime ON {t}(regime_id);")
-        except Exception as e:  # pragma: no cover - ׳§׳©׳•׳¨ ׳׳’׳¨׳¡׳׳•׳× DuckDB
+        except Exception as e:  # pragma: no cover - קשור לגרסאות DuckDB
             logger.debug("Index creation failed or not supported: %s", e)
 
     # ======================================================================
-    # Helper: ׳”׳׳¨׳” Profile <-> Row
+    # Helper: המרה Profile <-> Row
     # ======================================================================
     @staticmethod
     def _profile_to_row(profile: LivePairProfile) -> dict:
         """
-        ׳׳׳™׳¨ LivePairProfile ׳-row dict ׳¢׳‘׳•׳¨ DB.
+        ממיר LivePairProfile ל-row dict עבור DB.
 
-        ׳©׳•׳׳¨:
-            - ׳¢׳׳•׳“׳•׳× ׳׳₪׳×׳— ׳-query.
-            - JSON ׳׳׳ ׳‘׳˜׳•׳¨ profile_json (׳›׳•׳׳ ׳×׳׳¨׳™׳›׳™׳ ׳‘׳₪׳•׳¨׳׳˜ ISO).
+        שומר:
+            - עמודות מפתח ל-query.
+            - JSON מלא בטור profile_json (כולל תאריכים בפורמט ISO).
         """
         data = profile.model_dump(mode="python")
 
@@ -239,22 +239,22 @@ class LivePairStore:
     @staticmethod
     def _row_to_profile(row) -> LivePairProfile:
         """
-        ׳׳׳™׳¨ Row ׳׳”-DB ׳-LivePairProfile ׳¢"׳™ ׳˜׳¢׳™׳ ׳× ׳”-JSON.
+        ממיר Row מה-DB ל-LivePairProfile ע"י טעינת ה-JSON.
         """
         profile_json = row["profile_json"]
         data = json.loads(profile_json)
-        # Pydantic ׳™׳˜׳₪׳ ׳‘׳”׳׳¨׳•׳× datetime ׳•׳›׳•'
+        # Pydantic יטפל בהמרות datetime וכו'
         return LivePairProfile.model_validate(data)
 
     # ======================================================================
-    # CRUD ׳‘׳¡׳™׳¡׳™
+    # CRUD בסיסי
     # ======================================================================
     def upsert(self, profile: LivePairProfile) -> None:
         """
-        ׳”׳›׳ ׳¡׳×/׳¢׳“׳›׳•׳ ׳₪׳¨׳•׳₪׳™׳ ׳‘׳•׳“׳“.
+        הכנסת/עדכון פרופיל בודד.
 
         Implemenation:
-            DELETE + INSERT ׳‘׳×׳•׳ ׳׳•׳×׳” ׳˜׳¨׳ ׳–׳§׳¦׳™׳” (׳₪׳©׳•׳˜ ׳•׳™׳¦׳™׳‘ ׳‘-DuckDB).
+            DELETE + INSERT בתוך אותה טרנזקציה (פשוט ויציב ב-DuckDB).
         """
         t = self.table_name
         row = self._profile_to_row(profile)
@@ -308,12 +308,12 @@ class LivePairStore:
 
     def bulk_upsert(self, profiles: Iterable[LivePairProfile]) -> None:
         """
-        ׳”׳›׳ ׳¡׳×/׳¢׳“׳›׳•׳ ׳©׳ ׳׳•׳¡׳£ ׳₪׳¨׳•׳₪׳™׳׳™׳.
+        הכנסת/עדכון של אוסף פרופילים.
 
-        ׳׳™׳•׳¢׳“ ׳׳©׳™׳׳•׳© ׳׳”-Optimization/ML:
-            - ׳׳¨׳™׳¦׳™׳ Optuna/ML ג†’ ׳‘׳•׳ ׳™׳ ׳¨׳©׳™׳׳× LivePairProfile ג†’ bulk_upsert.
+        מיועד לשימוש מה-Optimization/ML:
+            - מריצים Optuna/ML → בונים רשימת LivePairProfile → bulk_upsert.
 
-        ׳׳ ׳׳•׳—׳§ ׳–׳•׳’׳•׳× ׳©׳׳ ׳”׳•׳₪׳™׳¢׳• ׳₪׳” ג€“ ׳–׳” ׳ ׳©׳׳˜ ׳¢"׳™ deactivate_missing().
+        לא מוחק זוגות שלא הופיעו פה – זה נשלט ע"י deactivate_missing().
         """
         profiles = list(profiles)
         if not profiles:
@@ -372,19 +372,19 @@ class LivePairStore:
 
     def deactivate_missing(self, existing_pair_ids: Sequence[str]) -> int:
         """
-        ׳׳¡׳׳ ׳›׳׳-׳₪׳¢׳™׳׳™׳ ׳–׳•׳’׳•׳× ׳©׳׳ ׳”׳•׳₪׳™׳¢׳• ׳‘׳¨׳©׳™׳׳× pair_id ׳©׳ ׳™׳×׳ ׳”.
+        מסמן כלא-פעילים זוגות שלא הופיעו ברשימת pair_id שניתנה.
 
-        ׳©׳™׳׳•׳©׳™ ׳׳—׳¨׳™ bulk_upsert:
-            - universe ׳—׳“׳© ׳”׳’׳™׳¢ ׳׳׳•׳₪׳˜׳™׳׳™׳–׳¦׳™׳”,
-            - ׳׳” ׳©׳׳ ׳‘׳₪׳ ׳™׳ ג†’ is_active=False.
+        שימושי אחרי bulk_upsert:
+            - universe חדש הגיע מאופטימיזציה,
+            - מה שלא בפנים → is_active=False.
 
-        ׳׳—׳–׳™׳¨: ׳׳¡׳₪׳¨ ׳”׳©׳•׳¨׳•׳× ׳©׳¢׳•׳“׳›׳ ׳•.
+        מחזיר: מספר השורות שעודכנו.
         """
         t = self.table_name
         if not existing_pair_ids:
             return 0
 
-        # DuckDB ׳׳ ׳×׳•׳׳ ׳‘׳§׳׳•׳× ׳‘-NOT IN ׳¢׳ ׳¨׳©׳™׳׳” ׳’׳“׳•׳׳” ׳׳׳•׳“, ׳׳‘׳ ׳›׳׳ ׳–׳” ׳¡׳‘׳™׳¨.
+        # DuckDB לא תומך בקלות ב-NOT IN עם רשימה גדולה מאוד, אבל כאן זה סביר.
         placeholders = ", ".join(["?"] * len(existing_pair_ids))
         query = f"""
             UPDATE {t}
@@ -399,7 +399,7 @@ class LivePairStore:
     # GET / FIND / LOAD
     # ======================================================================
     def get_by_id(self, pair_id: str) -> Optional[LivePairProfile]:
-        """׳׳‘׳™׳ ׳₪׳¨׳•׳₪׳™׳ ׳׳–׳•׳’ ׳׳₪׳™ pair_id (׳׳• None ׳׳ ׳׳ ׳§׳™׳™׳)."""
+        """מביא פרופיל לזוג לפי pair_id (או None אם לא קיים)."""
         t = self.table_name
         res = self._conn.execute(
             f"SELECT * FROM {t} WHERE pair_id = ?;",
@@ -411,7 +411,7 @@ class LivePairStore:
 
     def find_by_symbols(self, sym_x: str, sym_y: str) -> List[LivePairProfile]:
         """
-        ׳׳—׳–׳™׳¨ ׳›׳ ׳”׳₪׳¨׳•׳₪׳™׳׳™׳ ׳©׳׳×׳׳™׳׳™׳ ׳-sym_x/sym_y (׳×׳™׳׳•׳¨׳˜׳™׳× ׳™׳›׳•׳׳•׳× ׳׳”׳™׳•׳× ׳›׳׳” ׳’׳¨׳¡׳׳•׳×).
+        מחזיר כל הפרופילים שמתאימים ל-sym_x/sym_y (תיאורטית יכולות להיות כמה גרסאות).
         """
         t = self.table_name
         res = self._conn.execute(
@@ -422,10 +422,10 @@ class LivePairStore:
 
     def load_all(self, order_by: str = "pair_id") -> List[LivePairProfile]:
         """
-        ׳˜׳¢׳™׳ ׳× ׳›׳ ׳”׳₪׳¨׳•׳₪׳™׳׳™׳ (׳׳©׳™׳׳•׳© Dashboard/׳ ׳™׳”׳•׳).
+        טעינת כל הפרופילים (לשימוש Dashboard/ניהול).
 
         order_by:
-            'pair_id', 'score_total', 'priority_rank', 'ml_edge_score' ׳•׳›׳•'.
+            'pair_id', 'score_total', 'priority_rank', 'ml_edge_score' וכו'.
         """
         t = self.table_name
         allowed = {
@@ -453,13 +453,13 @@ class LivePairStore:
         limit: Optional[int] = None,
     ) -> List[LivePairProfile]:
         """
-        ׳˜׳¢׳™׳ ׳× ׳₪׳¨׳•׳₪׳™׳׳™׳ ׳₪׳¢׳™׳׳™׳ (׳׳׳©׳ ׳-Dashboard ׳׳• ׳׳ ׳™׳×׳•׳—).
+        טעינת פרופילים פעילים (למשל ל-Dashboard או לניתוח).
 
-        ׳₪׳™׳׳˜׳¨׳™׳:
+        פילטרים:
             - is_active = TRUE
-            - ׳׳ only_not_suspended: is_suspended = FALSE
-            - min_score: ׳’׳™׳׳•׳— ׳׳₪׳™ score_total
-            - min_ml_edge: ׳’׳™׳׳•׳— ׳׳₪׳™ ml_edge_score
+            - אם only_not_suspended: is_suspended = FALSE
+            - min_score: גילוח לפי score_total
+            - min_ml_edge: גילוח לפי ml_edge_score
         """
         t = self.table_name
         conditions = ["is_active = TRUE"]
@@ -500,14 +500,14 @@ class LivePairStore:
         limit: Optional[int] = None,
     ) -> List[LivePairProfile]:
         """
-        ׳˜׳¢׳™׳ ׳× universe ׳©׳”׳׳ ׳•׳¢ ׳”׳—׳™ ׳׳׳•׳¨ ׳׳¢׳‘׳•׳“ ׳¢׳׳™׳•.
+        טעינת universe שהמנוע החי אמור לעבוד עליו.
 
-        ׳׳•׳’׳™׳§׳”:
+        לוגיקה:
             - is_active = TRUE
             - is_suspended = FALSE
-            - score_total >= min_score (׳׳ ׳§׳™׳™׳)
-            - ml_edge_score >= min_ml_edge (׳׳ ׳§׳™׳™׳)
-            - priority_rank <= max_priority_rank (׳׳ ׳§׳™׳™׳)
+            - score_total >= min_score (אם קיים)
+            - ml_edge_score >= min_ml_edge (אם קיים)
+            - priority_rank <= max_priority_rank (אם קיים)
         """
         t = self.table_name
         conditions = [
@@ -552,10 +552,10 @@ class LivePairStore:
         return [self._row_to_profile(r) for r in res]
 
     # ======================================================================
-    # ׳₪׳¢׳•׳׳•׳× ׳¡׳˜׳˜׳•׳¡ / ׳©׳׳™׳˜׳” (׳׳©׳™׳׳•׳© Dashboard / Ops)
+    # פעולות סטטוס / שליטה (לשימוש Dashboard / Ops)
     # ======================================================================
     def set_active(self, pair_id: str, is_active: bool) -> None:
-        """׳¢׳“׳›׳•׳ is_active ׳׳–׳•׳’ ׳׳¡׳•׳™׳."""
+        """עדכון is_active לזוג מסוים."""
         t = self.table_name
         logger.info("Set is_active=%s for pair_id=%s", is_active, pair_id)
         self._conn.execute(
@@ -564,10 +564,10 @@ class LivePairStore:
         )
 
     def suspend(self, pair_id: str, reason: Optional[str] = None) -> None:
-        """׳׳¡׳׳ ׳–׳•׳’ ׳›׳׳•׳©׳¢׳” (is_suspended=True) ׳¢׳ ׳¡׳™׳‘׳× ׳”׳§׳₪׳׳”."""
+        """מסמן זוג כמושעה (is_suspended=True) עם סיבת הקפאה."""
         t = self.table_name
         logger.info("Suspending pair_id=%s reason=%s", pair_id, reason)
-        # ׳ ׳¢׳“׳›׳ ׳’׳ ׳‘׳×׳•׳ JSON ׳›׳“׳™ ׳׳©׳׳•׳¨ ׳¢׳§׳‘׳™׳•׳×
+        # נעדכן גם בתוך JSON כדי לשמור עקביות
         profile = self.get_by_id(pair_id)
         if profile is not None:
             profile.is_suspended = True
@@ -580,7 +580,7 @@ class LivePairStore:
             )
 
     def unsuspend(self, pair_id: str) -> None:
-        """׳׳¡׳™׳¨ ׳”׳§׳₪׳׳” (is_suspended=False, suspend_reason=None)."""
+        """מסיר הקפאה (is_suspended=False, suspend_reason=None)."""
         t = self.table_name
         logger.info("Unsuspending pair_id=%s", pair_id)
         profile = self.get_by_id(pair_id)
@@ -595,12 +595,12 @@ class LivePairStore:
             )
 
     def update_priority(self, pair_id: str, priority_rank: Optional[int]) -> None:
-        """׳¢׳“׳›׳•׳ priority_rank (׳׳׳©׳ ׳׳×׳•׳ Dashboard)."""
+        """עדכון priority_rank (למשל מתוך Dashboard)."""
         t = self.table_name
         logger.info("Updating priority_rank=%s for pair_id=%s", priority_rank, pair_id)
         profile = self.get_by_id(pair_id)
         if profile is not None:
-            # LivePairProfile ׳׳ ׳׳—׳™׳™׳‘ field priority_rank, ׳׳‘׳ ׳”׳•׳ ׳§׳™׳™׳ ׳‘׳“׳׳˜׳”
+            # LivePairProfile לא מחייב field priority_rank, אבל הוא קיים בדאטה
             data = profile.model_dump(mode="python")
             data["priority_rank"] = priority_rank
             updated = LivePairProfile.model_validate(data)
@@ -612,14 +612,14 @@ class LivePairStore:
             )
 
     # ======================================================================
-    # Summary / Analytics (׳׳©׳™׳׳•׳© Dashboard)
+    # Summary / Analytics (לשימוש Dashboard)
     # ======================================================================
     def summary(self) -> dict:
         """
-        ׳׳—׳–׳™׳¨ ׳¡׳™׳›׳•׳ ׳׳”׳™׳¨ ׳-Dashboard:
-            - ׳›׳׳” ׳–׳•׳’׳•׳× ׳™׳©.
-            - ׳›׳׳” ׳₪׳¢׳™׳׳™׳ / ׳׳•׳©׳”׳™׳.
-            - ׳¡׳˜׳˜׳™׳¡׳˜׳™׳§׳•׳× ׳‘׳¡׳™׳¡׳™׳•׳× ׳¢׳ score_total / ml_edge_score.
+        מחזיר סיכום מהיר ל-Dashboard:
+            - כמה זוגות יש.
+            - כמה פעילים / מושהים.
+            - סטטיסטיקות בסיסיות על score_total / ml_edge_score.
         """
         t = self.table_name
         res = self._conn.execute(

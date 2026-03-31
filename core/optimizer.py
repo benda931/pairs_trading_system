@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 # core/optimizer.py
 """Pairs Trading Optimizer (HF-grade, v2)
 ========================================
@@ -98,17 +98,18 @@ else:  # at runtime, when optuna might be missing – fall back to Any
 
 # Backtester / HF objective from optimization_backtester
 try:
+    # ריצה אמיתית: חייבים את Backtester + compute_hf_objective
     from core.optimization_backtester import (
         Backtester,
-        BacktestResult,
-        HFObjectiveConfig,
         compute_hf_objective,
     )
 except Exception:  # pragma: no cover - optional
     Backtester = None  # type: ignore
-    BacktestResult = Any  # type: ignore[assignment]
-    HFObjectiveConfig = None  # type: ignore[assignment]
-    compute_hf_objective = None  # type: ignore[assignment]
+    compute_hf_objective = None  # type: ignore
+
+# טיפוסים – רק בזמן ניתוח סטטי / type checking
+if TYPE_CHECKING:
+    from core.optimization_backtester import BacktestResult, HFObjectiveConfig
 
 # Optional metrics module (used if available for classic score)
 try:  # type: ignore[import]
@@ -218,9 +219,12 @@ def _coerce_ranges(ranges_cfg: Mapping[str, Any]) -> ParamRanges:
 # ---------------------------------------------------------------------------
 
 
-def _build_hf_cfg_from_config(config: Mapping[str, Any]) -> Optional[HFObjectiveConfig]:
+def _build_hf_cfg_from_config(config: Mapping[str, Any]) -> Optional["HFObjectiveConfig"]:
     """Build HFObjectiveConfig from config['score']['hf_objective'] if available."""
-    if HFObjectiveConfig is None:
+    # בזמן ריצה HFObjectiveConfig מיובא רק אם המודול קיים
+    try:
+        from core.optimization_backtester import HFObjectiveConfig as _HFC  # type: ignore
+    except Exception:
         return None
 
     score_cfg = config.get("score", {}) or {}
@@ -228,7 +232,7 @@ def _build_hf_cfg_from_config(config: Mapping[str, Any]) -> Optional[HFObjective
     if not isinstance(hf_cfg_dict, Mapping):
         hf_cfg_dict = {}
 
-    base = HFObjectiveConfig()
+    base = _HFC()
     for k, v in hf_cfg_dict.items():
         if hasattr(base, k):
             try:
@@ -308,9 +312,10 @@ def _score_classic_from_metrics(metrics: Mapping[str, float], config: Mapping[st
 def _combined_score(
     metrics: Mapping[str, float],
     config: Mapping[str, Any],
-    hf_result: Optional[BacktestResult],
-    hf_cfg: Optional[HFObjectiveConfig],
+    hf_result: Optional["BacktestResult"],
+    hf_cfg: Optional["HFObjectiveConfig"],
 ) -> Tuple[float, Dict[str, Any]]:
+
     """Compute (final_score, extras) using classic + HF + hybrid modes.
 
     extras contains diagnostic components (classic_score, hf_score, mode, alpha, etc.)
@@ -320,10 +325,12 @@ def _combined_score(
     classic_score = _score_classic_from_metrics(metrics, config)
 
     hf_score: Optional[float] = None
-    if hf_result is not None and HFObjectiveConfig is not None and compute_hf_objective is not None:
+    if hf_result is not None and compute_hf_objective is not None:
         try:
-            cfg = hf_cfg or HFObjectiveConfig()
-            hf_score = float(compute_hf_objective(hf_result, cfg))
+            # אם קיבלנו קונפיג מוכן – נשתמש בו, אחרת נבנה מ-config
+            cfg = hf_cfg or _build_hf_cfg_from_config(config)
+            if cfg is not None:
+                hf_score = float(compute_hf_objective(hf_result, cfg))  # type: ignore[arg-type]
         except Exception as exc:  # pragma: no cover - defensive
             logger.debug("HF objective failed, falling back to classic: %s", exc)
             hf_score = None
@@ -356,8 +363,22 @@ def _build_optuna_objects(
     config: Mapping[str, Any],
     n_trials: int,
     study_name: str,
+    storage: Optional[str] = None,
 ) -> Tuple[Study, Dict[str, Any]]:
     """Build Optuna Study + runtime options from config.
+
+    Parameters
+    ----------
+    config : Mapping
+        Full optimizer config dict.
+    n_trials : int
+        Number of trials (informational, not used directly here).
+    study_name : str
+        Name for the Optuna study.
+    storage : str, optional
+        Optuna storage URL (e.g. ``"sqlite:///logs/optuna_studies.db"``).
+        Defaults to ``config['optuna']['storage']`` or
+        ``"sqlite:///logs/optuna_studies.db"``.
 
     Returns
     -------
@@ -380,6 +401,10 @@ def _build_optuna_objects(
     timeout_sec = opt_cfg.get("timeout_sec")
     multi_objective = bool(opt_cfg.get("multi_objective", False))
 
+    # Storage: explicit arg > config > file-based SQLite default
+    if storage is None:
+        storage = opt_cfg.get("storage", "sqlite:///logs/optuna_studies.db")
+
     # Sampler
     if sampler_name == "CMAES" and hasattr(optuna.samplers, "CmaEsSampler"):
         sampler = optuna.samplers.CmaEsSampler(seed=seed)
@@ -399,6 +424,8 @@ def _build_optuna_objects(
             directions=list(directions),
             sampler=sampler,
             pruner=pruner,
+            storage=storage,
+            load_if_exists=True,
         )
     else:
         study = optuna.create_study(
@@ -406,6 +433,8 @@ def _build_optuna_objects(
             direction=direction,
             sampler=sampler,
             pruner=pruner,
+            storage=storage,
+            load_if_exists=True,
         )
 
     return study, {"timeout_sec": timeout_sec, "seed": seed, "multi_objective": multi_objective}
@@ -421,6 +450,8 @@ def run_optimization(
     config: Mapping[str, Any],
     n_trials: int = 50,
     study_name: str = "pair_opt_study",
+    storage: Optional[str] = None,
+    n_jobs: int = 1,
 ) -> pd.DataFrame:
     """Run Optuna-based hyperparameter search over a pairs-trading config.
 
@@ -438,6 +469,15 @@ def run_optimization(
         is provided).
     study_name:
         Name for the Optuna study.
+    storage:
+        Optuna storage URL for study persistence (e.g.
+        ``"sqlite:///logs/optuna_studies.db"``).  Falls back to
+        ``config['optuna']['storage']`` or a local SQLite file.
+        Pass ``None`` (default) to use the file-based default.
+    n_jobs:
+        Number of parallel workers for ``study.optimize()``.  Defaults to 1
+        (sequential).  Set to -1 to use all available CPU cores.
+        Can also be supplied via ``config['optuna']['n_jobs']``.
 
     Returns
     -------
@@ -448,6 +488,9 @@ def run_optimization(
     # Resolve trial count from config (config wins over argument)
     opt_cfg = config.get("optuna", {}) or {}
     n_trials = int(opt_cfg.get("n_trials", n_trials))
+
+    # Resolve n_jobs from config (config wins over argument)
+    n_jobs = int(opt_cfg.get("n_jobs", n_jobs))
 
     # Load price & hedge once
     price, hedge = _load_price_series(config)
@@ -461,10 +504,10 @@ def run_optimization(
     if Backtester is None:
         raise RuntimeError("Backtester is not available. Ensure core.optimization_backtester is importable.")
 
-    logger.info("run_optimization: n_trials=%s, n_params=%s", n_trials, len(ranges))
+    logger.info("run_optimization: n_trials=%s, n_params=%s, n_jobs=%s", n_trials, len(ranges), n_jobs)
 
-    # Build Optuna objects
-    study, rt_opts = _build_optuna_objects(config, n_trials=n_trials, study_name=study_name)
+    # Build Optuna objects (with persistence storage)
+    study, rt_opts = _build_optuna_objects(config, n_trials=n_trials, study_name=study_name, storage=storage)
     timeout_sec = rt_opts.get("timeout_sec")
     multi_objective = bool(rt_opts.get("multi_objective", False))
 
@@ -664,8 +707,8 @@ def run_optimization(
                 return -1e9, -1e9, 1e6
             return float("nan")
 
-    # Run optimization
-    study.optimize(objective, n_trials=n_trials, timeout=timeout_sec, show_progress_bar=False)
+    # Run optimization (n_jobs>1 enables parallel trial execution)
+    study.optimize(objective, n_trials=n_trials, timeout=timeout_sec, show_progress_bar=False, n_jobs=n_jobs)
 
     # Build DataFrame from collected results
     df = pd.DataFrame(results)

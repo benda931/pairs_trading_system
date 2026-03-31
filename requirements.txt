@@ -1,8 +1,40 @@
-optuna==3.*
-ib_insync
-vectorbt
-yfinance
+# Core
 pandas>=2
 numpy
-numba
+scipy
+statsmodels
+
+# Optimization
+optuna>=3
+
+# Database
+sqlalchemy>=2
+duckdb
+
+# Data sources
+yfinance
+ib_insync
+
+# ML / Analytics
+scikit-learn
+xgboost
+shap
+
+# Visualization
+plotly
+matplotlib
+
+# Web UI
+streamlit>=1.30
+dash>=2
+
+# Utilities
+pydantic>=2
+pydantic-settings
 PyYAML
+python-dotenv
+requests
+numba
+
+# Dev / Testing
+pytest

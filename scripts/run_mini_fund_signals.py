@@ -48,11 +48,6 @@ try:
 except Exception:
     params_score_params_dict = None  # type: ignore
 
-# ---- מקור מחירים זמני (yfinance) ----
-try:
-    import yfinance as yf  # type: ignore
-except Exception:
-    yf = None  # type: ignore
 
 
 # ========= קונפיג ברירת מחדל =========
@@ -101,26 +96,47 @@ def load_snapshot_and_params() -> Tuple[pd.DataFrame, Dict[str, Dict[str, Any]]]
     return df_snap, params_dict
 
 
-# ========= 2. פונקציות מחירים (זמנית: yfinance) =========
+# ========= 2. פונקציות מחירים (FMP via DataService) =========
 
 def get_price_series(symbol: str, lookback_days: int = 120) -> pd.Series:
     """
-    מחזיר סדרת מחירי Adj Close ל-symbol מסוים מתוך yfinance.
-    בגרסה סופית מומלץ להחליף למקור דאטה פנימי (SqlStore/IBKR).
+    Return adjusted close price series for a symbol via FMP (canonical provider).
+    Falls back to yfinance if FMP returns empty and yfinance is installed.
     """
-    if yf is None:
-        raise RuntimeError(
-            "yfinance is not installed; cannot fetch prices. "
-            "Install with: pip install yfinance"
-        )
+    import sys
+    from pathlib import Path as _Path
+    _root = _Path(__file__).resolve().parent.parent
+    if str(_root) not in sys.path:
+        sys.path.insert(0, str(_root))
 
     end = dt.date.today()
-    start = end - dt.timedelta(days=lookback_days * 2)  # *2 לכיסוי סופי שבוע
-    data = yf.download(symbol, start=start, end=end)
-    if data.empty or "Adj Close" not in data.columns:
-        raise RuntimeError(f"No price data for symbol {symbol}")
-    s = data["Adj Close"].dropna()
-    return s
+    start = end - dt.timedelta(days=lookback_days * 2)
+
+    # Primary: FMP
+    try:
+        from common.fmp_client import get_fmp_client
+        client = get_fmp_client()
+        df = client.get_historical_prices(symbol, start=str(start), end=str(end))
+        if not df.empty and "close" in df.columns:
+            dt_col = "datetime" if "datetime" in df.columns else "date"
+            s = df.set_index(dt_col)["close"].dropna()
+            s.index = pd.to_datetime(s.index)
+            return s.sort_index()
+    except Exception as exc:
+        pass
+
+    # Fallback: yfinance
+    try:
+        import yfinance as yf  # noqa: PLC0415
+        data = yf.download(symbol, start=start, end=end, progress=False)
+        if not data.empty:
+            close_col = "Adj Close" if "Adj Close" in data.columns else "Close"
+            s = data[close_col].dropna()
+            return s
+    except ImportError:
+        pass
+
+    raise RuntimeError(f"No price data available for {symbol}")
 
 
 def get_last_lookback_window(symbol: str, lookback_days: int) -> pd.Series:

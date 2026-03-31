@@ -64,6 +64,14 @@ import json
 import logging
 import os
 
+# IMPORTANT: duckdb_engine must be loaded before pandas to avoid segfault
+# on Python 3.13 + DuckDB 1.3.x (the dialect's has_comment_support() crashes
+# if pandas has already loaded its own duckdb bindings).
+try:
+    import duckdb_engine  # noqa: F401
+except ImportError:
+    pass
+
 import pandas as pd
 from sqlalchemy import create_engine, text, inspect
 from sqlalchemy.engine import Engine
@@ -194,11 +202,56 @@ class SqlStore:
             except Exception as e:
                 logger.warning("Failed to ensure prices schema: %s", e)
 
+            try:
+                self._ensure_backtest_schema()
+            except Exception as e:
+                logger.warning("Failed to ensure backtest metrics schema: %s", e)
+
+            try:
+                self._ensure_data_freshness_schema()
+            except Exception as e:
+                logger.warning("Failed to ensure data_freshness schema: %s", e)
+
+            try:
+                self._ensure_system_events_schema()
+            except Exception as e:
+                logger.warning("Failed to ensure system_events schema: %s", e)
+
             # אינדקסים בסיסיים לטבלאות כבדות (HF-grade)
             try:
                 existing_tables = set(self.list_tables())
             except Exception:
                 existing_tables = set()
+
+            bt_tbl = self._tbl("bt_runs")
+            if bt_tbl in existing_tables:
+                ts_col = self._resolve_ts_column(bt_tbl)
+                if ts_col:
+                    try:
+                        self._ensure_index(
+                            bt_tbl,
+                            f"{bt_tbl}_env_pair_ts_idx",
+                            ["env", "pair", ts_col],
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            "Failed to ensure index on bt_runs(env,pair,%s): %s",
+                            ts_col,
+                            e,
+                        )
+
+                    try:
+                        self._ensure_index(
+                            bt_tbl,
+                            f"{bt_tbl}_env_ts_idx",
+                            ["env", ts_col],
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            "Failed to ensure index on bt_runs(env,%s): %s",
+                            ts_col,
+                            e,
+                        )
 
             prices_tbl = self._tbl("prices")
             if prices_tbl in existing_tables:
@@ -876,6 +929,20 @@ class SqlStore:
             logger.warning("SqlStore.list_tables() failed: %s", exc)
             return []
 
+    def _ensure_writable(self, op: str | None = None, *_a, **_k) -> bool:
+        """
+        Write gate for SqlStore.
+        Returns True if writable, False if read_only.
+        Tolerant to callers passing (op) or extra args.
+        """
+        if bool(getattr(self, "read_only", False)):
+            msg = f"{op or 'write'} blocked: SqlStore.read_only=True"
+            self._last_error = msg
+            logger.info(msg)
+            return False
+        return True
+
+
     def get_engine_info(self) -> JSONDict:
         """
         מחזיר מידע בסיסי על ה-Engine לצרכי Health / Agents / Debug.
@@ -902,6 +969,8 @@ class SqlStore:
             "has_dq_pairs": self._tbl("dq_pairs") in tables,
             "has_kv_store": self._tbl("kv_store") in tables,
             "has_dashboard_snapshots": self._tbl("dashboard_snapshots") in tables,
+            "has_bt_runs": self._tbl("bt_runs") in tables,
+            "has_pair_backtest_metrics": self._tbl("pair_backtest_metrics") in tables,
         }
 
     def _ensure_index(
@@ -931,6 +1000,32 @@ class SqlStore:
                 exc,
                 exc_info=True,
             )
+
+    def _table_columns(self, table_name: str) -> set[str]:
+        """
+        Return a set of column names for a given table (best-effort).
+        """
+        from sqlalchemy import inspect
+
+        try:
+            insp = inspect(self.engine)
+            cols = insp.get_columns(table_name)
+            return {c.get("name") for c in cols if c.get("name")}
+        except Exception:
+            return set()
+
+    def _resolve_ts_column(self, table_name: str) -> Optional[str]:
+        """
+        Resolve best timestamp column available in a table.
+
+        Priority:
+            created_ts_utc -> ts_utc -> as_of_utc -> ts
+        """
+        cols = self._table_columns(table_name)
+        for cand in ("created_ts_utc", "ts_utc", "as_of_utc", "ts"):
+            if cand in cols:
+                return cand
+        return None
 
 
     # ------------------------------------------------------------------
@@ -986,6 +1081,7 @@ class SqlStore:
             self._last_error = str(exc)
             logger.warning("Failed to ensure kv_store schema: %s", exc, exc_info=True)
 
+
     def _ensure_prices_schema(self) -> None:
         """
         מוודא שקיימת טבלת prices בסיסית.
@@ -1019,6 +1115,520 @@ class SqlStore:
             # לא נכשיל את האפליקציה על זה, רק נתריע.
             self._last_error = str(exc)
             logger.warning("Failed to ensure prices schema: %s", exc, exc_info=True)
+
+    def _ensure_data_freshness_schema(self) -> None:
+        """
+        Tracks the last successful data fetch per (symbol, provider).
+
+        Used by DataService to decide whether to re-fetch or serve from cache.
+        """
+        tbl = self._tbl("data_freshness")
+        ddl = f"""
+        CREATE TABLE IF NOT EXISTS {tbl} (
+            symbol          TEXT NOT NULL,
+            provider        TEXT NOT NULL,
+            last_fetch_utc  TEXT NOT NULL,
+            newest_date     TEXT,
+            row_count       INTEGER,
+            env             TEXT,
+            ts_utc          TEXT
+        );
+        """
+        try:
+            with self.engine.begin() as conn:
+                conn.execute(text(ddl))
+        except Exception as exc:
+            self._last_error = str(exc)
+            logger.warning("Failed to ensure data_freshness schema: %s", exc)
+
+    def _ensure_system_events_schema(self) -> None:
+        """
+        Structured event log for system-level actions (ingestion, errors, etc.).
+
+        Used for observability and health dashboards.
+        """
+        tbl = self._tbl("system_events")
+        ddl = f"""
+        CREATE TABLE IF NOT EXISTS {tbl} (
+            event_id    TEXT NOT NULL,
+            ts_utc      TEXT NOT NULL,
+            event_type  TEXT NOT NULL,
+            severity    TEXT NOT NULL DEFAULT 'INFO',
+            component   TEXT,
+            message     TEXT,
+            detail_json TEXT,
+            env         TEXT
+        );
+        """
+        try:
+            with self.engine.begin() as conn:
+                conn.execute(text(ddl))
+        except Exception as exc:
+            self._last_error = str(exc)
+            logger.warning("Failed to ensure system_events schema: %s", exc)
+
+    def log_system_event(
+        self,
+        event_type: str,
+        message: str,
+        *,
+        severity: str = "INFO",
+        component: str | None = None,
+        detail: dict | None = None,
+        env: str = "prod",
+    ) -> None:
+        """Append a structured event to the system_events log."""
+        import uuid
+        tbl = self._tbl("system_events")
+        row = {
+            "event_id": str(uuid.uuid4()),
+            "ts_utc": _now_utc_iso(),
+            "event_type": event_type,
+            "severity": severity,
+            "component": component,
+            "message": message,
+            "detail_json": json.dumps(detail) if detail else None,
+            "env": env,
+        }
+        try:
+            with self.engine.begin() as conn:
+                cols = ", ".join(row.keys())
+                placeholders = ", ".join(f":{k}" for k in row.keys())
+                conn.execute(text(f"INSERT INTO {tbl} ({cols}) VALUES ({placeholders})"), row)
+        except Exception as exc:
+            logger.warning("log_system_event failed: %s", exc)
+
+    def update_data_freshness(
+        self,
+        symbol: str,
+        provider: str,
+        newest_date: str | None = None,
+        row_count: int | None = None,
+        env: str = "prod",
+    ) -> None:
+        """Upsert a data freshness record for a symbol+provider."""
+        tbl = self._tbl("data_freshness")
+        now = _now_utc_iso()
+        try:
+            with self.engine.begin() as conn:
+                conn.execute(
+                    text(f"DELETE FROM {tbl} WHERE symbol = :s AND provider = :p AND env = :e"),
+                    {"s": symbol, "p": provider, "e": env},
+                )
+                conn.execute(
+                    text(
+                        f"INSERT INTO {tbl} "
+                        f"(symbol, provider, last_fetch_utc, newest_date, row_count, env, ts_utc) "
+                        f"VALUES (:symbol, :provider, :last_fetch_utc, :newest_date, :row_count, :env, :ts_utc)"
+                    ),
+                    {
+                        "symbol": symbol,
+                        "provider": provider,
+                        "last_fetch_utc": now,
+                        "newest_date": newest_date,
+                        "row_count": row_count,
+                        "env": env,
+                        "ts_utc": now,
+                    },
+                )
+        except Exception as exc:
+            logger.warning("update_data_freshness failed for %s/%s: %s", symbol, provider, exc)
+
+    def get_data_freshness(self, env: str = "prod") -> pd.DataFrame:
+        """Return the data_freshness table as a DataFrame."""
+        tbl = self._tbl("data_freshness")
+        try:
+            with self.engine.connect() as conn:
+                return pd.read_sql(
+                    text(f"SELECT * FROM {tbl} WHERE env = :e ORDER BY symbol, provider"),
+                    conn,
+                    params={"e": env},
+                )
+        except Exception as exc:
+            logger.warning("get_data_freshness failed: %s", exc)
+            return pd.DataFrame()
+
+    # ------------------------------------------------------------------
+    # Backtest metrics schema + API (HF-grade)
+    # ------------------------------------------------------------------
+
+    def _ensure_backtest_schema(self) -> None:
+        """
+        Creates the canonical tables for backtest runs + pair-level metrics.
+
+        Tables:
+          - bt_runs
+          - pair_backtest_metrics
+
+        Design:
+          - DuckDB/SQLite/Postgres compatible DDL.
+          - No foreign keys (DuckDB portability).
+          - ts_utc stored as ISO string (Z).
+        """
+        bt_tbl = self._tbl("bt_runs")
+        met_tbl = self._tbl("pair_backtest_metrics")
+
+        bt_ddl = f"""
+        CREATE TABLE IF NOT EXISTS {bt_tbl} (
+            run_id      TEXT PRIMARY KEY,
+            ts_utc      TEXT NOT NULL,
+            env         TEXT NOT NULL,
+            profile     TEXT,
+            pair        TEXT,
+            source      TEXT,
+            start_date  TEXT,
+            end_date    TEXT,
+            config_json TEXT,
+            notes       TEXT
+        );
+        """
+
+        met_ddl = f"""
+        CREATE TABLE IF NOT EXISTS {met_tbl} (
+            run_id      TEXT NOT NULL,
+            ts_utc      TEXT NOT NULL,
+            env         TEXT NOT NULL,
+            profile     TEXT,
+            pair        TEXT NOT NULL,
+
+            Sharpe      DOUBLE,
+            Profit      DOUBLE,
+            Drawdown    DOUBLE,
+            Sortino     DOUBLE,
+            Calmar      DOUBLE,
+            WinRate     DOUBLE,
+            Trades      BIGINT,
+            TailRisk    DOUBLE,
+            DSR         DOUBLE,
+
+            metrics_json TEXT
+        );
+        """
+
+        with self.engine.begin() as conn:
+            conn.execute(text(bt_ddl))
+            conn.execute(text(met_ddl))
+
+        # Ensure useful indices (best-effort)
+        try:
+            cols_bt = self._table_columns(bt_tbl)
+            ts_col_bt = "ts_utc" if "ts_utc" in cols_bt else ("ts" if "ts" in cols_bt else None)
+
+            if ts_col_bt and {"env", ts_col_bt}.issubset(cols_bt):
+                self._ensure_index(bt_tbl, f"{bt_tbl}_env_ts_idx", ["env", ts_col_bt])
+
+            if ts_col_bt and {"pair", ts_col_bt}.issubset(cols_bt):
+                self._ensure_index(bt_tbl, f"{bt_tbl}_pair_ts_idx", ["pair", ts_col_bt])
+        except Exception:
+            pass
+
+        try:
+            cols_met = self._table_columns(met_tbl)
+            ts_col_met = "ts_utc" if "ts_utc" in cols_met else ("ts" if "ts" in cols_met else None)
+
+            if ts_col_met and {"env", "pair", ts_col_met}.issubset(cols_met):
+                self._ensure_index(met_tbl, f"{met_tbl}_env_pair_ts_idx", ["env", "pair", ts_col_met])
+
+            if "run_id" in cols_met:
+                self._ensure_index(met_tbl, f"{met_tbl}_run_id_idx", ["run_id"])
+        except Exception:
+            pass
+
+
+
+    def save_backtest_run_meta(
+        self,
+        *,
+        run_id: str,
+        env: Optional[str] = None,
+        profile: Optional[str] = None,
+        pair: Optional[str] = None,
+        source: str = "unknown",
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+        config: Optional[Dict[str, Any]] = None,
+        notes: Optional[str] = None,
+        ts_utc: Optional[str] = None,
+    ) -> None:
+        """
+        Persist one bt_run row (idempotent by run_id).
+        """
+        if self.read_only:
+            return
+
+        bt_tbl = self._tbl("bt_runs")
+        env_eff = str(env or self.default_env or "dev")
+        ts = ts_utc or _now_utc_iso()
+
+        payload = _safe_json_dumps(make_json_safe(config or {}))
+
+        with self.engine.begin() as conn:
+            # idempotent: delete+insert
+            conn.execute(text(f"DELETE FROM {bt_tbl} WHERE run_id = :run_id"), {"run_id": run_id})
+            conn.execute(
+                text(
+                    f"""
+                    INSERT INTO {bt_tbl}
+                    (run_id, ts_utc, env, profile, pair, source, start_date, end_date, config_json, notes)
+                    VALUES
+                    (:run_id, :ts_utc, :env, :profile, :pair, :source, :start_date, :end_date, :config_json, :notes)
+                    """
+                ),
+                {
+                    "run_id": str(run_id),
+                    "ts_utc": str(ts),
+                    "env": env_eff,
+                    "profile": (str(profile) if profile is not None else None),
+                    "pair": (str(pair) if pair else None),
+                    "source": str(source or "unknown"),
+                    "start_date": (str(start_date) if start_date else None),
+                    "end_date": (str(end_date) if end_date else None),
+                    "config_json": payload,
+                    "notes": (str(notes) if notes else None),
+                },
+            )
+
+    def save_pair_backtest_metrics(
+        self,
+        *,
+        run_id: str,
+        pair: str,
+        metrics: Dict[str, Any],
+        env: Optional[str] = None,
+        profile: Optional[str] = None,
+        ts_utc: Optional[str] = None,
+    ) -> None:
+        """
+        Persist one metrics row (idempotent by run_id).
+        Stores both flattened columns and full metrics_json.
+        """
+        if self.read_only:
+            return
+
+        met_tbl = self._tbl("pair_backtest_metrics")
+        env_eff = str(env or self.default_env or "dev")
+        ts = ts_utc or _now_utc_iso()
+
+        m = metrics or {}
+        mj = _safe_json_dumps(make_json_safe(m))
+
+        def _f(k: str) -> Optional[float]:
+            v = m.get(k)
+            try:
+                return None if v is None else float(v)
+            except Exception:
+                return None
+
+        def _i(k: str) -> Optional[int]:
+            v = m.get(k)
+            try:
+                return None if v is None else int(v)
+            except Exception:
+                return None
+
+        row = {
+            "run_id": str(run_id),
+            "ts_utc": str(ts),
+            "env": env_eff,
+            "profile": (str(profile) if profile is not None else None),
+            "pair": str(pair),
+
+            "Sharpe": _f("Sharpe"),
+            "Profit": _f("Profit"),
+            "Drawdown": _f("Drawdown"),
+            "Sortino": _f("Sortino"),
+            "Calmar": _f("Calmar"),
+            "WinRate": _f("WinRate"),
+            "Trades": _i("Trades"),
+            "TailRisk": _f("TailRisk"),
+            "DSR": _f("DSR"),
+
+            "metrics_json": mj,
+        }
+
+        with self.engine.begin() as conn:
+            conn.execute(text(f"DELETE FROM {met_tbl} WHERE run_id = :run_id"), {"run_id": str(run_id)})
+            conn.execute(
+                text(
+                    f"""
+                    INSERT INTO {met_tbl}
+                    (run_id, ts_utc, env, profile, pair,
+                     Sharpe, Profit, Drawdown, Sortino, Calmar, WinRate, Trades, TailRisk, DSR,
+                     metrics_json)
+                    VALUES
+                    (:run_id, :ts_utc, :env, :profile, :pair,
+                     :Sharpe, :Profit, :Drawdown, :Sortino, :Calmar, :WinRate, :Trades, :TailRisk, :DSR,
+                     :metrics_json)
+                    """
+                ),
+                row,
+            )
+
+    def load_pair_backtest_metrics(
+        self,
+        *,
+        env: Optional[str] = None,
+        latest_only: bool = True,
+        pair: Optional[str] = None,
+        limit: int = 5000,
+    ) -> pd.DataFrame:
+        """
+        Load backtest metrics (pair-level).
+        - latest_only=True returns 1 row per pair (latest ts_utc).
+        """
+        met_tbl = self._tbl("pair_backtest_metrics")
+        env_eff = str(env or self.default_env or "dev")
+
+        where = "WHERE env = :env"
+        params: Dict[str, Any] = {"env": env_eff, "limit": int(limit)}
+        if pair:
+            where += " AND pair = :pair"
+            params["pair"] = str(pair)
+
+        if latest_only:
+            sql = f"""
+            SELECT *
+            FROM (
+                SELECT
+                    *,
+                    ROW_NUMBER() OVER (PARTITION BY env, pair ORDER BY ts_utc DESC) AS rn
+                FROM {met_tbl}
+                {where}
+            )
+            WHERE rn = 1
+            ORDER BY ts_utc DESC
+            LIMIT :limit
+            """
+        else:
+            sql = f"""
+            SELECT *
+            FROM {met_tbl}
+            {where}
+            ORDER BY ts_utc DESC
+            LIMIT :limit
+            """
+
+        try:
+            with self.engine.connect() as conn:
+                df = pd.read_sql_query(text(sql), conn, params=params)
+        except Exception as exc:
+            logger.warning("load_pair_backtest_metrics failed: %s", exc, exc_info=True)
+            return pd.DataFrame()
+
+        # normalize numeric columns when present
+        for col in ("Sharpe", "Profit", "Drawdown", "Sortino", "Calmar", "WinRate", "TailRisk", "DSR"):
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors="coerce")
+        if "Trades" in df.columns:
+            df["Trades"] = pd.to_numeric(df["Trades"], errors="coerce")
+
+        return df
+
+    def backfill_pair_backtest_metrics_from_trials(
+        self,
+        *,
+        env: Optional[str] = None,
+        profile: Optional[str] = None,
+        limit_pairs: int = 500,
+        only_complete: bool = True,
+    ) -> int:
+        """
+        Backfill bt_runs + pair_backtest_metrics using existing Optuna 'trials' perf_json.
+
+        Uses:
+          - get_opt_trials_summary() :contentReference[oaicite:3]{index=3}
+          - get_best_trials_for_pair() :contentReference[oaicite:4]{index=4}
+        """
+        if self.read_only:
+            return 0
+
+        env_eff = str(env or self.default_env or "dev")
+        prof_eff = str(profile or "default")
+
+        # Ensure schema exists (safe)
+        self._ensure_backtest_schema()
+
+        # If no trials table, nothing to do
+        tables = set(self.list_tables())
+        if "trials" not in tables:
+            logger.warning("backfill_from_trials: 'trials' table not found.")
+            return 0
+
+        summ = self.get_opt_trials_summary(limit=int(limit_pairs))
+        if summ is None or summ.empty or "pair" not in summ.columns:
+            return 0
+
+        n = 0
+        for _, r in summ.iterrows():
+            pair_label = str(r.get("pair") or "").strip()
+            if not pair_label:
+                continue
+
+            top = self.get_best_trials_for_pair(
+                pair_label,
+                limit=1,
+                only_complete=bool(only_complete),
+                with_params=True,
+                with_perf=True,
+                include_study_meta=True,
+            )
+            if top is None or top.empty:
+                continue
+
+            row = top.iloc[0].to_dict()
+            created_at = row.get("created_at")
+            ts = None
+            try:
+                if created_at is not None:
+                    ts = pd.to_datetime(created_at, errors="coerce")
+                    if ts is not None and pd.notna(ts):
+                        ts = ts.to_pydatetime().replace(tzinfo=timezone.utc).isoformat().replace("+00:00", "Z")
+                    else:
+                        ts = None
+            except Exception:
+                ts = None
+
+            study_id = row.get("study_id")
+            trial_no = row.get("trial_no")
+            run_id = f"bt_from_trials::{pair_label}::{study_id}::{trial_no}"
+
+            params = row.get("params") if isinstance(row.get("params"), dict) else {}
+            perf = row.get("perf") if isinstance(row.get("perf"), dict) else {}
+
+            cfg = {
+                "source": "trials",
+                "study_id": study_id,
+                "trial_no": trial_no,
+                "direction": row.get("direction"),
+                "sampler": row.get("sampler"),
+                "timeout_sec": row.get("timeout_sec"),
+                "weights_json": row.get("weights_json"),
+                "profile_json": row.get("profile_json"),
+                "params": params,
+            }
+
+            # Save run + metrics
+            self.save_backtest_run_meta(
+                run_id=run_id,
+                env=env_eff,
+                profile=prof_eff,
+                pair=pair_label,
+                source="trials",
+                config=cfg,
+                ts_utc=ts,
+            )
+
+            self.save_pair_backtest_metrics(
+                run_id=run_id,
+                pair=pair_label,
+                metrics=perf,
+                env=env_eff,
+                profile=prof_eff,
+                ts_utc=ts,
+            )
+            n += 1
+
+        return n
 
     # ------------------------------------------------------------------
     # Generic helpers (metadata, read/write gating, raw query)
@@ -2026,11 +2636,22 @@ class SqlStore:
         limit: Optional[int] = None,
     ) -> pd.DataFrame:
         """
-        טוען מטריקות ביצועים ברמת זוג מתוך bt_runs.
+        Load pair-level backtest metrics from bt_runs (HF-grade, robust).
 
-        table_name/profile/limit:
-            נותן תאימות ל-API הישן, מעל המבנה החדש.
+        Features:
+        - table resolution: explicit table_name or first existing from candidates.
+        - env/profile filtering:
+            * uses dedicated columns (env/profile) in SQL when present
+            * falls back to parsing config_json when dedicated columns missing
+        - latest_only:
+            * returns 1 row per pair (latest by ts column) when pair or sym_x/sym_y exist
+        - metrics_json:
+            * safely decoded and flattened into columns
+        - numeric normalization on common metric columns
         """
+        # ----------------------------
+        # 0) Resolve table
+        # ----------------------------
         if table_name is not None:
             tbl = self._tbl(table_name)
             if tbl not in self.list_tables():
@@ -2042,100 +2663,225 @@ class SqlStore:
                 logger.info("load_pair_backtest_metrics: no bt_runs table found.")
                 return pd.DataFrame()
 
+        # ----------------------------
+        # 1) Introspection & planning
+        # ----------------------------
+        cols_tbl = self._table_columns(tbl)
+        ts_col = self._resolve_ts_column(tbl)
+
+        has_env_col = "env" in cols_tbl
+        has_profile_col = "profile" in cols_tbl
+        has_pair_col = "pair" in cols_tbl
+        has_xy_cols = ("sym_x" in cols_tbl) and ("sym_y" in cols_tbl)
+
+        has_config_json = "config_json" in cols_tbl
+        has_metrics_json = "metrics_json" in cols_tbl
+
+        # Normalize inputs
+        env_val = str(env).strip() if env is not None else None
+        prof_val = str(profile).strip() if profile is not None else None
+
+        # limit sanity
+        lim = None
+        if limit is not None:
+            try:
+                lim = int(limit)
+                if lim <= 0:
+                    lim = None
+            except Exception:
+                lim = None
+
+        # ----------------------------
+        # 2) Build SQL (fast path when possible)
+        # ----------------------------
+        # If env/profile columns exist, filter them in SQL. Otherwise we'll filter after load.
+        where_clauses: List[str] = []
+        params: Dict[str, Any] = {}
+
+        if env_val is not None and has_env_col:
+            where_clauses.append("env = :env")
+            params["env"] = env_val
+
+        if prof_val is not None and has_profile_col:
+            where_clauses.append("profile = :profile")
+            params["profile"] = prof_val
+
+        where_sql = ""
+        if where_clauses:
+            where_sql = "WHERE " + " AND ".join(where_clauses)
+
+        # Partition keys for latest-only
+        partition_cols: List[str] = []
+        if has_pair_col:
+            partition_cols = ["pair"]
+        elif has_xy_cols:
+            partition_cols = ["sym_x", "sym_y"]
+
+        # If we don't have any ts column, we cannot compute latest safely → we fallback to raw read and no latest window.
+        use_window_latest = bool(latest_only and ts_col and partition_cols)
+
+        # Base select
+        if use_window_latest:
+            part_sql = ", ".join(partition_cols)
+            sql = f"""
+            SELECT *
+            FROM (
+                SELECT
+                    *,
+                    ROW_NUMBER() OVER (PARTITION BY {part_sql} ORDER BY {ts_col} DESC) AS _rn
+                FROM {tbl}
+                {where_sql}
+            )
+            WHERE _rn = 1
+            """
+            if ts_col:
+                sql += f" ORDER BY {ts_col} DESC"
+            if lim is not None:
+                sql += " LIMIT :limit"
+                params["limit"] = lim
+
+        else:
+            # No window latest possible (missing ts or missing partition key)
+            sql = f"SELECT * FROM {tbl} {where_sql}"
+            if latest_only and ts_col:
+                sql += f" ORDER BY {ts_col} DESC"
+                if lim is None:
+                    # latest_only without limit => return top 1
+                    sql += " LIMIT 1"
+                else:
+                    sql += " LIMIT :limit"
+                    params["limit"] = lim
+            else:
+                # not latest_only
+                if ts_col:
+                    sql += f" ORDER BY {ts_col} DESC"
+                if lim is not None:
+                    sql += " LIMIT :limit"
+                    params["limit"] = lim
+
+        # ----------------------------
+        # 3) Execute query
+        # ----------------------------
         try:
-            df_runs = pd.read_sql_table(tbl, self.engine)
+            with self.engine.connect() as conn:
+                df_runs = pd.read_sql_query(text(sql), conn, params=params)
         except Exception as exc:
             self._last_error = str(exc)
-            logger.warning("load_pair_backtest_metrics.read_sql_table('%s') failed: %s", tbl, exc)
+            logger.warning("load_pair_backtest_metrics query failed from '%s': %s", tbl, exc, exc_info=True)
             return pd.DataFrame()
 
-        if df_runs.empty:
-            return df_runs
+        if df_runs is None or df_runs.empty:
+            return pd.DataFrame()
 
-        # env מתוך config_json (אם קיים)
-        if env is not None and "config_json" in df_runs.columns:
+        # ----------------------------
+        # 4) Fallback filtering via config_json (only if needed)
+        # ----------------------------
+        def _safe_decode_json(x: Any) -> Dict[str, Any]:
+            if isinstance(x, dict):
+                return x
+            if isinstance(x, str) and x.strip():
+                try:
+                    return json.loads(x)
+                except Exception:
+                    return {}
+            return {}
+
+        # env filter (fallback)
+        if env_val is not None and (not has_env_col) and has_config_json and "config_json" in df_runs.columns:
             try:
-                cfg = df_runs["config_json"].apply(
-                    lambda x: json.loads(x) if isinstance(x, str) else {}
-                )
-                env_series = cfg.apply(lambda d: d.get("env") or d.get("ENV"))
-                df_runs = df_runs[env_series == env]
+                cfg_series = df_runs["config_json"].apply(_safe_decode_json)
+                env_series = cfg_series.apply(lambda d: d.get("env") or d.get("ENV") or d.get("environment"))
+                df_runs = df_runs[env_series.astype(str) == env_val]
             except Exception:
                 pass
 
-        # profile מתוך config_json (אם קיים)
-        if profile is not None and "config_json" in df_runs.columns:
+        # profile filter (fallback)
+        if prof_val is not None and (not has_profile_col) and has_config_json and "config_json" in df_runs.columns:
             try:
-                cfg = df_runs["config_json"].apply(
-                    lambda x: json.loads(x) if isinstance(x, str) else {}
-                )
-                prof_series = cfg.apply(lambda d: d.get("profile") or d.get("PROFILE"))
-                df_runs = df_runs[prof_series == profile]
+                cfg_series = df_runs["config_json"].apply(_safe_decode_json)
+                prof_series = cfg_series.apply(lambda d: d.get("profile") or d.get("PROFILE") or d.get("profile_name"))
+                df_runs = df_runs[prof_series.astype(str) == prof_val]
             except Exception:
                 pass
 
         if df_runs.empty:
-            return df_runs
+            return pd.DataFrame()
 
-        # latest_only – ניקח את הריצה האחרונה לכל זוג לפי ts
-        if latest_only and "ts" in df_runs.columns:
+        # If we couldn't window-latest in SQL but latest_only=True and we do have ts_col and partition cols,
+        # do a dataframe-level latest reduction (safe fallback).
+        if latest_only and (not use_window_latest) and ts_col and (ts_col in df_runs.columns) and partition_cols:
             try:
-                if {"sym_x", "sym_y"} <= set(df_runs.columns):
-                    df_runs = (
-                        df_runs.sort_values("ts")
-                        .groupby(["sym_x", "sym_y"], as_index=False)
-                        .tail(1)
-                    )
-                elif "pair" in df_runs.columns:
-                    df_runs = (
-                        df_runs.sort_values("ts")
-                        .groupby("pair", as_index=False)
-                        .tail(1)
-                    )
-                else:
-                    df_runs = df_runs.sort_values("ts").tail(1)
+                df_runs = (
+                    df_runs.sort_values(ts_col)
+                    .groupby(partition_cols, as_index=False)
+                    .tail(1)
+                )
             except Exception:
-                df_runs = df_runs.sort_values("ts")
-                key_cols: Optional[List[str]] = None
-                if {"sym_x", "sym_y"} <= set(df_runs.columns):
-                    key_cols = ["sym_x", "sym_y"]
-                elif "pair" in df_runs.columns:
-                    key_cols = ["pair"]
-                if key_cols:
-                    df_runs = df_runs.drop_duplicates(key_cols, keep="last")
+                pass
+
+        # limit fallback (post-filter)
+        if lim is not None and len(df_runs) > lim:
+            try:
+                if ts_col and ts_col in df_runs.columns:
+                    df_runs = df_runs.sort_values(ts_col, ascending=False).head(lim)
                 else:
-                    df_runs = df_runs.tail(1)
+                    df_runs = df_runs.head(lim)
+            except Exception:
+                df_runs = df_runs.head(lim)
 
-        # limit
-        if limit is not None and limit > 0:
-            if "ts" in df_runs.columns:
-                df_runs = df_runs.sort_values("ts", ascending=False).head(limit)
-            else:
-                df_runs = df_runs.head(limit)
-
-        # pair label
+        # ----------------------------
+        # 5) Ensure pair label
+        # ----------------------------
         if "pair" not in df_runs.columns:
-            if {"sym_x", "sym_y"} <= set(df_runs.columns):
+            if ("sym_x" in df_runs.columns) and ("sym_y" in df_runs.columns):
                 df_runs["pair"] = df_runs["sym_x"].astype(str) + "-" + df_runs["sym_y"].astype(str)
             else:
                 df_runs["pair"] = df_runs.index.astype(str)
 
-        # פירוק metrics_json לעמודות
-        if "metrics_json" in df_runs.columns:
+        # Ensure sym_x/sym_y if possible (optional, for downstream consistency)
+        if ("sym_x" not in df_runs.columns) and ("sym_y" not in df_runs.columns) and ("pair" in df_runs.columns):
             try:
-                metrics_series = df_runs["metrics_json"].apply(
-                    lambda x: json.loads(x) if isinstance(x, str) else {}
-                )
+                p = df_runs["pair"].astype(str).str.split("-", n=1, expand=True)
+                if p.shape[1] == 2:
+                    df_runs["sym_x"] = p[0].str.strip()
+                    df_runs["sym_y"] = p[1].str.strip()
+            except Exception:
+                pass
+
+        # ----------------------------
+        # 6) Flatten metrics_json into columns (optional)
+        # ----------------------------
+        if has_metrics_json and "metrics_json" in df_runs.columns:
+            try:
+                metrics_series = df_runs["metrics_json"].apply(_safe_decode_json)
                 metrics_df = pd.json_normalize(metrics_series)
-                df_out = pd.concat(
-                    [df_runs.drop(columns=["metrics_json"]), metrics_df],
-                    axis=1,
-                )
+                # Avoid column collisions by preferring existing flat cols
+                for c in list(metrics_df.columns):
+                    if c in df_runs.columns:
+                        metrics_df = metrics_df.rename(columns={c: f"m_{c}"})
+                df_out = pd.concat([df_runs.drop(columns=["metrics_json"]), metrics_df], axis=1)
             except Exception as exc:
                 logger.warning("load_pair_backtest_metrics: metrics_json normalize failed: %s", exc)
                 df_out = df_runs.copy()
         else:
             df_out = df_runs.copy()
+
+        # ----------------------------
+        # 7) Numeric normalization (common metrics)
+        # ----------------------------
+        for col in (
+            "Score", "score",
+            "Sharpe", "sharpe",
+            "Profit", "profit",
+            "Drawdown", "drawdown",
+            "Sortino", "sortino",
+            "Calmar", "calmar",
+            "WinRate", "winrate",
+            "Trades", "trades", "n_trades",
+            "MaxDD", "max_dd", "max_dd_pct",
+        ):
+            if col in df_out.columns:
+                df_out[col] = pd.to_numeric(df_out[col], errors="coerce")
 
         return df_out
 
@@ -2792,6 +3538,110 @@ class SqlStore:
     # ------------------------------------------------------------------
     # Price History Persistence (EOD / OHLCV)
     # ------------------------------------------------------------------
+
+    def save_backtest_run(
+        self,
+        *,
+        env: Optional[str],
+        profile: Optional[str],
+        sym_x: str,
+        sym_y: str,
+        start_date: Optional[str],
+        end_date: Optional[str],
+        metrics: Mapping[str, Any],
+        params: Optional[Mapping[str, Any]] = None,
+        config: Optional[Mapping[str, Any]] = None,
+        run_id: Optional[str] = None,
+        git_rev: Optional[str] = None,
+        data_snapshot_id: Optional[str] = None,
+        notes: Optional[str] = None,
+        created_ts_utc: Optional[str] = None,
+    ) -> None:
+        """
+        Persist a single backtest result into bt_runs (canonical metrics store).
+        """
+        if not self._ensure_writable("some_op"):
+            return
+
+
+        tbl = self._tbl("bt_runs")
+        env_eff = (env or self.default_env or "dev").strip()
+        prof_eff = (profile or "").strip() or None
+
+        pair = f"{str(sym_x).strip()}-{str(sym_y).strip()}"
+        ts = created_ts_utc or _now_utc_iso()
+
+        m = dict(make_json_safe(metrics or {}))
+        p = dict(make_json_safe(params or {})) if params is not None else None
+        c = dict(make_json_safe(config or {})) if config is not None else None
+
+        def _get_float(keys: Sequence[str]) -> Optional[float]:
+            for k in keys:
+                if k in m:
+                    try:
+                        return float(m[k])
+                    except Exception:
+                        pass
+            return None
+
+        score = _get_float(["Score", "score"])
+        sharpe = _get_float(["Sharpe", "sharpe"])
+        profit = _get_float(["Profit", "profit", "pnl"])
+        drawdown = _get_float(["Drawdown", "drawdown", "max_drawdown"])
+        n_trades = None
+        for k in ("Trades", "trades", "n_trades"):
+            if k in m:
+                try:
+                    n_trades = int(m[k])
+                except Exception:
+                    n_trades = None
+                break
+
+        sql = text(
+            f"""
+            INSERT INTO {tbl} (
+                run_id, env, profile, pair, sym_x, sym_y,
+                start_date, end_date, created_ts_utc,
+                score, sharpe, profit, drawdown, n_trades,
+                metrics_json, params_json, config_json,
+                git_rev, data_snapshot_id, notes
+            )
+            VALUES (
+                :run_id, :env, :profile, :pair, :sym_x, :sym_y,
+                :start_date, :end_date, :created_ts_utc,
+                :score, :sharpe, :profit, :drawdown, :n_trades,
+                :metrics_json, :params_json, :config_json,
+                :git_rev, :data_snapshot_id, :notes
+            )
+            """
+        )
+
+        with self.engine.begin() as conn:
+            conn.execute(
+                sql,
+                {
+                    "run_id": run_id,
+                    "env": env_eff,
+                    "profile": prof_eff,
+                    "pair": pair,
+                    "sym_x": str(sym_x).strip(),
+                    "sym_y": str(sym_y).strip(),
+                    "start_date": start_date,
+                    "end_date": end_date,
+                    "created_ts_utc": ts,
+                    "score": score,
+                    "sharpe": sharpe,
+                    "profit": profit,
+                    "drawdown": drawdown,
+                    "n_trades": n_trades,
+                    "metrics_json": _safe_json_dumps(m),
+                    "params_json": _safe_json_dumps(p) if p is not None else None,
+                    "config_json": _safe_json_dumps(c) if c is not None else None,
+                    "git_rev": git_rev,
+                    "data_snapshot_id": data_snapshot_id,
+                    "notes": notes,
+                },
+            )
 
     def save_price_history(
         self,

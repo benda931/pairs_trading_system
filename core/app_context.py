@@ -22,13 +22,20 @@ import os
 
 import numpy as np
 import pandas as pd
-import streamlit as st
+
+try:
+    import streamlit as st  # type: ignore
+except Exception:  # pragma: no cover
+    st = None  # type: ignore
+
+from common.streamlit_guard import safe_session_state
 
 from common.json_safe import make_json_safe
 from core.ib_order_router import IBOrderRouter
 from common.config_manager import load_config
 from core.fair_value_config import FairValueAPIConfig
-
+from core.runtime import resolve_env_profile, stable_seed
+import threading
 logger = logging.getLogger(__name__)
 
 # ========= Type aliases =========
@@ -304,6 +311,10 @@ class AppContext:
         else:
             self.services[name] = service
 
+    @property
+    def project_root(self) -> Path:
+        return PROJECT_ROOT
+    
     # ---- Tags / health ----
 
     def add_tag(self, key: str, value: str) -> None:
@@ -456,80 +467,105 @@ class AppContext:
     _GLOBAL_CTX: ClassVar[Optional[AppContext]] = None
 
     @classmethod
-    def get_global(cls) -> AppContext:
+    def get_global(cls) -> "AppContext":
         """
-        מחזיר קונטקסט ברירת מחדל יחיד (singleton) שהדשבורד יכול לעבוד איתו.
+        Return the canonical AppContext singleton for the process / Streamlit session.
 
-        עדכון HF-grade:
-        ----------------
-        - קודם ננסה לאחזר ctx מ-st.session_state["app_ctx"] (per-user ב-Streamlit).
-        - אם אין, נשתמש ב-_GLOBAL_CTX (תמיכה אחורה ל-CLI/tests).
-        - רק אם לא קיים כלל — נבנה ctx חדש מה-config.
+        Precedence (HF-grade, safe-by-default):
+        1) Streamlit session-scoped context (per-user)  -> ss["app_ctx"]
+        2) Process-scoped context for CLI/tests         -> cls._GLOBAL_CTX
+        3) Build a new context from config.json
 
-        זהו *החוזה הרשמי* עם dashboard.py, אך לקוד חדש מומלץ להשתמש ב־get_app_context().
+        Phase 1 invariants:
+        - env/profile resolved canonically (single precedence point)
+        - run_id stable per Streamlit session, overridable via PTS_RUN_ID
+        - seed deterministic from (env, profile, run_id)
+        - no direct st.session_state access in bare/CLI mode (prevents warnings)
         """
-        # 1) Streamlit session-scoped AppContext (מועדף ל-Web).
-        sess_ctx: Optional[AppContext]
-        try:
-            sess_ctx = st.session_state.get("app_ctx")  # type: ignore[assignment]
-        except Exception:
-            sess_ctx = None
+        # ------------------------------------------------------------
+        # 0) Detect Streamlit runtime safely (no bare-mode session_state)
+        # ------------------------------------------------------------
+        ss = safe_session_state()
+        in_streamlit = ss is not None
 
-        if isinstance(sess_ctx, cls):
-            ctx = sess_ctx
+        # ------------------------------------------------------------
+        # 1) Streamlit session-scoped AppContext (preferred in Web)
+        # ------------------------------------------------------------
+        if in_streamlit:
             try:
-                ctx.init_services()
-            except Exception as exc:  # pragma: no cover
-                logger.debug("init_services on session app_ctx failed: %s", exc)
-            cls._GLOBAL_CTX = ctx
-            return ctx
+                sess_ctx = ss.get("app_ctx")
+            except Exception:
+                sess_ctx = None
 
-        # 2) תהליך-גלובלי (שימוש קיים ב-CLI/בדיקות)
-        if cls._GLOBAL_CTX is not None:
+            if isinstance(sess_ctx, cls):
+                try:
+                    sess_ctx.init_services()
+                except Exception as exc:  # pragma: no cover
+                    logger.debug("AppContext.get_global: init_services() on session ctx failed: %s", exc)
+                return sess_ctx
+
+        # ------------------------------------------------------------
+        # 2) Process-global AppContext (CLI/tests)
+        #    NOTE: do NOT use _GLOBAL_CTX under Streamlit to avoid cross-session leakage.
+        # ------------------------------------------------------------
+        if (not in_streamlit) and (cls._GLOBAL_CTX is not None):
             try:
                 cls._GLOBAL_CTX.init_services()
             except Exception as exc:  # pragma: no cover
-                logger.debug("init_services on existing GLOBAL_CTX failed: %s", exc)
+                logger.debug("AppContext.get_global: init_services() on GLOBAL_CTX failed: %s", exc)
             return cls._GLOBAL_CTX
 
-        # 3) בנייה חדשה מקובץ config.json
+        # ------------------------------------------------------------
+        # 3) Build from config.json (best-effort)
+        # ------------------------------------------------------------
         try:
             cfg = load_config()
             logger.info("AppContext.get_global: loaded config via load_config()")
         except Exception as exc:  # pragma: no cover
-            logger.warning(
-                "AppContext.get_global: failed to load config.json via load_config(): %s",
-                exc,
-            )
+            logger.warning("AppContext.get_global: failed to load config via load_config(): %s", exc)
             cfg = {}
 
-        # --- 2) Umwelt: env/profile ברירת מחדל מתוך הקונפיג (אם קיימים) ---
-        env_cfg = cfg.get("environment") or {}
-        default_env_raw = str(
-            env_cfg.get("default_env") or APP_ENVIRONMENT or "dev"
-        ).strip() or "dev"
-        default_env = _normalize_env_value(default_env_raw)
-        default_profile = str(
-            env_cfg.get("default_profile") or APP_PROFILE or "default"
-        ).strip() or "default"
+        # Phase 1: canonical env/profile resolution (single source)
+        env_resolved, profile_resolved = resolve_env_profile(cfg)
+
+        # Phase 1: stable run_id (override > session > random)
+        run_id = (os.getenv("PTS_RUN_ID") or "").strip() or None
+        if not run_id and in_streamlit:
+            try:
+                existing = ss.get("run_id")
+                if isinstance(existing, str) and existing.strip():
+                    run_id = existing.strip()
+            except Exception:
+                run_id = None
+
+        if not run_id:
+            import uuid
+            run_id = uuid.uuid4().hex
+
+        if in_streamlit:
+            try:
+                ss["run_id"] = run_id
+            except Exception:
+                pass
+
+        # Phase 1: deterministic seed derived from (env, profile, run_id)
+        seed_val = stable_seed(env_resolved, profile_resolved, run_id)
+
+        # Reuse md_router from session if present (backward-compat)
+        md_router = None
+        if in_streamlit:
+            try:
+                md_router = ss.get("md_router")
+            except Exception:
+                md_router = None
 
         today = date.today()
-        seed_val = _DEF_SEED
-        run_id = f"bootstrap-{seed_val}-{today.strftime('%Y%m%d')}"
-
-        # ננסה לקחת md_router קיים מה-Session אם כבר יש אחד
-        try:
-            md_router = st.session_state.get("md_router")
-        except Exception:
-            md_router = None
 
         ctx = AppContext(
             start_date=today,
             end_date=today,
             capital=float(cfg.get("risk", {}).get("max_gross_exposure", 100_000.0)),
-            max_exposure_per_trade=float(
-                cfg.get("strategy", {}).get("max_exposure_per_trade", 0.05)
-            ),
+            max_exposure_per_trade=float(cfg.get("strategy", {}).get("max_exposure_per_trade", 0.05)),
             max_leverage=float(cfg.get("risk", {}).get("max_leverage", 2.0)),
             pairs=[],
             config=cfg,
@@ -537,22 +573,26 @@ class AppContext:
             seed=seed_val,
             run_id=run_id,
             section="dashboard",
-            profile=default_profile,
-            environment=default_env,
+            profile=profile_resolved,
+            environment=env_resolved,
             md_router=md_router,
         )
 
+        # Init services (best-effort; failures should not crash debug tooling)
         try:
             ctx.init_services()
         except Exception as exc:  # pragma: no cover
-            logger.warning("AppContext.init_services() failed in get_global: %s", exc)
+            logger.warning("AppContext.get_global: ctx.init_services() failed: %s", exc)
 
-        cls._GLOBAL_CTX = ctx
-        try:
-            # לא חובה ב-CLI, אבל מוסיף עקביות ב-Web
-            st.session_state["app_ctx"] = ctx
-        except Exception:
-            pass
+        # Persist context in the appropriate scope
+        if in_streamlit:
+            try:
+                ss["app_ctx"] = ctx
+            except Exception:
+                pass
+        else:
+            cls._GLOBAL_CTX = ctx
+
         return ctx
 
     # ---- Compatibility / integration with dashboard.py ----
@@ -717,171 +757,198 @@ class AppContext:
 
     def init_services(self) -> None:
         """
-        מאתחל שכבת שירותים (SqlStore, MarketDataRouter, Engines) וממלא self.services.
+        Initialize service layer (SqlStore, MarketDataRouter, Engines) and populate self.services.
 
-        מטרות:
-        -------
-        - לאפשר ל-root/dashboard.py לגלות capabilities בצורה מקצועית דרך discover_capabilities().
-        - לרכז את כל ה-"מנועים" ברמת קרן במקום לפזר לוגיקה בטאבים.
-        - Extension points מקצועיים:
-            • ניתן לדרוס SqlStore/MarketDataRouter ע"י set_service(...) לפני הקריאה.
-            • ניתן להחליף Broker/IBRouter ע"י הצבה ב-self.broker/self.ib_router.
+        HF-grade principles:
+        - Idempotent: safe to call multiple times
+        - No Streamlit hard dependency in CLI/bare mode (no direct st.session_state access)
+        - Best-effort init: failures should be logged and surfaced via capabilities, not crash tooling
+        - Clear precedence: existing injected services > session cache (web) > default builders
         """
-        # מנגנון הגנה מריבוי קריאות
+        # ------------------------------------------------------------
+        # 0) Idempotency + concurrency guard
+        # ------------------------------------------------------------
         if getattr(self, "_services_initialized", False):
             return
 
-        # תמיד עובדים עם dict רגיל
-        if not isinstance(self.services, dict):
-            self.services = {}
+        lock = getattr(self, "_services_init_lock", None)
+        if lock is None:
+            import threading
+            lock = threading.Lock()
+            setattr(self, "_services_init_lock", lock)
 
-        # ---------- 1) SqlStore ----------
-        if self.sql_store is None:
-            try:
-                from core.sql_store import SqlStore  # type: ignore
+        with lock:
+            if getattr(self, "_services_initialized", False):
+                return
 
-                cfg = getattr(self.settings, "config", {}) or {}
-                cfg_ro = bool(cfg.get("sql_read_only", False))
-                env_ro = os.getenv("SQL_STORE_READ_ONLY")
-                if env_ro is not None:
-                    env_ro_flag = env_ro.strip().lower() in ("1", "true", "yes", "on")
-                else:
-                    env_ro_flag = False
+            # Always keep services a plain dict
+            if not isinstance(getattr(self, "services", None), dict):
+                self.services = {}
 
-                if cfg_ro or env_ro_flag:
-                    read_only = True
-                else:
-                    # policy דיפולטית: dev → writable, paper/live → read_only
-                    read_only = self.environment in ("paper", "live")
-
-                self.sql_store = SqlStore.from_settings(
-                    self.settings,
-                    env=self.environment,
-                    table_prefix="",
-                    read_only=read_only,
-                )
-
-                self.services.setdefault("sql_store", self.sql_store)
-                logger.info(
-                    "SqlStore initialised via from_settings (url=%s, env=%s)",
-                    getattr(self.sql_store, "engine_url", None),
-                    getattr(self.sql_store, "default_env", None),
-                )
-            except Exception as exc:  # pragma: no cover
-                logger.warning("SqlStore init failed: %s", exc)
-
-        # ---------- 2) MarketDataRouter ----------
-        # קודם כל – אם כבר יש md_router (למשל מ-root.smart_scan/backtest) נשתמש בו
-        if self.market_data_router is None:
-            if self.md_router is not None:
-                self.market_data_router = self.md_router
-            else:
-                # ננסה להביא מה-session_state אם הוגדר
+            # Helper: safe optional import
+            def _try_import(module_name: str):
                 try:
-                    sess_md = st.session_state.get("md_router")
+                    return __import__(module_name, fromlist=["*"])
                 except Exception:
-                    sess_md = None
-                if sess_md is not None:
-                    self.market_data_router = sess_md
-                    self.md_router = sess_md
+                    return None
 
-        # אם עדיין אין – ננסה לבנות Router דיפולטי מ-common.market_data_router
-        if self.market_data_router is None:
+            # Helper: safe session_state access (Streamlit only)
+            ss = safe_session_state()
+
+            # ------------------------------------------------------------
+            # 1) SqlStore
+            # ------------------------------------------------------------
+            if getattr(self, "sql_store", None) is None:
+                try:
+                    from core.sql_store import SqlStore  # type: ignore
+
+                    # Phase 1 policy (will be centralized in config_manager later):
+                    # - explicit config/env var can override
+                    # - default: dev/research writable, paper/live read_only
+                    cfg = getattr(self, "config", None) or {}
+                    cfg_ro = bool((cfg.get("sql_read_only") if isinstance(cfg, dict) else False))
+
+                    env_ro = os.getenv("SQL_STORE_READ_ONLY")
+                    env_ro_flag = (
+                        env_ro.strip().lower() in ("1", "true", "yes", "on")
+                        if isinstance(env_ro, str)
+                        else False
+                    )
+
+                    if cfg_ro or env_ro_flag:
+                        read_only = True
+                    else:
+                        read_only = getattr(self, "environment", "dev") in ("paper", "live")
+
+                    self.sql_store = SqlStore.from_settings(
+                        self.settings,
+                        env=getattr(self, "environment", "dev"),
+                        table_prefix="",
+                        read_only=read_only,
+                    )
+                    self.services.setdefault("sql_store", self.sql_store)
+
+                    logger.info(
+                        "SqlStore initialized (url=%s, env=%s, read_only=%s)",
+                        getattr(self.sql_store, "engine_url", None),
+                        getattr(self.sql_store, "default_env", None),
+                        read_only,
+                    )
+                except Exception as exc:  # pragma: no cover
+                    logger.warning("SqlStore init failed: %s", exc)
+
+            # ------------------------------------------------------------
+            # 2) MarketDataRouter
+            # ------------------------------------------------------------
+            # Precedence:
+            #   (a) already injected: self.market_data_router or self.md_router
+            #   (b) Streamlit session cache: ss["md_router"]
+            #   (c) default builder: common.market_data_router.build_default_router(...)
+            if getattr(self, "market_data_router", None) is None:
+                injected = getattr(self, "md_router", None)
+                if injected is not None:
+                    self.market_data_router = injected
+                elif ss is not None:
+                    try:
+                        cached = ss.get("md_router")
+                    except Exception:
+                        cached = None
+                    if cached is not None:
+                        self.market_data_router = cached
+                        self.md_router = cached
+
+            if getattr(self, "market_data_router", None) is None:
+                try:
+                    from common.market_data_router import build_default_router  # type: ignore
+
+                    router = build_default_router(ib=None, use_yahoo=True)
+                    self.market_data_router = router
+                    self.md_router = router
+
+                    logger.info("MarketDataRouter initialized via build_default_router(use_yahoo=True)")
+                except Exception as exc:  # pragma: no cover
+                    logger.debug("MarketDataRouter init skipped/failed: %s", exc)
+
+            if getattr(self, "market_data_router", None) is not None:
+                self.services.setdefault("market_data_router", self.market_data_router)
+
+            # ------------------------------------------------------------
+            # 3) Engines (best-effort, capability-oriented)
+            # ------------------------------------------------------------
+            # NOTE: In Phase 3 we will replace module objects with real engine instances / facades.
+            macro_mod = _try_import("core.macro_engine")
+            if macro_mod is not None:
+                self.macro_engine = macro_mod
+                self.services.setdefault("macro_engine", macro_mod)
+
+            risk_mod = _try_import("core.risk_engine")
+            if risk_mod is not None:
+                self.risk_engine = risk_mod
+                self.services.setdefault("risk_engine", risk_mod)
+
+            signals_mod = _try_import("core.signals_engine")
+            if signals_mod is not None:
+                self.signals_engine = signals_mod
+                # Backward-compatible aliases used by discover_capabilities()
+                self.services.setdefault("signals_engine", signals_mod)
+                self.services.setdefault("signal_engine", signals_mod)
+                self.services.setdefault("signals", signals_mod)
+                self.services.setdefault("signal_generator", signals_mod)
+
+            fv_mod = _try_import("core.fair_value_engine")
+            if fv_mod is not None:
+                self.fair_value_engine = fv_mod
+                self.services.setdefault("fair_value_engine", fv_mod)
+
+            # ------------------------------------------------------------
+            # 3b) Fair Value API config (from config/settings)
+            # ------------------------------------------------------------
             try:
-                from common.market_data_router import build_default_router  # type: ignore
+                from core.fair_value_config import FairValueAPIConfig as FVCfg  # type: ignore
 
-                router = build_default_router(ib=None, use_yahoo=True)
-                self.market_data_router = router
-                self.md_router = router
+                cfg_dict = getattr(self, "config", None) or {}
+                fv_cfg = FVCfg.from_settings(cfg_dict if isinstance(cfg_dict, dict) else {})
+                self.fair_value_api = fv_cfg
+                self.services.setdefault("fair_value_api", fv_cfg)
+
                 logger.info(
-                    "MarketDataRouter initialised via build_default_router(use_yahoo=True)"
+                    "FairValueAPIConfig initialized: enabled=%s, profile=%s, base_url=%s",
+                    getattr(fv_cfg, "enabled", None),
+                    getattr(fv_cfg, "profile", None),
+                    getattr(fv_cfg, "base_url", None),
                 )
-            except Exception as exc:  # pragma: no cover
-                logger.debug("MarketDataRouter init skipped/failed: %s", exc)
+            except Exception as exc:
+                logger.debug("FairValueAPIConfig init failed: %s", exc)
 
-        if self.market_data_router is not None:
-            self.services.setdefault("market_data_router", self.market_data_router)
+            # ------------------------------------------------------------
+            # 4) Agents manager (placeholder)
+            # ------------------------------------------------------------
+            if getattr(self, "agents_manager", None) is None:
+                try:
+                    self.agents_manager = SimpleNamespace(
+                        name="agents_manager_placeholder",
+                        online=True,
+                        status="online",
+                    )
+                    self.services.setdefault("agents_manager", self.agents_manager)
+                    self.services.setdefault("agents", self.agents_manager)
+                    self.services.setdefault("ai_agents", self.agents_manager)
+                except Exception:
+                    pass
 
-        # ---------- 3) Macro / Risk / Signals / Fair Value Engines ----------
-        # כאן אנחנו חושפים את המודולים עצמם כ-"engine objects" – מספיק לצורך capabilities.
-
-        try:
-            import core.macro_engine as macro_engine_mod  # type: ignore
-
-            self.macro_engine = macro_engine_mod
-            self.services.setdefault("macro_engine", macro_engine_mod)
-        except Exception:
-            pass
-
-        try:
-            import core.risk_engine as risk_engine_mod  # type: ignore
-
-            self.risk_engine = risk_engine_mod
-            self.services.setdefault("risk_engine", risk_engine_mod)
-        except Exception:
-            pass
-
-        try:
-            import core.signals_engine as signals_engine_mod  # type: ignore
-
-            self.signals_engine = signals_engine_mod
-            # discover_capabilities מחפש גם שמות אחרים:
-            self.services.setdefault("signals_engine", signals_engine_mod)
-            self.services.setdefault("signal_engine", signals_engine_mod)
-            self.services.setdefault("signals", signals_engine_mod)
-            self.services.setdefault("signal_generator", signals_engine_mod)
-        except Exception:
-            pass
-
-        try:
-            import core.fair_value_engine as fair_value_engine_mod  # type: ignore
-
-            self.fair_value_engine = fair_value_engine_mod
-            self.services.setdefault("fair_value_engine", fair_value_engine_mod)
-        except Exception:
-            pass
-
-        # ---------- 3b) Fair Value API config (from config.json + ENV) ----------
-        try:
-            from core.fair_value_config import FairValueAPIConfig as FVCfg  # type: ignore
-
-            # self.config הוא dict של כל config.json
-            fv_cfg = FVCfg.from_settings(self.config or {})
-            self.fair_value_api = fv_cfg
-            # נרשום גם ב-services למקרה שסוכנים ירצו לגשת אליו
-            self.services.setdefault("fair_value_api", fv_cfg)
-
-            logger.info(
-                "FairValueAPIConfig initialised: enabled=%s, profile=%s, base_url=%s",
-                fv_cfg.enabled,
-                fv_cfg.profile,
-                fv_cfg.base_url,
-            )
-        except Exception as exc:
-            logger.debug("FairValueAPIConfig init failed: %s", exc)
-
-        # ---------- 4) Agents manager (Placeholder מקצועי) ----------
-        # כרגע אין core/agents_manager.py, לכן נגדיר מנהל מינימלי כדי לאפשר את טאב Agents.
-        if self.agents_manager is None:
+            # ------------------------------------------------------------
+            # 5) Broker / IBKR router (best-effort, safe)
+            # ------------------------------------------------------------
             try:
-                self.agents_manager = SimpleNamespace(
-                    name="agents_manager_placeholder",
-                    online=True,
-                    status="online",
-                )
-                self.services.setdefault("agents_manager", self.agents_manager)
-                self.services.setdefault("agents", self.agents_manager)
-                self.services.setdefault("ai_agents", self.agents_manager)
-            except Exception:
-                pass
+                self.init_ib_router()
+            except Exception as exc:  # pragma: no cover
+                logger.warning("AppContext.init_ib_router() failed: %s", exc)
 
-        # ---------- 5) Broker / IBKR Order Router ----------
-        try:
-            self.init_ib_router()
-        except Exception as exc:  # pragma: no cover
-            logger.warning("AppContext.init_ib_router() failed: %s", exc)
+            # ------------------------------------------------------------
+            # 6) Finalize
+            # ------------------------------------------------------------
+            self._services_initialized = True  # type: ignore[attr-defined]
 
-        self._services_initialized = True  # type: ignore[attr-defined]
 
     def init_ib_router(self) -> None:
         """
@@ -1164,67 +1231,226 @@ def save_ctx_to_session(ctx: AppContext) -> None:
 
 def get_current_ctx() -> Optional[AppContext]:
     """
-    מנסה לבנות AppContext מתוך session_state['ctx'] (אם קיים).
-    הערה:
-    - זה מחזיר עותק חדש מה-dict; לקונטקסט ה"חי" בטאב עדיף get_app_context().
+    Builds a *detached* AppContext snapshot from st.session_state["ctx"] when present.
+
+    Behavior (HF-grade):
+    - Robust parsing: no KeyError; tolerates missing/legacy keys.
+    - Fallbacks: missing fields are filled from AppContext.get_global() when available.
+    - Provenance: if absent, auto-creates a minimal provenance for auditability.
+    - Never restores md_router from dict (explicitly None).
     """
+    # ----------------------------
+    # 0) Read raw dict safely
+    # ----------------------------
     try:
         raw = st.session_state.get("ctx")
     except Exception:
         raw = None
-    if not isinstance(raw, dict):
+
+    if not isinstance(raw, dict) or not raw:
         return None
 
+    # ----------------------------
+    # 1) Best-effort global ctx fallback
+    # ----------------------------
+    base: Optional[AppContext] = None
     try:
-        prov_raw = raw.get("provenance")
-        scen_raw = raw.get("scenario_overlay")
+        base = AppContext.get_global()
+    except Exception:
+        base = None
 
-        provenance = ContextProvenance(**prov_raw) if isinstance(
-            prov_raw, dict
-        ) else None
-        scenario_overlay = ScenarioOverlay(**scen_raw) if isinstance(
-            scen_raw, dict
-        ) else None
+    def _get(key: str, default: Any = None) -> Any:
+        v = raw.get(key, default)
+        return default if v is None else v
 
+    def _coerce_str(v: Any, default: str = "") -> str:
+        try:
+            s = str(v)
+            return s
+        except Exception:
+            return default
+
+    def _coerce_int(v: Any, default: int) -> int:
+        try:
+            return int(v)
+        except Exception:
+            return int(default)
+
+    def _coerce_float(v: Any, default: float) -> float:
+        try:
+            return float(v)
+        except Exception:
+            return float(default)
+
+    def _coerce_date(v: Any, default: Optional[date] = None) -> Optional[date]:
+        if v is None:
+            return default
+        if isinstance(v, date) and not isinstance(v, datetime):
+            return v
+        if isinstance(v, datetime):
+            return v.date()
+        try:
+            s = str(v).strip()
+            if not s:
+                return default
+            # Accept ISO date or ISO datetime
+            if "T" in s or " " in s:
+                dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+                return dt.date()
+            return date.fromisoformat(s)
+        except Exception:
+            return default
+
+    def _now_utc_iso() -> str:
+        return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+    # ----------------------------
+    # 2) Provenance + scenario overlay (pydantic-safe)
+    # ----------------------------
+    prov_raw = _get("provenance", None)
+    scen_raw = _get("scenario_overlay", None)
+
+    provenance: Optional[ContextProvenance] = None
+    if isinstance(prov_raw, dict) and prov_raw:
+        try:
+            provenance = ContextProvenance(**prov_raw)
+        except Exception:
+            provenance = None
+
+    scenario_overlay: Optional[ScenarioOverlay] = None
+    if isinstance(scen_raw, dict) and scen_raw:
+        try:
+            scenario_overlay = ScenarioOverlay(**scen_raw)
+        except Exception:
+            scenario_overlay = None
+
+    # If provenance is missing, create minimal HF-grade provenance
+    if provenance is None:
+        try:
+            provenance = ContextProvenance(
+                created_by="streamlit",
+                source_section=_coerce_str(_get("source_section", _get("section", "dashboard")), "dashboard"),
+                source_file="session_state.ctx",
+                notes="Auto-provenance: reconstructed AppContext from st.session_state['ctx']",
+                created_at=_now_utc_iso(),  # if your model supports it; harmless if extra ignored, but usually exists
+            )
+        except Exception:
+            # If your ContextProvenance doesn't accept created_at, fallback minimal
+            try:
+                provenance = ContextProvenance(
+                    created_by="streamlit",
+                    source_section=_coerce_str(_get("source_section", _get("section", "dashboard")), "dashboard"),
+                    source_file="session_state.ctx",
+                    notes="Auto-provenance: reconstructed AppContext from st.session_state['ctx']",
+                )
+            except Exception:
+                provenance = None
+
+    # ----------------------------
+    # 3) Resolve fields with legacy-key support + base fallback
+    # ----------------------------
+    # Dates
+    start_date = _coerce_date(_get("start_date"), default=getattr(base, "start_date", None))
+    end_date = _coerce_date(_get("end_date"), default=getattr(base, "end_date", None))
+
+    # Environment/profile (support env/environment)
+    env_raw = _get("environment", _get("env", getattr(base, "environment", APP_ENVIRONMENT)))
+    environment = _normalize_env_value(_coerce_str(env_raw, APP_ENVIRONMENT))
+
+    profile = _coerce_str(_get("profile", getattr(base, "profile", APP_PROFILE)), APP_PROFILE)
+
+    # Core required numeric fields with fallbacks
+    capital = _coerce_float(_get("capital", getattr(base, "capital", 0.0)), getattr(base, "capital", 0.0) or 0.0)
+
+    # Exposure/leverage: support legacy keys too
+    max_exposure_per_trade = _coerce_float(
+        _get("max_exposure_per_trade", getattr(base, "max_exposure_per_trade", 0.0)),
+        getattr(base, "max_exposure_per_trade", 0.0) or 0.0,
+    )
+
+    # Some code uses max_leverage, others max_gross_exposure
+    max_leverage = _coerce_float(
+        _get("max_leverage", _get("max_gross_exposure", getattr(base, "max_leverage", 1.0))),
+        getattr(base, "max_leverage", 1.0) if base is not None else 1.0,
+    )
+
+    # Seeds/run_id
+    seed = _coerce_int(_get("seed", getattr(base, "seed", 1337)), getattr(base, "seed", 1337) if base else 1337)
+    run_id = _coerce_str(_get("run_id", getattr(base, "run_id", "")), getattr(base, "run_id", "") if base else "")
+    if not run_id.strip():
+        # deterministic enough for a reconstructed ctx snapshot
+        run_id = f"ctx-rebuild-{seed}-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+
+    # Misc fields
+    section = _coerce_str(_get("section", getattr(base, "section", "dashboard")), "dashboard")
+
+    pairs = list(_get("pairs", getattr(base, "pairs", [])) or [])
+    config = dict(_get("config", getattr(base, "config", {})) or {})
+    controls = dict(_get("controls", getattr(base, "controls", {})) or {})
+
+    ctx_version = _coerce_str(_get("ctx_version", getattr(base, "ctx_version", CURRENT_CTX_SCHEMA_VERSION)), CURRENT_CTX_SCHEMA_VERSION)
+    config_hash = _get("config_hash", getattr(base, "config_hash", None))
+    parent_run_id = _get("parent_run_id", getattr(base, "parent_run_id", None))
+    source_section = _get("source_section", getattr(base, "source_section", None))
+    tags = dict(_get("tags", getattr(base, "tags", {})) or {})
+
+    health_score = _get("health_score", getattr(base, "health_score", None))
+    health_flags = list(_get("health_flags", getattr(base, "health_flags", [])) or [])
+    policy_status = dict(_get("policy_status", getattr(base, "policy_status", {})) or {})
+    risk_budget = _get("risk_budget", getattr(base, "risk_budget", None))
+
+    experiment_name = _get("experiment_name", getattr(base, "experiment_name", None))
+    experiment_group = _get("experiment_group", getattr(base, "experiment_group", None))
+    run_label = _get("run_label", getattr(base, "run_label", None))
+
+    reward = _get("reward", getattr(base, "reward", None))
+    state_features = _get("state_features", getattr(base, "state_features", None))
+    context_notes = _get("context_notes", getattr(base, "context_notes", None))
+
+    # Hard-stop only if we truly cannot construct dates (since many engines depend on them)
+    if start_date is None or end_date is None:
+        return None
+
+    # ----------------------------
+    # 4) Construct ctx (md_router intentionally None)
+    # ----------------------------
+    try:
         ctx = AppContext(
-            start_date=date.fromisoformat(str(raw["start_date"])),
-            end_date=date.fromisoformat(str(raw["end_date"])),
-            capital=float(raw["capital"]),
-            max_exposure_per_trade=float(raw["max_exposure_per_trade"]),
-            max_leverage=float(raw["max_leverage"]),
-            pairs=list(raw.get("pairs", [])),
-            config=dict(raw.get("config", {})),
-            controls=dict(raw.get("controls", {})),
-            seed=int(raw["seed"]),
-            run_id=str(raw["run_id"]),
-            section=str(raw.get("section", "dashboard")),
-            profile=str(raw.get("profile", APP_PROFILE)),
-            environment=_normalize_env_value(
-                str(raw.get("environment", APP_ENVIRONMENT))
-            ),
-            md_router=None,  # לא משחזרים router דרך dict
-            ctx_version=str(raw.get("ctx_version", CURRENT_CTX_SCHEMA_VERSION)),
-            config_hash=raw.get("config_hash"),
-            parent_run_id=raw.get("parent_run_id"),
-            source_section=raw.get("source_section"),
-            tags=dict(raw.get("tags", {})),
-            health_score=raw.get("health_score"),
-            health_flags=list(raw.get("health_flags", [])),
-            policy_status=dict(raw.get("policy_status", {})),
-            risk_budget=raw.get("risk_budget"),
+            start_date=start_date,
+            end_date=end_date,
+            capital=capital,
+            max_exposure_per_trade=max_exposure_per_trade,
+            max_leverage=max_leverage,
+            pairs=pairs,
+            config=config,
+            controls=controls,
+            seed=seed,
+            run_id=run_id,
+            section=section,
+            profile=profile,
+            environment=environment,
+            md_router=None,  # do not restore router from dict
+            ctx_version=ctx_version,
+            config_hash=config_hash,
+            parent_run_id=parent_run_id,
+            source_section=source_section,
+            tags=tags,
+            health_score=health_score,
+            health_flags=health_flags,
+            policy_status=policy_status,
+            risk_budget=risk_budget,
             scenario_overlay=scenario_overlay,
             provenance=provenance,
-            experiment_name=raw.get("experiment_name"),
-            experiment_group=raw.get("experiment_group"),
-            run_label=raw.get("run_label"),
-            reward=raw.get("reward"),
-            state_features=raw.get("state_features"),
-            context_notes=raw.get("context_notes"),
+            experiment_name=experiment_name,
+            experiment_group=experiment_group,
+            run_label=run_label,
+            reward=reward,
+            state_features=state_features,
+            context_notes=context_notes,
         )
         return ctx
     except Exception:
         return None
-
 
 # ========= Auto-tags & basic health scoring =========
 

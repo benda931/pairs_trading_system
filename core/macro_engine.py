@@ -76,7 +76,7 @@ import pandas as pd
 # Imports: risk sizing & metrics (helpers)
 # =============================================================================
 try:
-    from common.risk_Helpers import (
+    from common.risk_helpers import (
         target_weights_from_returns,
         apply_multipliers,
         portfolio_metrics,
@@ -84,7 +84,7 @@ try:
         normalize_weights,
     )
     try:
-        from common.risk_Helpers import DrawdownGate
+        from common.risk_helpers import DrawdownGate
     except Exception:  # DrawdownGate לא חובה
         DrawdownGate = None  # type: ignore[attr-defined]
 except Exception:
@@ -256,6 +256,10 @@ def _regimes_prob_from_df(regime_df: pd.DataFrame) -> pd.DataFrame:
     out = pd.DataFrame(rows).set_index("date").sort_index()
     # החלקה קלה (rolling mean) כדי להקטין רעש
     out = out.rolling(5, min_periods=1).mean()
+    # Normalize rows to sum to 1.0 (regime probabilities)
+    row_sums = out.sum(axis=1)
+    row_sums = row_sums.replace(0, 1.0)  # avoid division by zero
+    out = out.div(row_sums, axis=0)
     return out
 
 

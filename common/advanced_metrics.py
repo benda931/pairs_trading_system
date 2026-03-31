@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """
 advanced_metrics.py — Advanced statistical metrics
 ==================================================
@@ -41,6 +41,7 @@ from typing import (
     MutableMapping,
     Optional,
     Sequence as _SequenceAlias,
+    List,
 )
 
 # Typing compatibility for Sequence across Python versions
@@ -66,6 +67,23 @@ from common.matrix_helpers import (
     SeriesND,
     apply_matrix_series_parallel,
 )
+# במקום import ישיר שגורם ל-circular
+try:
+    from common import matrix_helpers as _mh  # type: ignore[import]
+except Exception:  # pragma: no cover
+    _mh = None
+
+
+def ensure_matrix_series_safe(obj, *args, **kwargs):
+    """
+    עטיפה בטוחה ל-matrix_helpers.ensure_matrix_series כדי להימנע מ-circular import.
+
+    אם matrix_helpers זמין ויש בו ensure_matrix_series → משתמשים בו.
+    אחרת → מחזירים את obj כמו שהוא (fallback פשוט).
+    """
+    if _mh is not None and hasattr(_mh, "ensure_matrix_series"):
+        return _mh.ensure_matrix_series(obj, *args, **kwargs)  # type: ignore[call-arg]
+    return obj
 
 __version__ = "0.7.0"
 
@@ -266,6 +284,7 @@ __all__ = [
     "mahalanobis_distance",
     "rolling_mahalanobis_distance",
     "rolling_distance_correlation",
+    "rolling_covariance",
     # Spectral (FFT & friends)
     "spectral_analysis",
     "rolling_spectral_analysis",
@@ -882,6 +901,81 @@ def rolling_distance_correlation(
             results.append(float("nan"))
 
     return pd.Series(results, index=series.index)
+
+@timeit
+def rolling_covariance(
+    series: SeriesND,
+    *,
+    vol: SeriesND | None = None,
+    window: int = 20,
+    use_parallel: bool = False,
+) -> pd.Series:
+    """
+    Rolling covariance-like estimate over a Series of matrices.
+
+    Returns
+    -------
+    pd.Series (dtype=object)
+        - For i < window-1: np.nan
+        - For i >= window-1: np.ndarray (same shape as each matrix)
+
+    Notes
+    -----
+    This is a compatibility primitive used by legacy optimizers.
+    It computes a rolling *mean* of matrices (a stable covariance proxy).
+    If `vol` is provided (same index), we also compute its rolling mean and
+    attempt to normalize elementwise (best-effort, safe fallback).
+    """
+    series = ensure_matrix_series(series, "rolling_covariance")
+    if window <= 1:
+        # degenerate: just return matrices themselves (with no NaN prefix)
+        return series.astype(object)
+
+    vol_series: pd.Series | None = None
+    if vol is not None:
+        vol_series = ensure_matrix_series(vol, "rolling_covariance(vol)")
+
+    out: List[Any] = [np.nan] * len(series)
+
+    # helper for one window computation
+    def _compute_window(mats: List[np.ndarray], vols: List[np.ndarray] | None) -> np.ndarray:
+        stack = np.stack([np.asarray(m, dtype=float) for m in mats], axis=0)
+        avg = np.nanmean(stack, axis=0)
+
+        if vols is None:
+            return avg
+
+        try:
+            vstack = np.stack([np.asarray(v, dtype=float) for v in vols], axis=0)
+            vavg = np.nanmean(vstack, axis=0)
+            eps = 1e-12
+            return avg / (np.abs(vavg) + eps)
+        except Exception:
+            # if shapes mismatch or something weird – return un-normalized
+            return avg
+
+    if use_parallel:
+        # parallel over windows (lightweight; safe)
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        futures = {}
+        with ThreadPoolExecutor() as ex:
+            for i in range(window - 1, len(series)):
+                mats = list(series.iloc[i - window + 1 : i + 1])
+                vols = list(vol_series.iloc[i - window + 1 : i + 1]) if vol_series is not None else None
+                futures[ex.submit(_compute_window, mats, vols)] = i
+
+            for fut in as_completed(futures):
+                i = futures[fut]
+                out[i] = fut.result()
+    else:
+        for i in range(window - 1, len(series)):
+            mats = list(series.iloc[i - window + 1 : i + 1])
+            vols = list(vol_series.iloc[i - window + 1 : i + 1]) if vol_series is not None else None
+            out[i] = _compute_window(mats, vols)
+
+    return pd.Series(out, index=series.index, dtype=object)
+
 # ===========================================================================
 # (סוף החלק הראשון של advanced_metrics.py)
 # ===========================================================================

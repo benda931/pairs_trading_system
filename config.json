@@ -67,7 +67,7 @@
     "note": "250 זוגות אוטומטיים מדורגים עם תחומים מגוונים"
   },
   "version": "1.0.0",
-  "last_updated": "2025-12-10T18:58:32Z",
+  "last_updated": "2026-03-30T13:55:07Z",
   "theme": "light",
   "accent": "Blue",
   "language": "he",
@@ -100,5 +100,6 @@
   "max_leverage": 5.0,
   "per_pair_risk_budget": 0.01,
   "engine_url": null,
-  "sql_store_url": null
+  "sql_store_url": null,
+  "FMP_API_KEY": "bwMpyASX8gBkNFoVkMfJJ5ci92SIcIs5"
 }

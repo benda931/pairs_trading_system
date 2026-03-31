@@ -175,6 +175,39 @@ def diagnose_app_context(verbose: bool = False) -> Dict[str, Any]:
     profile = sdict.get("profile") or _safe_get(settings, "profile", None)
     logger.info("env=%r, profile=%r", env, profile)
 
+    # --- Phase 1 runtime meta (HF-grade) ---
+    ctx_env = getattr(ctx, "environment", None)
+    ctx_profile = getattr(ctx, "profile", None)
+    ctx_run_id = getattr(ctx, "run_id", None)
+    ctx_seed = getattr(ctx, "seed", None)
+
+    # Provenance (optional)
+    prov = getattr(ctx, "provenance", None)
+    ctx_git = getattr(prov, "git_rev", None) if prov is not None else None
+    ctx_created_at = getattr(prov, "created_at", None) if prov is not None else None
+
+    logger.info(
+        "ctx.environment=%r, ctx.profile=%r, run_id=%r, seed=%r, git_rev=%r, created_at=%r",
+        ctx_env,
+        ctx_profile,
+        ctx_run_id,
+        ctx_seed,
+        ctx_git,
+        ctx_created_at,
+    )
+
+    # Warn on mismatch between settings and ctx (should normally match)
+    if (env is not None and ctx_env is not None and str(env) != str(ctx_env)) or (
+        profile is not None and ctx_profile is not None and str(profile) != str(ctx_profile)
+    ):
+        logger.warning(
+            "ENV/PROFILE mismatch: settings(env=%r, profile=%r) vs ctx(env=%r, profile=%r)",
+            env,
+            profile,
+            ctx_env,
+            ctx_profile,
+        )
+
     # IB-related
     logger.info("--- IBKR settings ---")
     for key in ("ib_enable", "ib_mode", "ib_host", "ib_port", "ib_client_id", "ib_account"):

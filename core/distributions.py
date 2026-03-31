@@ -66,7 +66,7 @@ core/distributions.py — Central Optuna distribution factory (HF-grade, v3)
 from __future__ import annotations
 
 from functools import lru_cache
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Mapping
 
 import json
 import logging
@@ -102,7 +102,9 @@ __all__ = [
     "get_parameters_by_tag",
     "recommend_sampler",
     "recommend_n_trials",
+    "build_distributions",  
 ]
+
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -139,6 +141,65 @@ def make_json_safe(obj: Any) -> Any:
         return [make_json_safe(v) for v in obj]
     return str(obj)
 
+def build_distributions(
+    ranges: Mapping[str, Tuple[float, float, float]]
+) -> Dict["BaseDistribution", Any]:  # type: ignore[valid-type]
+    """
+    Build Optuna distributions from a simple ranges dict:
+        {param: (low, high, step)}
+
+    This is a lightweight adapter used by legacy modules (e.g. meta_optimization)
+    that operate on explicit ranges rather than core.ranges config objects.
+
+    Returns:
+        Dict[str, optuna.distributions.BaseDistribution]
+
+    Notes:
+        - Uses modern FloatDistribution / IntDistribution / CategoricalDistribution
+          where applicable (so callers can safely use suggest_* without private APIs).
+        - Auto-adjusts high to be divisible by step (reduces Optuna warnings).
+    """
+    try:
+        from optuna.distributions import FloatDistribution, IntDistribution, CategoricalDistribution  # type: ignore
+    except Exception as e:  # pragma: no cover
+        raise RuntimeError("optuna is required for build_distributions()") from e
+
+    out: Dict[str, Any] = {}
+
+    for name, (lo, hi, step) in dict(ranges).items():
+        lo_f = float(lo)
+        hi_f = float(hi)
+        st_f = float(step)
+
+        if hi_f <= lo_f:
+            raise ValueError(f"{name}: invalid range (low={lo_f}, high={hi_f})")
+
+        if st_f <= 0:
+            # treat as continuous
+            out[name] = FloatDistribution(lo_f, hi_f)
+            continue
+
+        # int vs float heuristic
+        is_int = all(float(x).is_integer() for x in (lo_f, hi_f, st_f))
+        if is_int:
+            lo_i, hi_i, st_i = int(lo_f), int(hi_f), int(st_f)
+            if st_i <= 0:
+                st_i = 1
+            # make (hi-lo) divisible by step
+            span = hi_i - lo_i
+            hi_adj = hi_i - (span % st_i) if span > 0 else hi_i
+            if hi_adj < lo_i:
+                hi_adj = lo_i
+            out[name] = IntDistribution(lo_i, hi_adj, step=st_i)
+        else:
+            # float grid with step (adjust hi)
+            k = int((hi_f - lo_f) // st_f)
+            hi_adj = lo_f + k * st_f
+            if hi_adj <= lo_f:
+                hi_adj = hi_f
+            out[name] = FloatDistribution(lo_f, float(hi_adj), step=st_f)
+
+    return out
 
 # ---------------------------------------------------------------------------
 # Core factory

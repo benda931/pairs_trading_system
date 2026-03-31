@@ -178,25 +178,19 @@ class DashboardService:
         )
 
     def get_smart_scan_universe(self, ctx: "DashboardContext") -> pd.DataFrame:
-        """
-        מחזיר Universe של זוגות + פרמטרים ראשיים ל-Smart Scan.
-
-        משתמש ב-SqlStore.load_pair_quality:
-            - sym_x, sym_y → pair
-            - z_entry, z_exit, lookback, hl_bars, corr_min (אם קיימים)
-        """
         if self.sql_store is None:
             logger.info("get_smart_scan_universe: sql_store is None → returning empty df.")
             return pd.DataFrame()
 
-        try:
-            df = self.sql_store.load_pair_quality(
+        def _load() -> pd.DataFrame:
+            return self.sql_store.load_pair_quality(
                 env=getattr(ctx, "env", None),
                 section="data_quality",
                 latest_only=True,
             )
-        except Exception as e:
-            logger.warning("DashboardService.get_smart_scan_universe failed: %s", e)
+
+        df = self._safe_call("get_smart_scan_universe", _load, default=pd.DataFrame())
+        if df is None or df.empty:
             return pd.DataFrame()
 
         # לוודא שתמיד יש עמודת pair וטור אחד לפחות

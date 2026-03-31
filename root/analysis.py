@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """
 analysis_core.py — מנוע ניתוח ודירוג ברמת קרן גידור
 ====================================================
@@ -46,6 +46,7 @@ from typing import (
     Optional,
     Sequence,
     Tuple,
+    Union,
 )
 
 import numpy as np
@@ -122,7 +123,74 @@ def _safe_corr(a: pd.Series, b: pd.Series) -> float:
         return float(np.corrcoef(a_arr, b_arr)[0, 1])
     except Exception:
         return float("nan")
-    
+
+
+def get_walk_forward_splits(
+    dates: Union[pd.Index, Sequence],
+    *,
+    train_window: int,
+    test_window: int,
+    step: int,
+) -> List[Tuple[slice, slice]]:
+    """
+    Build walk-forward splits as (train_slice, test_slice) using integer positions.
+
+    This is a legacy-compat function required by core.full_parameter_optimization.
+
+    Parameters
+    ----------
+    dates:
+        A pandas Index (e.g. DatetimeIndex) or any sequence representing the time axis.
+        Only length is used; returned splits are iloc-compatible.
+    train_window:
+        Number of observations in the training window.
+    test_window:
+        Number of observations in the test window.
+    step:
+        Step size for rolling the window forward.
+
+    Returns
+    -------
+    List[Tuple[slice, slice]]
+        Each element is (train_slice, test_slice), suitable for:
+            v.iloc[train_slice], v.iloc[test_slice]
+
+    Notes
+    -----
+    - Rolling window style:
+        train = [t : t+train_window)
+        test  = [t+train_window : t+train_window+test_window)
+        t advances by `step`.
+    """
+    n = len(dates)
+
+    if train_window <= 0:
+        raise ValueError("train_window must be > 0")
+    if test_window <= 0:
+        raise ValueError("test_window must be > 0")
+    if step <= 0:
+        raise ValueError("step must be > 0")
+
+    splits: List[Tuple[slice, slice]] = []
+    t0 = 0
+
+    while True:
+        train_start = t0
+        train_end = train_start + train_window
+        test_start = train_end
+        test_end = test_start + test_window
+
+        if test_end > n:
+            break
+
+        splits.append((slice(train_start, train_end), slice(test_start, test_end)))
+        t0 += step
+
+        if t0 >= n:
+            break
+
+    return splits
+
 class VolRegime(str, Enum):
     """סיווגי משטר תנודתיות בסיסיים."""
 

@@ -265,6 +265,54 @@ def _safe_series_local(df: pd.DataFrame, col: str) -> pd.Series:
         return pd.Series(dtype=float)
     return pd.to_numeric(df[col], errors="coerce")
 
+def _safe_float_or_none(x: Any) -> Optional[float]:
+    try:
+        if x is None:
+            return None
+        v = float(x)
+        if not (v == v):  # NaN
+            return None
+        return v
+    except Exception:
+        return None
+
+def push_fundamentals_metrics_to_ctx(
+    *,
+    valuation_score: Any,
+    fund_score: Any,
+    sharpe_60d: Any = None,
+    max_dd_60d: Any = None,
+    ctx_key: str = "fundamentals_metrics",
+) -> None:
+    """
+    שומר מדדים פנדומנטליים רלוונטיים ל-Tab Comparison בתוך st.session_state[ctx_key].
+
+    Sharpe / Max DD אופציונליים – אפשר להעביר None/לא להעביר בכלל.
+    """
+    metrics: Dict[str, float] = {}
+
+    vs = _safe_float_or_none(valuation_score)
+    if vs is not None:
+        metrics["valuation_score"] = vs
+        metrics["fundamental_score"] = vs
+        metrics["value_score"] = vs
+
+    fs = _safe_float_or_none(fund_score)
+    if fs is not None:
+        metrics["fund_score"] = fs
+        metrics["tab_score"] = fs
+
+    sh = _safe_float_or_none(sharpe_60d)
+    if sh is not None:
+        metrics["sharpe_60d"] = sh
+        metrics["fund_sharpe_60d"] = sh
+
+    dd = _safe_float_or_none(max_dd_60d)
+    if dd is not None:
+        metrics["max_dd_60d"] = dd
+        metrics["fund_max_dd_60d"] = dd
+
+    st.session_state[ctx_key] = metrics
 
 def _load_price_history(
     symbol: str,
@@ -320,6 +368,58 @@ def _classify_field_theme(field: str) -> str:
         return "growth"
     return "other"
 
+def _safe_float_or_none(x: Any) -> Optional[float]:
+    try:
+        if x is None:
+            return None
+        v = float(x)
+        if not (v == v):  # NaN
+            return None
+        return v
+    except Exception:
+        return None
+
+def push_fundamentals_metrics_to_ctx(
+    *,
+    valuation_score: Any,
+    fund_score: Any,
+    sharpe_60d: Any = None,
+    max_dd_60d: Any = None,
+    ctx_key: str = "fundamentals_metrics",
+) -> None:
+    """
+    שומר מדדים פנדומנטליים רלוונטיים ל-Tab Comparison בתוך st.session_state[ctx_key].
+
+    משתדל לשמור כמה aliases כדי ש-Tab Comparison Lab יוכל למצוא אותם:
+      - valuation_score / fundamental_score / value_score
+      - fund_score / tab_score
+      - sharpe_60d / fund_sharpe_60d
+      - max_dd_60d / fund_max_dd_60d
+    """
+    metrics: Dict[str, float] = {}
+
+    vs = _safe_float_or_none(valuation_score)
+    if vs is not None:
+        metrics["valuation_score"] = vs
+        metrics["fundamental_score"] = vs
+        metrics["value_score"] = vs
+
+    fs = _safe_float_or_none(fund_score)
+    if fs is not None:
+        metrics["fund_score"] = fs
+        metrics["tab_score"] = fs
+
+    sh = _safe_float_or_none(sharpe_60d)
+    if sh is not None:
+        metrics["sharpe_60d"] = sh
+        metrics["fund_sharpe_60d"] = sh
+
+    dd = _safe_float_or_none(max_dd_60d)
+    if dd is not None:
+        metrics["max_dd_60d"] = dd
+        metrics["fund_max_dd_60d"] = dd
+
+    st.session_state[ctx_key] = metrics
 # ============================================================
 # Universe selector
 # ============================================================
@@ -453,7 +553,7 @@ def _render_universe_overview_section(
             st.metric("מדד מוביל", f"{best_sym} ({best_val:.1f})")
 
     st.markdown("##### טבלת Snapshot – ציונים לכל המדדים")
-    st.dataframe(snapshot_df.round(2), width = "stretch")
+    st.dataframe(snapshot_df.round(2), use_container_width=True)
     # Heatmap בסיסי של Scores
     score_cols_for_heatmap = [c for c in ["value_score", "quality_score", "growth_score", "composite_score"] if c in snapshot_df.columns]
     if score_cols_for_heatmap:
@@ -467,7 +567,7 @@ def _render_universe_overview_section(
             y=df_hm.columns,
             aspect="auto",
         )
-        st.plotly_chart(fig_hm, width = "stretch")
+        st.plotly_chart(fig_hm, use_container_width=True)
 
 
     # Top / Bottom לפי ה-score שנבחר
@@ -484,7 +584,8 @@ def _render_universe_overview_section(
         if not top_df.empty:
             st.dataframe(
                 top_df[[selected_score_col]].round(2),
-                width = "stretch")
+                use_container_width=True,
+            )
         else:
             st.info("אין נתונים.")
 
@@ -498,7 +599,8 @@ def _render_universe_overview_section(
         if not bottom_df.empty:
             st.dataframe(
                 bottom_df[[selected_score_col]].round(2),
-                width = "stretch")
+                use_container_width=True,
+            )
         else:
             st.info("אין נתונים.")
 
@@ -513,7 +615,7 @@ def _render_universe_overview_section(
     )
     if not buckets.empty:
         counts = buckets.value_counts().to_frame("count")
-        st.dataframe(counts, width = "stretch")
+        st.dataframe(counts, use_container_width=True)
     else:
         st.info("לא ניתן לבנות Buckets (מעט מדי נתונים).")
 
@@ -522,7 +624,7 @@ def _render_universe_overview_section(
         st.markdown("##### סיכום מומנטום ציונים ב-Universe (תאריך אחרון)")
         mom_summary = summarize_universe_momentum(panel)
         if not mom_summary.empty:
-            st.dataframe(mom_summary.round(3), width = "stretch")
+            st.dataframe(mom_summary.round(3), use_container_width=True)
         else:
             st.info("אין מספיק נתוני מומנטום.")
 
@@ -530,7 +632,7 @@ def _render_universe_overview_section(
         st.markdown("##### סיכום יציבות ציונים ב-Universe (תאריך אחרון)")
         stab_summary = summarize_universe_stability(panel)
         if not stab_summary.empty:
-            st.dataframe(stab_summary.round(3), width = "stretch")
+            st.dataframe(stab_summary.round(3), use_container_width=True)
         else:
             st.info("אין מספיק נתוני יציבות.")
 
@@ -673,7 +775,7 @@ def _render_pair_fundamental_comparison_section(
                 "rel_change_diff": "פער ∆% (X - Y)",
             }
         )
-        st.dataframe(df_show, width = "stretch")
+        st.dataframe(df_show, use_container_width=True)
 
         st.markdown("##### 🗣 סיכום מילולי קצר")
         top_n = min(5, df_pair.shape[0])
@@ -700,7 +802,7 @@ def _render_pair_fundamental_comparison_section(
             y="rel_change_diff_pct",
             title=f"פערי ∆% פנדומנטל לטובת {sym_x.upper()} מול {sym_y.upper()}",
         )
-        st.plotly_chart(fig_bar, width = "stretch")
+        st.plotly_chart(fig_bar, use_container_width=True)
 
 # ============================================================
 # Fundamental vs Spread Matrix (∆Fundamentals vs ∆Spread)
@@ -868,7 +970,7 @@ def _render_fundamental_vs_spread_section(
         st.markdown(
             f"**X = {sym_x.upper()}, Y = {sym_y.upper()}, טווח ≈ {int(lookback_days/365)} שנים**"
         )
-        st.dataframe(show.round(4), width = "stretch")
+        st.dataframe(show.round(4), use_container_width=True)
 
         # הדגשת דיסוננסים – השורות עם dislocation_score גבוה
         if "dislocation_score" in matrix.columns:
@@ -879,7 +981,7 @@ def _render_fundamental_vs_spread_section(
                 show_dis = df_dis[["rel_change_diff", "spread_change", "dislocation_score"]].copy()
                 show_dis["rel_change_diff_pct"] = (show_dis["rel_change_diff"] * 100.0).round(2)
                 show_dis["spread_change_pct"] = (show_dis["spread_change"] * 100.0).round(2)
-                st.dataframe(show_dis.round(4), width = "stretch")
+                st.dataframe(show_dis.round(4), use_container_width=True)
 
         st.markdown("##### 🧭 פירוש:")
         st.write(
@@ -1109,7 +1211,7 @@ def _render_pair_idea_factory_section(
                 color_continuous_scale="Blues",
                 title="התפלגות רעיונות לפי field וכיוון",
             )
-            st.plotly_chart(fig_hm, width = "stretch")
+            st.plotly_chart(fig_hm, use_container_width=True)
 
         cols = [
             "pair",
@@ -1124,7 +1226,7 @@ def _render_pair_idea_factory_section(
         ]
         cols = [c for c in cols if c in df_show.columns]
 
-        st.dataframe(df_show[cols].round(3), width = "stretch")
+        st.dataframe(df_show[cols].round(3), use_container_width=True)
 
         st.markdown("##### 🗣 פירוש קצר לכל רעיון")
         for _, row in df_show.iterrows():
@@ -1223,7 +1325,7 @@ def _render_single_index_scores_chart(
         title=f"Scores History – {symbol}",
     )
     fig.update_layout(legend=dict(orientation="h", y=-0.2))
-    st.plotly_chart(fig, width = "stretch")
+    st.plotly_chart(fig, use_container_width=True)
 
 
 def _render_single_index_percentiles(symbol: str) -> None:
@@ -1249,7 +1351,7 @@ def _render_single_index_percentiles(symbol: str) -> None:
         if pct_df.empty:
             st.warning("לא נמצאו מספיק נתונים לחישוב אחוזונים.")
             return
-        st.dataframe(pct_df.round(1), width = "stretch")
+        st.dataframe(pct_df.round(1), use_container_width=True)
 
 
 def _render_single_index_price_vs_metric(
@@ -1284,7 +1386,7 @@ def _render_single_index_price_vs_metric(
         title=f"{symbol} – {metric_field} vs Composite Score",
     )
     fig.update_layout(legend=dict(orientation="h", y=-0.2))
-    st.plotly_chart(fig, width = "stretch")
+    st.plotly_chart(fig, use_container_width=True)
 
 
 def _render_single_index_return_decomposition(
@@ -1357,7 +1459,7 @@ def _render_single_index_return_decomposition(
         }
     )
     df_deco["value_pct"] = (df_deco["value"] * 100.0).round(2)
-    st.dataframe(df_deco, width = "stretch")
+    st.dataframe(df_deco, use_container_width=True)
 
     if bench_symbol:
         st.caption(f"(Hook) אפשר בהמשך להשוות decomposition מול Benchmark {bench_symbol}.")
@@ -1630,7 +1732,7 @@ def _render_reports_and_export_section(
         if df_ideas is None or df_ideas.empty:
             st.info("אין טבלת רעיונות זוגות זמינה מהריצה הנוכחית.")
         else:
-            st.dataframe(df_ideas.head(20).round(3), width = "stretch")
+            st.dataframe(df_ideas.head(20).round(3), use_container_width=True)
             _download_button_for_csv(
                 "⬇️ הורד את כל רעיונות הזוגות כ-CSV",
                 df_ideas,
@@ -1701,6 +1803,35 @@ def render_index_fundamentals_tab(app_ctx: Optional[Any] = None) -> None:
 
     # 1. Universe Overview
     summary = _render_universe_overview_section(cfg, universe)
+
+    # ---- הזנת מדדי Fundamentals ל-Tab Comparison (fundamentals_metrics) ----
+    try:
+        snapshot_df = get_universe_score_snapshot(
+            summary,
+            include_momentum=cfg.ui.show_momentum,
+            include_stability=cfg.ui.show_stability,
+        )
+
+        if snapshot_df is not None and not snapshot_df.empty:
+            valuation_score = None
+            fund_total_score = None
+
+            if "value_score" in snapshot_df.columns:
+                valuation_score = float(snapshot_df["value_score"].mean())
+
+            if "composite_score" in snapshot_df.columns:
+                fund_total_score = float(snapshot_df["composite_score"].mean())
+
+            if valuation_score is not None and fund_total_score is not None:
+                push_fundamentals_metrics_to_ctx(
+                    valuation_score=valuation_score,   # 0..100 בערך – ציון Value ממוצע
+                    fund_score=fund_total_score,       # 0..100 – Composite ממוצע
+                    # כרגע אין לך Sharpe/DD ברמת Fundamentals, אז נשאיר None
+                    sharpe_60d=None,
+                    max_dd_60d=None,
+                )
+    except Exception as exc:
+        logger.debug("push_fundamentals_metrics_to_ctx failed (non-fatal): %s", exc)
 
     # שמירה ל-app_ctx
     if isinstance(app_ctx, dict):
