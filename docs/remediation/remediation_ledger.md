@@ -35,7 +35,7 @@
 | ID | Title | Severity | Status | Strategy | Evidence Files |
 |----|-------|----------|--------|----------|---------------|
 | P1-ML | Meta-label ML overlay: training + inference + pipeline wiring | P1 | COMPLETE | MetaLabelModel training script (scripts/train_meta_label.py), wired to SignalPipeline via ml_quality_hook. Deterministic fallback preserved. 7 integration tests. | scripts/train_meta_label.py, ml/models/meta_labeler.py, core/signal_pipeline.py |
-| P1-AGENTS | Agents registered but never dispatched | P1 | DOWNGRADED | Truthful scaffold marking; orchestration PLANNED | agents/registry.py |
+| P1-AGENTS | DataIntegrityAgent dispatched from orchestrator | P1 | COMPLETE | run_daily_pipeline() dispatches DataIntegrityAgent after data_refresh. Typed AgentTask/AgentResult contracts, audit trail, READ_ONLY permissions. Other 32 agents remain scaffold. | core/orchestrator.py, agents/registry.py, agents/monitoring_agents.py |
 | P1-GOV | Governance never enforced at runtime | P1 | IN_PROGRESS | Wire one gate: model promotion | governance/engine.py, ml/registry/ |
 | P1-AUDIT | Audit chains empty for all operational decisions | P1 | DOWNGRADED | Truthful scaffold marking | audit/chain.py |
 | P1-SURV2 | SurveillanceEngine never called from operational code | P1 | IN_PROGRESS | Wire one rule: stale data | surveillance/engine.py |

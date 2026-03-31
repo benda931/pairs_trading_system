@@ -165,7 +165,7 @@ class AgentRegistry:
             "agent_name": task.agent_name,
             "task_type": task.task_type,
             "status": result.status.value,
-            "duration_seconds": result.duration_seconds,
+            "duration_seconds": result.duration_ms / 1000.0 if result.duration_ms else 0.0,
             "error": result.error,
             "dispatched_at": datetime.utcnow().isoformat(),
             "n_audit_entries": len(result.audit_trail),

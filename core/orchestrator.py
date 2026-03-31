@@ -316,7 +316,11 @@ class PairsOrchestrator:
         """
         Execute the full daily pipeline in dependency order.
 
-        Pipeline: health_check → data_refresh → compute_signals → risk_check
+        Pipeline: health_check → data_refresh → agent_checks → compute_signals → risk_check
+
+        The agent_checks step dispatches the DataIntegrityAgent to validate
+        price data quality after data refresh (P1-AGENTS).  This is the first
+        real agent dispatch from operational code.
         """
         logger.info("=" * 60)
         logger.info("Starting daily pipeline at %s", datetime.now(timezone.utc).isoformat())
@@ -331,6 +335,13 @@ class PairsOrchestrator:
                 result = self._execute_task(task)
                 results.append(result)
                 self._results.append(result)
+
+            # After data_refresh, dispatch agent integrity check (P1-AGENTS)
+            if name == "data_refresh":
+                agent_result = self.run_agent_data_integrity_check()
+                if agent_result is not None:
+                    results.append(agent_result)
+                    self._results.append(agent_result)
 
         # Summary
         ok = sum(1 for r in results if r.status == "success")
@@ -347,6 +358,76 @@ class PairsOrchestrator:
         })
 
         return results
+
+    def run_agent_data_integrity_check(self) -> Optional[TaskResult]:
+        """
+        Dispatch the DataIntegrityAgent to validate price data quality.
+
+        This is the first real agent dispatch from operational code (P1-AGENTS).
+        The agent is READ_ONLY — it does not mutate any state.  It returns
+        typed AgentResult with audit trail.
+
+        Returns
+        -------
+        TaskResult or None
+            TaskResult wrapping the AgentResult, or None if dispatch fails.
+        """
+        import time as _time
+        t0 = _time.time()
+        try:
+            from agents.registry import get_default_registry
+            from core.contracts import AgentTask, AgentStatus
+
+            registry = get_default_registry()
+            agent = registry.get_agent("data_integrity")
+            if agent is None:
+                logger.warning("DataIntegrityAgent not registered — skipping")
+                return None
+
+            # Create typed task
+            task = AgentTask(
+                task_id=f"orch_di_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}",
+                agent_name="data_integrity",
+                task_type="check_data_integrity",
+                payload={},   # Agent handles missing prices gracefully
+                priority=3,
+                correlation_id=f"daily_pipeline_{datetime.now(timezone.utc).date()}",
+            )
+
+            # Dispatch via registry (typed, audited)
+            result = registry.dispatch(task)
+
+            elapsed = _time.time() - t0
+            status = "success" if result.status == AgentStatus.COMPLETED else "failed"
+            issues = result.output.get("issues_found", 0) if result.output else 0
+
+            logger.info(
+                "Agent data_integrity: status=%s, issues=%d, duration=%.1fs",
+                status, issues, elapsed,
+            )
+
+            return TaskResult(
+                task_name="agent_data_integrity",
+                status=status,
+                duration_sec=round(elapsed, 2),
+                output={
+                    "agent_name": "data_integrity",
+                    "agent_status": result.status.value,
+                    "issues_found": issues,
+                    "critical_issues": result.output.get("critical_issues", []) if result.output else [],
+                    "audit_trail_size": len(result.audit_trail),
+                },
+            )
+
+        except Exception as e:
+            elapsed = _time.time() - t0
+            logger.warning("Agent data_integrity dispatch failed: %s", e)
+            return TaskResult(
+                task_name="agent_data_integrity",
+                status="failed",
+                duration_sec=round(elapsed, 2),
+                error=str(e),
+            )
 
     def run_maintenance(self) -> TaskResult:
         """Run SQL store maintenance."""

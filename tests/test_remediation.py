@@ -810,6 +810,118 @@ class TestP1SafetyGating:
 
 
 # ---------------------------------------------------------------------------
+# P1-AGENTS: First operational agent dispatch
+# ---------------------------------------------------------------------------
+
+class TestP1AgentDispatch:
+    """P1-AGENTS: DataIntegrityAgent dispatched from orchestrator."""
+
+    def test_data_integrity_agent_registered(self):
+        """P1-AGENTS: DataIntegrityAgent must be in the default registry."""
+        from agents.registry import get_default_registry
+        registry = get_default_registry()
+        agent = registry.get_agent("data_integrity")
+        assert agent is not None, (
+            "P1-AGENTS: DataIntegrityAgent must be registered in default registry"
+        )
+
+    def test_data_integrity_agent_dispatch_produces_typed_result(self):
+        """P1-AGENTS: Dispatching DataIntegrityAgent produces typed AgentResult."""
+        from agents.registry import get_default_registry
+        from core.contracts import AgentTask, AgentResult, AgentStatus
+
+        registry = get_default_registry()
+        task = AgentTask(
+            task_id="test_di_001",
+            agent_name="data_integrity",
+            task_type="check_data_integrity",
+            payload={},
+        )
+        result = registry.dispatch(task)
+
+        assert isinstance(result, AgentResult), (
+            "P1-AGENTS: dispatch must return AgentResult"
+        )
+        assert result.status == AgentStatus.COMPLETED, (
+            f"P1-AGENTS: Expected COMPLETED, got {result.status}"
+        )
+        assert isinstance(result.output, dict), (
+            "P1-AGENTS: output must be dict"
+        )
+
+    def test_data_integrity_audit_trail_exists(self):
+        """P1-AGENTS: Dispatch creates audit trail entries."""
+        from agents.registry import get_default_registry
+        from core.contracts import AgentTask
+
+        registry = get_default_registry()
+        task = AgentTask(
+            task_id="test_di_audit",
+            agent_name="data_integrity",
+            task_type="check_data_integrity",
+            payload={},
+        )
+        result = registry.dispatch(task)
+
+        assert len(result.audit_trail) > 0, (
+            "P1-AGENTS: AgentResult must have non-empty audit_trail"
+        )
+
+        # Registry must also record the dispatch in its own audit log
+        audit_log = registry.get_audit_log(agent_name="data_integrity", limit=5)
+        assert len(audit_log) > 0, (
+            "P1-AGENTS: Registry audit log must record the dispatch"
+        )
+
+    def test_orchestrator_has_agent_dispatch_method(self):
+        """P1-AGENTS: Orchestrator must have run_agent_data_integrity_check method."""
+        from core.orchestrator import PairsOrchestrator
+        orch = PairsOrchestrator()
+        assert hasattr(orch, "run_agent_data_integrity_check"), (
+            "P1-AGENTS: Orchestrator must have run_agent_data_integrity_check method"
+        )
+
+    def test_orchestrator_agent_dispatch_returns_task_result(self):
+        """P1-AGENTS: run_agent_data_integrity_check returns TaskResult."""
+        from core.orchestrator import PairsOrchestrator, TaskResult
+        orch = PairsOrchestrator()
+        result = orch.run_agent_data_integrity_check()
+
+        assert result is not None, (
+            "P1-AGENTS: run_agent_data_integrity_check must return TaskResult"
+        )
+        assert isinstance(result, TaskResult), (
+            f"P1-AGENTS: Expected TaskResult, got {type(result)}"
+        )
+        assert result.task_name == "agent_data_integrity"
+        assert result.output is not None
+        assert "agent_status" in result.output
+
+    def test_agent_does_not_mutate_state(self):
+        """P1-AGENTS: DataIntegrityAgent is READ_ONLY — no side effects."""
+        from agents.registry import get_default_registry
+        from core.contracts import AgentTask
+
+        registry = get_default_registry()
+        # Check permissions
+        assert registry.has_permission("data_integrity", "read_only"), (
+            "P1-AGENTS: DataIntegrityAgent must have read_only permission"
+        )
+
+    def test_daily_pipeline_source_contains_agent_dispatch(self):
+        """P1-AGENTS: run_daily_pipeline source must contain agent dispatch call."""
+        import pathlib
+        orch_path = pathlib.Path(__file__).parent.parent / "core" / "orchestrator.py"
+        source = orch_path.read_text(encoding="utf-8-sig")
+        assert "run_agent_data_integrity_check" in source, (
+            "P1-AGENTS: run_daily_pipeline must call run_agent_data_integrity_check"
+        )
+        assert "agent_data_integrity" in source, (
+            "P1-AGENTS: orchestrator must reference agent_data_integrity task"
+        )
+
+
+# ---------------------------------------------------------------------------
 # P1-GOV: Governance gate on model promotion
 # ---------------------------------------------------------------------------
 

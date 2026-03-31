@@ -5,10 +5,12 @@
 **Scope:** Agent platform, orchestration engine, governance policy layer, approval
 system, incident management, and audit trail
 
-> **Integration Status: SCAFFOLD**
-> Agents are registered and individually tested (91 tests pass). As of 2026-03-31,
-> **no operational workflow dispatches agent tasks.** Zero agents are called from
-> backtesting, signal generation, or portfolio allocation paths.
+> **Integration Status: ONE AGENT OPERATIONAL, REST SCAFFOLD**
+> 33 agents are registered and individually tested (98+ tests pass). As of 2026-04-01,
+> **one agent is dispatched from operational code**: `DataIntegrityAgent` is called
+> from `PairsOrchestrator.run_daily_pipeline()` after the data refresh step.
+> It uses typed `AgentTask`/`AgentResult` contracts with full audit trail and
+> READ_ONLY permissions. The remaining 32 agents remain scaffold.
 > See: `docs/INTEGRATION_STATUS.md`, `docs/remediation/remediation_ledger.md:P1-AGENTS`
 
 ---
