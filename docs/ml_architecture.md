@@ -4,10 +4,14 @@
 **Last updated:** 2026-03-31
 **Scope:** Full ML platform — features, labels, datasets, models, evaluation, registry, inference, monitoring, governance, explainability
 
-> **Integration Status: SCAFFOLD**
-> The ML platform infrastructure is complete and tested in isolation (115 tests pass).
-> As of 2026-03-31, **zero models have been trained**, ModelScorer always returns
-> neutral probability (0.5), and no ML output influences any operational decision.
+> **Integration Status: ONE OVERLAY OPERATIONAL, REST SCAFFOLD**
+> The ML platform infrastructure is complete and tested (122+ tests pass).
+> As of 2026-04-01, **one ML use case is operational**: meta-labeling for
+> signal filtering. A training script (`scripts/train_meta_label.py`) produces
+> a `MetaLabelModel` that plugs into `SignalPipeline` via `ml_quality_hook`.
+> When fitted, it predicts signal success probability; when unavailable,
+> the deterministic fallback (grade-based quality assessment) is used.
+> Other ML task families (regime, break detection, sizing, etc.) remain scaffold.
 > See: `docs/INTEGRATION_STATUS.md`, `docs/remediation/remediation_ledger.md:P1-ML`
 
 ---

@@ -1815,3 +1815,175 @@ class TestFeatureImportance:
         empty_X = pd.DataFrame()
         result = compute_feature_importance(object(), empty_X, pd.Series(), method="gain")
         assert result == {}
+
+
+# ---------------------------------------------------------------------------
+# K. Meta-Label Training + Pipeline Integration (P1-ML / P2-MLT)
+# ---------------------------------------------------------------------------
+
+class TestMetaLabelTrainingIntegration:
+    """End-to-end test: train a meta-label model and wire it into the signal pipeline."""
+
+    def _make_synthetic_data(self, n=756):
+        """Create synthetic price/spread/zscore data for training.
+
+        The noise amplitude is set high enough that |z| >= 1.5 occurs
+        frequently, providing sufficient training labels for meta-labeling.
+        """
+        np.random.seed(42)
+        dates = pd.bdate_range("2022-01-01", periods=n)
+        # Correlated prices with VOLATILE mean-reverting spread
+        base = 100 + np.cumsum(np.random.normal(0.0005, 0.01, n))
+        noise = np.random.normal(0, 1.5, n)  # High noise for frequent threshold crossings
+        mr = np.zeros(n)
+        for i in range(1, n):
+            mr[i] = 0.85 * mr[i-1] + noise[i]  # AR(1) mean-reverting, fast
+
+        px = pd.Series(base, index=dates, name="close")
+        py = pd.Series(base * 1.1 + mr, index=dates, name="close")
+
+        spread = py - 1.1 * px
+        mu = spread.rolling(60, min_periods=30).mean()
+        sigma = spread.rolling(60, min_periods=30).std().replace(0, np.nan)
+        z = ((spread - mu) / sigma).fillna(0.0)
+
+        return px, py, z, spread
+
+    def test_training_produces_fitted_model(self):
+        """P2-MLT: train_meta_label_model returns a fitted model with metrics."""
+        from scripts.train_meta_label import train_meta_label_model
+
+        px, py, z, spread = self._make_synthetic_data(504)
+        train_end = str(px.index[int(len(px) * 0.8)].date())
+
+        model, artifact, metrics = train_meta_label_model(
+            px=px, py=py, z=z, spread=spread,
+            train_end=train_end,
+            label_horizon=10,
+            entry_threshold=1.0,  # Lower threshold for synthetic data
+            pair_id="SYN-A-SYN-B",
+        )
+
+        assert model.is_fitted, "Model must be fitted after training"
+        assert artifact.n_train_samples > 30, "Must have substantial training data"
+        assert "n_train" in metrics
+        assert "n_test" in metrics
+
+    def test_trained_model_predicts_probability(self):
+        """P1-ML: Fitted model returns probability in [0, 1]."""
+        from scripts.train_meta_label import train_meta_label_model, compute_features_for_pair
+
+        px, py, z, spread = self._make_synthetic_data(504)
+        train_end = str(px.index[int(len(px) * 0.8)].date())
+
+        model, _, _ = train_meta_label_model(
+            px=px, py=py, z=z, spread=spread,
+            train_end=train_end, entry_threshold=1.0, pair_id="SYN",
+        )
+
+        # Predict on a single feature dict
+        features = {"z": 2.5, "z_abs": 2.5, "z_mean_5d": 2.0,
+                     "z_std_5d": 0.3, "vol_20d": 0.15}
+        prob = model.predict_success_probability(features)
+        assert 0.0 <= prob <= 1.0, f"Probability must be in [0,1], got {prob}"
+
+    def test_unfitted_model_returns_nan(self):
+        """P1-ML: Unfitted model returns NaN (not exception)."""
+        from ml.models.meta_labeler import MetaLabelModel
+
+        model = MetaLabelModel()
+        prob = model.predict_success_probability({"z": 2.5})
+        assert np.isnan(prob), "Unfitted model must return NaN"
+
+    def test_unfitted_model_returns_fallback_action(self):
+        """P1-ML: Unfitted model recommend_action returns TAKE (conservative fallback)."""
+        from ml.models.meta_labeler import MetaLabelModel
+        from ml.contracts import MetaLabelAction
+
+        model = MetaLabelModel()
+        action = model.recommend_action({"z": 2.5})
+        assert action == MetaLabelAction.TAKE, (
+            f"Fallback must be TAKE (conservative), got {action}"
+        )
+
+    def test_point_in_time_correctness(self):
+        """P1-ML: Features must not use future data."""
+        from scripts.train_meta_label import compute_features_for_pair
+
+        px, py, z, spread = self._make_synthetic_data(252)
+        midpoint = len(px) // 2
+
+        # Compute features up to midpoint
+        features_early = compute_features_for_pair(
+            px.iloc[:midpoint], py.iloc[:midpoint],
+            z.iloc[:midpoint], spread.iloc[:midpoint],
+        )
+
+        # Compute features on full data but check midpoint values
+        features_full = compute_features_for_pair(px, py, z, spread)
+
+        # Values at midpoint should be identical (no future leakage)
+        mid_date = px.index[midpoint - 1]
+        if mid_date in features_early.index and mid_date in features_full.index:
+            early_vals = features_early.loc[mid_date]
+            full_vals = features_full.loc[mid_date]
+            common_cols = early_vals.index.intersection(full_vals.index)
+            for col in common_cols[:5]:  # Check first 5 features
+                v1 = early_vals[col]
+                v2 = full_vals[col]
+                if not (np.isnan(v1) and np.isnan(v2)):
+                    assert abs(v1 - v2) < 1e-10, (
+                        f"Feature {col} at midpoint differs: {v1} vs {v2} "
+                        "(future data leakage suspected)"
+                    )
+
+    def test_meta_label_plugs_into_signal_quality_engine(self):
+        """P1-ML: MetaLabelModel implements MetaLabelProtocol for SignalQualityEngine."""
+        from scripts.train_meta_label import train_meta_label_model
+        from core.signal_quality import SignalQualityEngine
+        from core.contracts import RegimeLabel
+
+        px, py, z, spread = self._make_synthetic_data(504)
+        train_end = str(px.index[int(len(px) * 0.8)].date())
+
+        model, _, _ = train_meta_label_model(
+            px=px, py=py, z=z, spread=spread,
+            train_end=train_end, entry_threshold=1.0, pair_id="SYN",
+        )
+
+        # Wire model into quality engine
+        engine = SignalQualityEngine(ml_hook=model)
+
+        # Assess signal quality — should not raise
+        result = engine.assess(
+            conviction=0.7,
+            mr_score=0.6,
+            regime=RegimeLabel.MEAN_REVERTING,
+        )
+        assert result.grade is not None
+        assert hasattr(result, "size_multiplier")
+
+    def test_meta_label_plugs_into_signal_pipeline(self):
+        """P1-ML: MetaLabelModel can be passed as ml_quality_hook to SignalPipeline."""
+        from scripts.train_meta_label import train_meta_label_model
+        from core.signal_pipeline import SignalPipeline
+        from core.contracts import PairId
+
+        px, py, z, spread = self._make_synthetic_data(504)
+        train_end = str(px.index[int(len(px) * 0.8)].date())
+
+        model, _, _ = train_meta_label_model(
+            px=px, py=py, z=z, spread=spread,
+            train_end=train_end, entry_threshold=1.0, pair_id="SYN",
+        )
+
+        # Create pipeline with ML quality hook
+        pipeline = SignalPipeline(
+            pair_id=PairId("AAPL", "MSFT"),
+            ml_quality_hook=model,
+        )
+
+        # Evaluate a bar — should work without errors
+        decision = pipeline.evaluate_bar(z_score=2.5, current_pos=0.0)
+        assert decision is not None
+        assert hasattr(decision, "action")

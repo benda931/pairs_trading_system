@@ -34,7 +34,7 @@
 
 | ID | Title | Severity | Status | Strategy | Evidence Files |
 |----|-------|----------|--------|----------|---------------|
-| P1-ML | ML platform: never called from signal path; no models trained | P1 | DOWNGRADED | Truthful scaffold marking; training script PLANNED | ml/, core/signals_engine.py |
+| P1-ML | Meta-label ML overlay: training + inference + pipeline wiring | P1 | COMPLETE | MetaLabelModel training script (scripts/train_meta_label.py), wired to SignalPipeline via ml_quality_hook. Deterministic fallback preserved. 7 integration tests. | scripts/train_meta_label.py, ml/models/meta_labeler.py, core/signal_pipeline.py |
 | P1-AGENTS | Agents registered but never dispatched | P1 | DOWNGRADED | Truthful scaffold marking; orchestration PLANNED | agents/registry.py |
 | P1-GOV | Governance never enforced at runtime | P1 | IN_PROGRESS | Wire one gate: model promotion | governance/engine.py, ml/registry/ |
 | P1-AUDIT | Audit chains empty for all operational decisions | P1 | DOWNGRADED | Truthful scaffold marking | audit/chain.py |
@@ -51,7 +51,7 @@
 | P2-DUPRANK | Duplicate pair ranking (core/pair_ranking.py vs portfolio/ranking.py) | P2 | PLANNED | Deprecate core/pair_ranking.py | core/pair_ranking.py |
 | P2-DUPTHROT | Duplicate throttle (HeatState vs ThrottleLevel) | P2 | PLANNED | Bridge in P0-KS fix | portfolio/risk_ops.py, control_plane/ |
 | P2-COINT | Cointegration stability doesn't hard-reject pairs | P2 | PLANNED | Add hard rejection on low stability score | research/discovery_pipeline.py |
-| P2-MLT | ML training pipeline: no script exists | P2 | PLANNED | Create scripts/train_ml_models.py | ml/ |
+| P2-MLT | Meta-label training script | P2 | COMPLETE | scripts/train_meta_label.py trains meta-label model with point-in-time features and temporal split | scripts/train_meta_label.py |
 
 ### P3/P4 Findings
 
