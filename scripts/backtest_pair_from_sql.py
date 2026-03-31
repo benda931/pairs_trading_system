@@ -18,6 +18,7 @@ from common.config_manager import load_settings
 from core.sql_store import SqlStore
 from core.optimization_backtester import run_backtest_for_pair  # להתאים לשם האמיתי
 
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
 logger = logging.getLogger("backtest_pair_from_sql")
 
 

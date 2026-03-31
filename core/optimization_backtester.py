@@ -196,12 +196,6 @@ class BacktestConfig:
     # ---- engine ----
     bar_freq: str = "D"
     data_source: str = "AUTO"  # "IB", "YF", "PARQUET", etc.
-    # R-003: Bars delay between signal generation and execution.
-    # Default=1: signal generated on close[t], position takes effect at t+1
-    # (equivalent to EOD signal → next-bar execution via lagged weight PnL).
-    # The PnL loop uses w[t-1] * ret[t], which naturally implements this lag.
-    # Set to 0 only for intraday strategies where signal and execution are same bar.
-    execution_lag_bars: int = 1
 
     # ---- extensibility ----
     extra: Dict[str, Any] = field(default_factory=dict)
@@ -849,64 +843,46 @@ class OptimizationBacktester:
         """
         Execute the backtest and return the minimal perf dict.
 
-        Pipeline
-        --------
-        1. Load price data for the pair via the unified data layer.
-        2. Align and build the spread (px_b - beta * px_a) using rolling OLS.
-        3. Compute rolling z-score of the spread.
-        4. Generate mean-reversion signals: enter when |z| > z_open, exit
-           when |z| < z_close (or stop_z / max_holding breached).
-        5. Simulate equity curve with transaction costs.
-        6. Compute risk/return metrics (Sharpe, Sortino, Calmar, etc.).
-        7. Return ``result.to_perf_dict()`` = {Sharpe, Profit, Drawdown}.
+        ⚠️ CURRENTLY (Part 1/6):
+        This is a SAFE PLACEHOLDER so that:
+        - the dashboard can import and display System Health,
+        - you can finish pasting Parts 2–6 without breaking anything.
 
-        Any exception is caught and converted to a neutral zero-result so
-        that Optuna can keep exploring without blowing up the study.
+        Once Parts 2–6 are pasted, this method will:
+        - load price data
+        - build the spread
+        - generate signals & positions
+        - simulate PnL and equity
+        - compute full BacktestResult
+        and return `result.to_perf_dict()`.
         """
-        try:
-            # --- 1. Load & prepare data ---
-            data = self._prepare_data()  # Part 2 helper: prices + spread frame
+        logger.error(
+            "OptimizationBacktester.run() called while only Part 1/6 of "
+            "core/optimization_backtester.py is present. "
+            "Paste Parts 2–6 for a full production backtest."
+        )
 
-            # --- 2. Extract strategy parameters ---
-            params = _bt_extract_strategy_params(self)
-
-            # --- 3. Build signal frame (z-score, positions, trade IDs) ---
-            sig_df = _bt_build_signal_frame(self, data, params)
-
-            # --- 4–6. Simulate equity & compute metrics ---
-            result = _bt_simulate_equity(self, sig_df, params)
-
-            return result.to_perf_dict()
-
-        except Exception as e:
-            logger.warning(
-                "Backtest run failed for %s-%s: %s",
-                self.config.symbol_a,
-                self.config.symbol_b,
-                e,
-            )
-            # Fallback neutral result so Optuna can continue
-            fallback = BacktestResult(
-                sharpe=0.0,
-                profit=0.0,
-                max_drawdown=0.0,
-                sortino=0.0,
-                calmar=0.0,
-                win_rate=0.0,
-                n_trades=0,
-                avg_trade_pnl=0.0,
-                exposure=0.0,
-                turnover=0.0,
-                equity_curve=None,
-                stats={
-                    "reason": "exception",
-                    "error": str(e),
-                    "pair": f"{self.config.symbol_a}-{self.config.symbol_b}",
-                    "config": self.config.to_dict(),
-                    "params": dict(self.params),
-                },
-            )
-            return fallback.to_perf_dict()
+        # Minimal zero-risk placeholder so the UI doesn't explode:
+        placeholder = BacktestResult(
+            sharpe=0.0,
+            profit=0.0,
+            max_drawdown=0.0,
+            sortino=0.0,
+            calmar=0.0,
+            win_rate=0.0,
+            n_trades=0,
+            avg_trade_pnl=0.0,
+            exposure=0.0,
+            turnover=0.0,
+            equity_curve=None,
+            stats={
+                "placeholder": True,
+                "reason": "Backtester not fully implemented (only Part 1/6 present).",
+                "config": self.config.to_dict(),
+                "params": dict(self.params),
+            },
+        )
+        return placeholder.to_perf_dict()
 
 
 # Alias for existing code that imports `Backtester`
@@ -1705,17 +1681,6 @@ def _bt_simulate_equity(
     The simulation is *weights-based*:
     - w_a, w_b are portfolio weights (fraction of capital) on each leg.
     - PnL_t = equity_{t-1} * (w_a * ret_a + w_b * ret_b) - costs.
-
-    R-003 — Execution Timing Semantics:
-    PnL uses lagged weights: w[i-1] * ret[i]. This means:
-      - Position is established based on signal at bar t (close[t]).
-      - That position earns returns from bar t to t+1 (ret[t+1]).
-      - This is equivalent to EOD signal → next-bar execution (open[t+1]).
-    One-bar look-ahead bias is NOT present because weights at bar i
-    drive returns only from bar i+1 onward. This is controlled by
-    BacktestConfig.execution_lag_bars (default=1).
-    NOTE: signals are still computed on close[t], which is the aggressive
-    case. Intraday execution quality (open vs. VWAP vs. close) is not modeled.
     """
     cfg = self.config
     df = sig_df.copy()
@@ -1770,10 +1735,7 @@ def _bt_simulate_equity(
         if prev_eq <= 0:
             prev_eq = cfg.initial_capital
 
-        # Portfolio return before costs.
-        # R-003: NOTE: execution_lag_bars=1 is implicit in this weight lagging:
-        # w[i-1] * ret[i] means position set at bar t earns return at bar t+1.
-        # Equivalent to EOD signal → next-bar execution. No look-ahead bias here.
+        # Portfolio return before costs
         r_port = w_a[i - 1] * df["ret_a"].iloc[i] + w_b[i - 1] * df["ret_b"].iloc[i]
         pnl_raw = prev_eq * r_port
 
@@ -1926,10 +1888,58 @@ def _bt_simulate_equity(
     return result
 
 
-# Attach Part 3 helper functions as methods on OptimizationBacktester
+def _bt_run(self: "OptimizationBacktester") -> Dict[str, float]:
+    """
+    Full run implementation (v1):
+
+        1. Prepare data (prices + spread) via _prepare_data()
+        2. Extract strategy params from self.params
+        3. Build signal frame (z-score, positions, trade IDs)
+        4. Simulate equity & compute metrics
+        5. Return {Sharpe, Profit, Drawdown} for the optimization tab
+
+    Any exception is caught and converted into a neutral BacktestResult with
+    stats['reason'] set, so that Optuna can continue exploring without
+    blowing up the whole study.
+    """
+    try:
+        data = self._prepare_data()  # from Part 2
+        params = _bt_extract_strategy_params(self)
+        sig_df = _bt_build_signal_frame(self, data, params)
+        result = _bt_simulate_equity(self, sig_df, params)
+        return result.to_perf_dict()
+    except Exception as e:
+        logger.warning("Backtest run failed for %s-%s: %s",
+                       self.config.symbol_a, self.config.symbol_b, e)
+        # Fallback neutral result
+        fallback = BacktestResult(
+            sharpe=0.0,
+            profit=0.0,
+            max_drawdown=0.0,
+            sortino=0.0,
+            calmar=0.0,
+            win_rate=0.0,
+            n_trades=0,
+            avg_trade_pnl=0.0,
+            exposure=0.0,
+            turnover=0.0,
+            equity_curve=None,
+            stats={
+                "reason": "exception",
+                "error": str(e),
+                "pair": f"{self.config.symbol_a}-{self.config.symbol_b}",
+                "config": self.config.to_dict(),
+                "params": dict(self.params),
+            },
+        )
+        return fallback.to_perf_dict()
+
+
+# Attach Part 3 logic to OptimizationBacktester (override placeholder run)
 OptimizationBacktester._extract_strategy_params = _bt_extract_strategy_params  # type: ignore[attr-defined]
 OptimizationBacktester._build_signals = _bt_build_signal_frame  # type: ignore[attr-defined]
 OptimizationBacktester._simulate_equity = _bt_simulate_equity  # type: ignore[attr-defined]
+OptimizationBacktester.run = _bt_run  # type: ignore[assignment]
 
 # =========================
 # PART 4/6: Advanced Hedge-Ratio, Vol Targeting & Regimes (Pro)

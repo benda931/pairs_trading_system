@@ -274,17 +274,6 @@ def _check_log_safe(y: pd.Series, x: pd.Series) -> bool:
     return (y > 0).all() and (x > 0).all()
 
 
-def _check_data_degeneracy(y: pd.Series, x: pd.Series) -> Tuple[bool, str]:
-    """Check for degenerate input data that would produce meaningless results."""
-    if y.std() < 1e-10:
-        return False, "y_series_constant"
-    if x.std() < 1e-10:
-        return False, "x_series_constant"
-    if len(y.dropna()) < 20 or len(x.dropna()) < 20:
-        return False, "insufficient_data"
-    return True, "ok"
-
-
 def _quality_weight(adf_p: Optional[float], halflife: Optional[float], corr: Optional[float]) -> float:
     """Quality weight (higher is better): (1-p), invג€‘HL, |corr|."""
     w_adf = (1.0 - float(adf_p)) if (adf_p is not None and np.isfinite(adf_p)) else 0.5
@@ -542,13 +531,6 @@ class FairValueEngine:
             if base.shape[0] < cfg.min_overlap:
                 rows.append({"asof": asof, "pair": (y_sym, x_sym), "window": cfg.window,
                              "reason": f"insufficient history: {base.shape[0]} < {cfg.min_overlap}"})
-                continue
-
-            # Check for degenerate data (constant series, etc.)
-            data_ok, degen_reason = _check_data_degeneracy(base["y"], base["x"])
-            if not data_ok:
-                rows.append({"asof": asof, "pair": (y_sym, x_sym), "window": cfg.window,
-                             "reason": f"degenerate data: {degen_reason}"})
                 continue
 
             pair_rows: List[Dict[str, Any]] = []

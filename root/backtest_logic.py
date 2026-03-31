@@ -61,6 +61,12 @@ try:
 except Exception:  # pragma: no cover
     go = None  # type: ignore
 
+# yfinance משמש רק אם נרצה fallback לנתונים חיצוניים
+try:
+    import yfinance as yf  # type: ignore
+except Exception:  # pragma: no cover
+    yf = None  # type: ignore
+
 # volatility + utils פנימיים
 from volatility import (  # type: ignore
     calculate_atr,

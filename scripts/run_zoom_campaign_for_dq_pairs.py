@@ -58,10 +58,7 @@ class Pair:
 # Section 2: Universe loader
 # =========================
 
-DEFAULT_SQL_URL: str = os.getenv(
-    "PAIRS_SQL_URL",
-    f"duckdb:///{Path.home() / 'AppData' / 'Local' / 'pairs_trading_system' / 'cache.duckdb'}",
-)
+DEFAULT_SQL_URL: str = "duckdb:///C:/Users/omrib/AppData/Local/pairs_trading_system/cache.duckdb"
 DEFAULT_DQ_TABLE: str = "dq_pairs"
 
 

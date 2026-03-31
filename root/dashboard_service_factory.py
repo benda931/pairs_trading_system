@@ -163,8 +163,7 @@ def _detect_env(explicit_env: Optional[str] = None, app_ctx: Optional[AppContext
     if explicit_env:
         return explicit_env.lower()
 
-    env = os.getenv("PTS_ENV") or os.getenv("DASH_ENV") or os.getenv("APP_ENV")
-    
+    env = os.getenv("DASH_ENV")
     if env:
         return env.lower()
 
@@ -191,7 +190,7 @@ def _detect_profile(explicit_profile: Optional[str] = None) -> str:
     if explicit_profile:
         return explicit_profile.lower()
 
-    prof = os.getenv("PTS_PROFILE") or os.getenv("DASH_PROFILE") or os.getenv("APP_PROFILE")
+    prof = os.getenv("DASH_PROFILE")
     if prof:
         return prof.lower()
 

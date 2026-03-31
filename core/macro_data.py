@@ -168,16 +168,14 @@ def _resample(df: pd.DataFrame, freq: str, *, method: str = "ffill") -> pd.DataF
 
 class _Loader:
     """
-    Source adapters for loading macro data from various sources.
+    ????? ??? ?????? ?????? ?????? ??????? ?????.
 
-    URI schemes:
+    ?????? ?-URI ????:
       - local:/path/to/file.csv
       - duckdb:/path/to/db.duckdb|table_or_query
       - sql:CONNSTR|QUERY
       - yf:SPY
       - yf:SPY|period=5y,interval=1wk,field=Adj Close
-      - fmp:INDICATOR_NAME (e.g., fmp:GDP, fmp:CPI, fmp:unemploymentRate)
-      - fmp_price:TICKER (e.g., fmp_price:^VIX, fmp_price:SPY)
     """
 
     @staticmethod
@@ -309,73 +307,37 @@ class _Loader:
             )
 
         data = data.rename(columns={local_field: "value"})
+        # yfinance ????? ?? ?-Index ??? ?-DatetimeIndex
         return data[["value"]].reset_index()
 
-    @staticmethod
-    def fmp_economic(indicator: str) -> pd.DataFrame:
-        """Fetch economic indicator from FMP.
-
-        indicator: FMP indicator name (GDP, CPI, unemploymentRate, etc.)
-        """
-        try:
-            from common.fmp_client import get_fmp_client
-        except Exception as e:
-            raise ImportError("fmp_client not available") from e
-
-        client = get_fmp_client()
-        df = client.get_economic_indicator(indicator, start="2000-01-01")
-        if df.empty:
-            raise RuntimeError(f"FMP returned empty data for indicator={indicator!r}")
-
-        # normalize to date + value
-        if "value" not in df.columns:
-            num_cols = [c for c in df.columns if c not in ("date", "country", "currency")]
-            if num_cols:
-                df = df.rename(columns={num_cols[0]: "value"})
-        return df
-
-    @staticmethod
-    def fmp_price(ticker: str) -> pd.DataFrame:
-        """Fetch price series from FMP for use as macro indicator."""
-        try:
-            from common.fmp_client import get_fmp_client
-        except Exception as e:
-            raise ImportError("fmp_client not available") from e
-
-        client = get_fmp_client()
-        df = client.get_historical_prices(ticker, start="2010-01-01")
-        if df.empty:
-            raise RuntimeError(f"FMP returned empty prices for ticker={ticker!r}")
-
-        df = df.rename(columns={"close": "value", "datetime": "date"})
-        return df[["date", "value"]].dropna()
-
+from core.macro_data import MacroDataClient
 
 DEFAULT_MACRO_SOURCES = {
-    # ── FMP economic calendar-based indicators ──
-    "CPI_USA": "fmp:CPI",
-    "GDP_USA": "fmp:GDP",
-    "NONFARM_PAYROLLS": "fmp:Nonfarm",
-    "UNEMPLOYMENT_USA": "fmp:Unemployment Rate",
-    "FEDERAL_FUNDS_RATE": "fmp:Fed Interest Rate",
-    "CONSUMER_SENTIMENT": "fmp:Consumer Sentiment",
-    "RETAIL_SALES": "fmp:Retail Sales",
-    "INDUSTRIAL_PRODUCTION": "fmp:Industrial Production",
+    # ???? CSV ???????
+    "CPI_USA": "local:data/macro/cpi_usa_monthly.csv",
+    "UNEMPLOYMENT_USA": "local:data/macro/unemployment_usa.csv",
 
-    # ── FMP price-based macro proxies (these all work) ──
-    "VIX_INDEX": "fmp_price:^VIX",
-    "SPX_INDEX": "fmp_price:SPY",
-    "DXY_INDEX": "fmp_price:DX-Y.NYB",
-    "GOLD": "fmp_price:GC=F",
-    "OIL": "fmp_price:CL=F",
-    "US10Y": "fmp_price:^TNX",
-    "HYG": "fmp_price:HYG",
-    "LQD": "fmp_price:LQD",
-    "TLT": "fmp_price:TLT",
+    # DuckDB ? ???? ?? ??????
+    "GDP_USA": "duckdb:data/macro.duckdb|gdp_usa_quarterly",
+    "PMI_USA": "duckdb:data/macro.duckdb|SELECT date, value FROM pmi_usa",
 
-    # ── yfinance fallbacks ──
+    # SQL ? ????? (?? ???? ?????)
+    # "CREDIT_SPREAD": "sql:postgresql://user:pass@host/db|SELECT date, spread FROM credit_spreads",
+
+    # yfinance ? ?????/ETF
+    "SPX_INDEX": "yf:^GSPC|period=20y,interval=1d,field=Adj Close",
+    "VIX_INDEX": "yf:^VIX|period=20y,interval=1d,field=Close",
     "MOVE_INDEX": "yf:^MOVE|period=10y,interval=1d,field=Close",
 }
+
+MACRO_CLIENT = MacroDataClient(
+    sources=DEFAULT_MACRO_SOURCES,
+    allow_duckdb=True,
+    allow_sql=False,   # ???? ???????
+    allow_yf=True,     # ?? ?? ???????
+    cache_ttl_seconds=3600,
+    cache_max_items=128,
+)
 
 # ============================================================
 # Cache layer ? TTL cache
@@ -486,8 +448,7 @@ class MacroDataClient:
     sources: Dict[str, str]
     allow_duckdb: bool = True
     allow_sql: bool = False
-    allow_yf: bool = True
-    allow_fmp: bool = True
+    allow_yf: bool = False
     cache_ttl_seconds: int = 3600
     cache_max_items: int = 128
 
@@ -518,20 +479,10 @@ class MacroDataClient:
 
         if uri.startswith("yf:"):
             if not self.allow_yf:
-                raise RuntimeError("yfinance not enabled (allow_yf=False).")
+                raise RuntimeError("yfinance ????? ???????????? (allow_yf=False).")
             return _Loader.yfinance(uri.split("yf:", 1)[1])
 
-        if uri.startswith("fmp_price:"):
-            if not self.allow_fmp:
-                raise RuntimeError("FMP not enabled (allow_fmp=False).")
-            return _Loader.fmp_price(uri.split("fmp_price:", 1)[1])
-
-        if uri.startswith("fmp:"):
-            if not self.allow_fmp:
-                raise RuntimeError("FMP not enabled (allow_fmp=False).")
-            return _Loader.fmp_economic(uri.split("fmp:", 1)[1])
-
-        # fallback: try as local CSV
+        # fallback: ???? ???? CSV ????
         return _Loader.local_csv(uri)
 
     # ---------- Public API ----------
@@ -597,17 +548,4 @@ class MacroDataClient:
         return self._cache.stats()
 
 
-def get_macro_client(sources: Optional[Dict[str, str]] = None) -> MacroDataClient:
-    """Get a macro client with FMP-powered defaults."""
-    return MacroDataClient(
-        sources=sources or DEFAULT_MACRO_SOURCES,
-        allow_duckdb=True,
-        allow_sql=False,
-        allow_yf=True,
-        allow_fmp=True,
-        cache_ttl_seconds=3600,
-        cache_max_items=256,
-    )
-
-
-__all__ = ["MacroDataClient", "DEFAULT_MACRO_SOURCES", "get_macro_client"]
+__all__ = ["MacroDataClient"]

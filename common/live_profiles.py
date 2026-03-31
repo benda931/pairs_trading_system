@@ -1,24 +1,24 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """
-common/live_profiles.py — Live Pair Profile Contract (HF-Grade)
+common/live_profiles.py ג€” Live Pair Profile Contract (HF-Grade)
 ================================================================
 
-קובץ זה מגדיר את חוזה הלייב הרשמי לזוג מסחר אחד (Pair) ברמת קרן גידור.
+׳§׳•׳‘׳¥ ׳–׳” ׳׳’׳“׳™׳¨ ׳׳× ׳—׳•׳–׳” ׳”׳׳™׳™׳‘ ׳”׳¨׳©׳׳™ ׳׳–׳•׳’ ׳׳¡׳—׳¨ ׳׳—׳“ (Pair) ׳‘׳¨׳׳× ׳§׳¨׳ ׳’׳™׳“׳•׳¨.
 
-המטרה:
-    - להיות "שפת תווך" אחידה בין:
+׳”׳׳˜׳¨׳”:
+    - ׳׳”׳™׳•׳× "׳©׳₪׳× ׳×׳•׳•׳" ׳׳—׳™׳“׳” ׳‘׳™׳:
         * Research / Optimization / ML / Macro
-        * מנוע המסחר החי (Live Trading Engine)
-        * ה-Dashboard (טאב פרוטפוליו / לייב / אנליטיקה)
-    - כל מודול מחקר/אופטימיזציה/ML כותב לכאן את החלטותיו.
-    - מנוע הלייב *רק קורא* את הפרופיל ומבצע לפי החוקים והפרמטרים שבו
-      תחת מגבלות הסיכון הגלובליות.
+        * ׳׳ ׳•׳¢ ׳”׳׳¡׳—׳¨ ׳”׳—׳™ (Live Trading Engine)
+        * ׳”-Dashboard (׳˜׳׳‘ ׳₪׳¨׳•׳˜׳₪׳•׳׳™׳• / ׳׳™׳™׳‘ / ׳׳ ׳׳™׳˜׳™׳§׳”)
+    - ׳›׳ ׳׳•׳“׳•׳ ׳׳—׳§׳¨/׳׳•׳₪׳˜׳™׳׳™׳–׳¦׳™׳”/ML ׳›׳•׳×׳‘ ׳׳›׳׳ ׳׳× ׳”׳—׳׳˜׳•׳×׳™׳•.
+    - ׳׳ ׳•׳¢ ׳”׳׳™׳™׳‘ *׳¨׳§ ׳§׳•׳¨׳* ׳׳× ׳”׳₪׳¨׳•׳₪׳™׳ ׳•׳׳‘׳¦׳¢ ׳׳₪׳™ ׳”׳—׳•׳§׳™׳ ׳•׳”׳₪׳¨׳׳˜׳¨׳™׳ ׳©׳‘׳•
+      ׳×׳—׳× ׳׳’׳‘׳׳•׳× ׳”׳¡׳™׳›׳•׳ ׳”׳’׳׳•׳‘׳׳™׳•׳×.
 
-עקרונות:
-    - אין לוגיקה עסקית כבדה בתוך המודל עצמו (כמעט נטו Data Contract).
-    - שדות מחולקים לקטגוריות ברורות:
+׳¢׳§׳¨׳•׳ ׳•׳×:
+    - ׳׳™׳ ׳׳•׳’׳™׳§׳” ׳¢׳¡׳§׳™׳× ׳›׳‘׳“׳” ׳‘׳×׳•׳ ׳”׳׳•׳“׳ ׳¢׳¦׳׳• (׳›׳׳¢׳˜ ׳ ׳˜׳• Data Contract).
+    - ׳©׳“׳•׳× ׳׳—׳•׳׳§׳™׳ ׳׳§׳˜׳’׳•׳¨׳™׳•׳× ׳‘׳¨׳•׳¨׳•׳×:
         Identity, Trading Rules, Sizing & Risk, Quality & ML, Macro/Regime, Operational.
-    - רוב השדות אופציונליים כדי לאפשר בנייה הדרגתית (Partial Filling).
+    - ׳¨׳•׳‘ ׳”׳©׳“׳•׳× ׳׳•׳₪׳¦׳™׳•׳ ׳׳™׳™׳ ׳›׳“׳™ ׳׳׳₪׳©׳¨ ׳‘׳ ׳™׳™׳” ׳”׳“׳¨׳’׳×׳™׳× (Partial Filling).
 """
 
 from __future__ import annotations
@@ -31,382 +31,382 @@ from pydantic import BaseModel, Field, ConfigDict
 
 class LivePairProfile(BaseModel):
     """
-    פרופיל לייב מלא לזוג אחד.
+    ׳₪׳¨׳•׳₪׳™׳ ׳׳™׳™׳‘ ׳׳׳ ׳׳–׳•׳’ ׳׳—׳“.
 
-    זהו ה-"DNA" של הזוג במסחר חי:
-        - איך לזהות אותו
-        - איך לסחור בו (חוקי כניסה/יציאה/סטופים/זמן)
-        - איך לקבוע גודל פוזיציה וחשיפה
-        - איזה איכות/Edge יש לו היסטורית ו-MLית
-        - באיזה משטרים (Regimes) מותר/אסור לסחור בו
-        - האם פעיל, מושהה, ומה סיבת המצב הנוכחי
+    ׳–׳”׳• ׳”-"DNA" ׳©׳ ׳”׳–׳•׳’ ׳‘׳׳¡׳—׳¨ ׳—׳™:
+        - ׳׳™׳ ׳׳–׳”׳•׳× ׳׳•׳×׳•
+        - ׳׳™׳ ׳׳¡׳—׳•׳¨ ׳‘׳• (׳—׳•׳§׳™ ׳›׳ ׳™׳¡׳”/׳™׳¦׳™׳׳”/׳¡׳˜׳•׳₪׳™׳/׳–׳׳)
+        - ׳׳™׳ ׳׳§׳‘׳•׳¢ ׳’׳•׳“׳ ׳₪׳•׳–׳™׳¦׳™׳” ׳•׳—׳©׳™׳₪׳”
+        - ׳׳™׳–׳” ׳׳™׳›׳•׳×/Edge ׳™׳© ׳׳• ׳”׳™׳¡׳˜׳•׳¨׳™׳× ׳•-ML׳™׳×
+        - ׳‘׳׳™׳–׳” ׳׳©׳˜׳¨׳™׳ (Regimes) ׳׳•׳×׳¨/׳׳¡׳•׳¨ ׳׳¡׳—׳•׳¨ ׳‘׳•
+        - ׳”׳׳ ׳₪׳¢׳™׳, ׳׳•׳©׳”׳”, ׳•׳׳” ׳¡׳™׳‘׳× ׳”׳׳¦׳‘ ׳”׳ ׳•׳›׳—׳™
 
-    שדות רבים הם אופציונליים כדי שתוכל להתחיל פשוט ולהוסיף עומק לאורך הזמן.
+    ׳©׳“׳•׳× ׳¨׳‘׳™׳ ׳”׳ ׳׳•׳₪׳¦׳™׳•׳ ׳׳™׳™׳ ׳›׳“׳™ ׳©׳×׳•׳›׳ ׳׳”׳×׳—׳™׳ ׳₪׳©׳•׳˜ ׳•׳׳”׳•׳¡׳™׳£ ׳¢׳•׳׳§ ׳׳׳•׳¨׳ ׳”׳–׳׳.
     """
 
-    # פיידנטיק v2 – הגדרות כלליות
+    # ׳₪׳™׳™׳“׳ ׳˜׳™׳§ v2 ג€“ ׳”׳’׳“׳¨׳•׳× ׳›׳׳׳™׳•׳×
     model_config = ConfigDict(
-        extra="ignore",              # התעלמות משדות לא מוכרים בטעינה
-        validate_assignment=True,    # ולידציה גם בשינוי לאחר יצירה
+        extra="ignore",              # ׳”׳×׳¢׳׳׳•׳× ׳׳©׳“׳•׳× ׳׳ ׳׳•׳›׳¨׳™׳ ׳‘׳˜׳¢׳™׳ ׳”
+        validate_assignment=True,    # ׳•׳׳™׳“׳¦׳™׳” ׳’׳ ׳‘׳©׳™׳ ׳•׳™ ׳׳׳—׳¨ ׳™׳¦׳™׳¨׳”
         arbitrary_types_allowed=True,
     )
 
     # ======================================================================
-    # 1. Identity & Meta — מי הזוג, איפה הוא נסחר, מה ההקשר שלו
+    # 1. Identity & Meta ג€” ׳׳™ ׳”׳–׳•׳’, ׳׳™׳₪׳” ׳”׳•׳ ׳ ׳¡׳—׳¨, ׳׳” ׳”׳”׳§׳©׳¨ ׳©׳׳•
     # ======================================================================
     pair_id: str = Field(
         ...,
-        description="מזהה ייחודי לזוג, לדוגמה 'QQQ_SOXX_US_EQ_1D' (משמש כמפתח ראשי).",
+        description="׳׳–׳”׳” ׳™׳™׳—׳•׳“׳™ ׳׳–׳•׳’, ׳׳“׳•׳’׳׳” 'QQQ_SOXX_US_EQ_1D' (׳׳©׳׳© ׳›׳׳₪׳×׳— ׳¨׳׳©׳™).",
     )
     sym_x: str = Field(
         ...,
-        description="Leg X (בדרך כלל leg הלונג). לדוגמה: 'QQQ'.",
+        description="Leg X (׳‘׳“׳¨׳ ׳›׳׳ leg ׳”׳׳•׳ ׳’). ׳׳“׳•׳’׳׳”: 'QQQ'.",
     )
     sym_y: str = Field(
         ...,
-        description="Leg Y (בדרך כלל leg השורט). לדוגמה: 'SOXX'.",
+        description="Leg Y (׳‘׳“׳¨׳ ׳›׳׳ leg ׳”׳©׳•׳¨׳˜). ׳׳“׳•׳’׳׳”: 'SOXX'.",
     )
 
     asset_class: str = Field(
         "EQUITY",
-        description="מחלקת נכס: EQUITY / ETF / FUTURES / FX / OPTIONS וכו'.",
+        description="׳׳—׳׳§׳× ׳ ׳›׳¡: EQUITY / ETF / FUTURES / FX / OPTIONS ׳•׳›׳•'.",
     )
     market: Optional[str] = Field(
         default=None,
-        description="זיהוי שוק/בורסה כללית, לדוגמה 'US-STK', 'EU-STK', 'CME-FUT'.",
+        description="׳–׳™׳”׳•׳™ ׳©׳•׳§/׳‘׳•׳¨׳¡׳” ׳›׳׳׳™׳×, ׳׳“׳•׳’׳׳” 'US-STK', 'EU-STK', 'CME-FUT'.",
     )
     exchange_x: Optional[str] = Field(
         default=None,
-        description="בורסה ל-leg X, לדוגמה 'NASDAQ', 'NYSE'.",
+        description="׳‘׳•׳¨׳¡׳” ׳-leg X, ׳׳“׳•׳’׳׳” 'NASDAQ', 'NYSE'.",
     )
     exchange_y: Optional[str] = Field(
         default=None,
-        description="בורסה ל-leg Y.",
+        description="׳‘׳•׳¨׳¡׳” ׳-leg Y.",
     )
 
     base_currency: str = Field(
         "USD",
-        description="מטבע בסיס ל-PnL ולניהול סיכון (בדרך כלל USD).",
+        description="׳׳˜׳‘׳¢ ׳‘׳¡׳™׳¡ ׳-PnL ׳•׳׳ ׳™׳”׳•׳ ׳¡׳™׳›׳•׳ (׳‘׳“׳¨׳ ׳›׳׳ USD).",
     )
     timezone: Optional[str] = Field(
         default=None,
-        description="אזור זמן ראשי למסחר בזוג (למשל 'America/New_York').",
+        description="׳׳–׳•׳¨ ׳–׳׳ ׳¨׳׳©׳™ ׳׳׳¡׳—׳¨ ׳‘׳–׳•׳’ (׳׳׳©׳ 'America/New_York').",
     )
 
     timeframe: str = Field(
         "1D",
-        description="טיים-פריים מרכזי לחישובי Spread / Z / Backtest (למשל '1D', '1H').",
+        description="׳˜׳™׳™׳-׳₪׳¨׳™׳™׳ ׳׳¨׳›׳–׳™ ׳׳—׳™׳©׳•׳‘׳™ Spread / Z / Backtest (׳׳׳©׳ '1D', '1H').",
     )
     data_source: str = Field(
         "IBKR",
-        description="מקור נתונים לפועל: IBKR / Yahoo / Mixed / DuckDB וכו'.",
+        description="׳׳§׳•׳¨ ׳ ׳×׳•׳ ׳™׳ ׳׳₪׳•׳¢׳: IBKR / Yahoo / Mixed / DuckDB ׳•׳›׳•'.",
     )
 
     sector_label: Optional[str] = Field(
         default=None,
-        description="סקטור/תמה כללית (למשל 'Tech', 'Semiconductors', 'Growth').",
+        description="׳¡׳§׳˜׳•׳¨/׳×׳׳” ׳›׳׳׳™׳× (׳׳׳©׳ 'Tech', 'Semiconductors', 'Growth').",
     )
     cluster_id: Optional[str] = Field(
         default=None,
-        description="Cluster / קלאסטר קורלציה/Factor (משויך ל-matrix_helpers / clustering).",
+        description="Cluster / ׳§׳׳׳¡׳˜׳¨ ׳§׳•׳¨׳׳¦׳™׳”/Factor (׳׳©׳•׳™׳ ׳-matrix_helpers / clustering).",
     )
 
     # ======================================================================
-    # 2. Trading Rules — חוקי המסחר הבסיסיים לזוג הזה
+    # 2. Trading Rules ג€” ׳—׳•׳§׳™ ׳”׳׳¡׳—׳¨ ׳”׳‘׳¡׳™׳¡׳™׳™׳ ׳׳–׳•׳’ ׳”׳–׳”
     # ======================================================================
     direction_convention: str = Field(
         "long_x_short_y_on_positive_z",
         description=(
-            "א convention לפרשנות סימן ה-Z: "
-            "למשל 'long_x_short_y_on_positive_z' אומר: Z>0 → long X, short Y."
+            "׳ convention ׳׳₪׳¨׳©׳ ׳•׳× ׳¡׳™׳׳ ׳”-Z: "
+            "׳׳׳©׳ 'long_x_short_y_on_positive_z' ׳׳•׳׳¨: Z>0 ג†’ long X, short Y."
         ),
     )
 
-    # --- כניסה/יציאה לפי Z-Score ---
+    # --- ׳›׳ ׳™׳¡׳”/׳™׳¦׳™׳׳” ׳׳₪׳™ Z-Score ---
     z_entry: float = Field(
         2.0,
-        description="סף Z לכניסה: abs(Z) >= z_entry.",
+        description="׳¡׳£ Z ׳׳›׳ ׳™׳¡׳”: abs(Z) >= z_entry.",
     )
     z_exit: float = Field(
         0.5,
-        description="סף Z ליציאה בסיסית: abs(Z) <= z_exit.",
+        description="׳¡׳£ Z ׳׳™׳¦׳™׳׳” ׳‘׳¡׳™׳¡׳™׳×: abs(Z) <= z_exit.",
     )
     z_take_profit: Optional[float] = Field(
         default=None,
-        description="Z לרווח יתר (TP). אם None – אין TP לפי Z, רק z_exit / סטופים אחרים.",
+        description="Z ׳׳¨׳•׳•׳— ׳™׳×׳¨ (TP). ׳׳ None ג€“ ׳׳™׳ TP ׳׳₪׳™ Z, ׳¨׳§ z_exit / ׳¡׳˜׳•׳₪׳™׳ ׳׳—׳¨׳™׳.",
     )
     z_hard_stop: Optional[float] = Field(
         default=None,
-        description="Z לסטופ קיצוני (Hard Stop). אם None – אין Hard Stop לפי Z.",
+        description="Z ׳׳¡׳˜׳•׳₪ ׳§׳™׳¦׳•׳ ׳™ (Hard Stop). ׳׳ None ג€“ ׳׳™׳ Hard Stop ׳׳₪׳™ Z.",
     )
 
-    # --- מגבלות זמן / Re-entry ---
+    # --- ׳׳’׳‘׳׳•׳× ׳–׳׳ / Re-entry ---
     min_holding_bars: int = Field(
         0,
-        description="מינימום ברים להחזקה לפני שמותר לסגור (מונע 'ניעור' מהיר מדי).",
+        description="׳׳™׳ ׳™׳׳•׳ ׳‘׳¨׳™׳ ׳׳”׳—׳–׳§׳” ׳׳₪׳ ׳™ ׳©׳׳•׳×׳¨ ׳׳¡׳’׳•׳¨ (׳׳•׳ ׳¢ '׳ ׳™׳¢׳•׳¨' ׳׳”׳™׳¨ ׳׳“׳™).",
         ge=0,
     )
     max_holding_bars: int = Field(
         999_999,
-        description="מקסימום ברים להחזקה. אחרי זה סוגרים בכל מקרה.",
+        description="׳׳§׳¡׳™׳׳•׳ ׳‘׳¨׳™׳ ׳׳”׳—׳–׳§׳”. ׳׳—׳¨׳™ ׳–׳” ׳¡׳•׳’׳¨׳™׳ ׳‘׳›׳ ׳׳§׳¨׳”.",
         ge=1,
     )
     reentry_cooldown_bars: int = Field(
         0,
-        description="כמה ברים חייבים לעבור בין סגירה לפתיחה חדשה באותו כיוון במסחר.",
+        description="׳›׳׳” ׳‘׳¨׳™׳ ׳—׳™׳™׳‘׳™׳ ׳׳¢׳‘׳•׳¨ ׳‘׳™׳ ׳¡׳’׳™׳¨׳” ׳׳₪׳×׳™׳—׳” ׳—׳“׳©׳” ׳‘׳׳•׳×׳• ׳›׳™׳•׳•׳ ׳‘׳׳¡׳—׳¨.",
         ge=0,
     )
 
-    # --- תנאים נוספים (אופציונליים) ---
+    # --- ׳×׳ ׳׳™׳ ׳ ׳•׳¡׳₪׳™׳ (׳׳•׳₪׳¦׳™׳•׳ ׳׳™׳™׳) ---
     min_spread_std: Optional[float] = Field(
         default=None,
-        description="סטיית תקן מינימלית של ה-Spread (כדי להימנע מזוגות 'מתים').",
+        description="׳¡׳˜׳™׳™׳× ׳×׳§׳ ׳׳™׳ ׳™׳׳׳™׳× ׳©׳ ׳”-Spread (׳›׳“׳™ ׳׳”׳™׳׳ ׳¢ ׳׳–׳•׳’׳•׳× '׳׳×׳™׳').",
     )
     min_corr_lookback: Optional[int] = Field(
         default=None,
-        description="מספר ברים מינימלי לחישוב קורלציה/קואינטגרציה.",
+        description="׳׳¡׳₪׳¨ ׳‘׳¨׳™׳ ׳׳™׳ ׳™׳׳׳™ ׳׳—׳™׳©׳•׳‘ ׳§׳•׳¨׳׳¦׳™׳”/׳§׳•׳׳™׳ ׳˜׳’׳¨׳¦׳™׳”.",
     )
     require_cointegration: bool = Field(
         True,
-        description="האם נדרש שהזוג יעבור בדיקת קואינטגרציה (Engle-Granger/Johansen).",
+        description="׳”׳׳ ׳ ׳“׳¨׳© ׳©׳”׳–׳•׳’ ׳™׳¢׳‘׳•׳¨ ׳‘׳“׳™׳§׳× ׳§׳•׳׳™׳ ׳˜׳’׳¨׳¦׳™׳” (Engle-Granger/Johansen).",
     )
     allow_short_both_legs: bool = Field(
         False,
-        description="האם מותר לפתוח פוזיציה עם שני רגליים בשורט (למשל בזוגי קריפטו/פקטורים).",
+        description="׳”׳׳ ׳׳•׳×׳¨ ׳׳₪׳×׳•׳— ׳₪׳•׳–׳™׳¦׳™׳” ׳¢׳ ׳©׳ ׳™ ׳¨׳’׳׳™׳™׳ ׳‘׳©׳•׳¨׳˜ (׳׳׳©׳ ׳‘׳–׳•׳’׳™ ׳§׳¨׳™׳₪׳˜׳•/׳₪׳§׳˜׳•׳¨׳™׳).",
     )
 
     slippage_bp: float = Field(
         5.0,
-        description="החלקה צפויה ב-bps (0.01% = 1bp). משפיע גם על Backtest וגם על הגדרת LIMIT.",
+        description="׳”׳—׳׳§׳” ׳¦׳₪׳•׳™׳” ׳‘-bps (0.01% = 1bp). ׳׳©׳₪׳™׳¢ ׳’׳ ׳¢׳ Backtest ׳•׳’׳ ׳¢׳ ׳”׳’׳“׳¨׳× LIMIT.",
         ge=0.0,
     )
     max_spread_bps_intraday: Optional[float] = Field(
         default=None,
-        description="תקרת Spread intraday ב-bps (למניעת כניסה בתנאי מרווח שוק חריג).",
+        description="׳×׳§׳¨׳× Spread intraday ׳‘-bps (׳׳׳ ׳™׳¢׳× ׳›׳ ׳™׳¡׳” ׳‘׳×׳ ׳׳™ ׳׳¨׳•׳•׳— ׳©׳•׳§ ׳—׳¨׳™׳’).",
     )
 
     # ======================================================================
-    # 3. Sizing & Local Risk — גודל פוזיציה ומגבלות סיכון ברמת הזוג
+    # 3. Sizing & Local Risk ג€” ׳’׳•׳“׳ ׳₪׳•׳–׳™׳¦׳™׳” ׳•׳׳’׳‘׳׳•׳× ׳¡׳™׳›׳•׳ ׳‘׳¨׳׳× ׳”׳–׳•׳’
     # ======================================================================
     sizing_mode: Literal["fixed_notional", "vol_target", "risk_parity"] = Field(
         "fixed_notional",
-        description="שיטת קביעת גודל הפוזיציה: fixed_notional / vol_target / risk_parity.",
+        description="׳©׳™׳˜׳× ׳§׳‘׳™׳¢׳× ׳’׳•׳“׳ ׳”׳₪׳•׳–׳™׳¦׳™׳”: fixed_notional / vol_target / risk_parity.",
     )
     base_notional_usd: float = Field(
         5_000.0,
-        description="נוטיונל בסיסי לפוזיציה אחת בזוג (לפני התאמות לפי ML / Regime / Risk).",
+        description="׳ ׳•׳˜׳™׳•׳ ׳ ׳‘׳¡׳™׳¡׳™ ׳׳₪׳•׳–׳™׳¦׳™׳” ׳׳—׳× ׳‘׳–׳•׳’ (׳׳₪׳ ׳™ ׳”׳×׳׳׳•׳× ׳׳₪׳™ ML / Regime / Risk).",
         ge=0.0,
     )
     vol_target_annual: Optional[float] = Field(
         default=None,
-        description="Vol annualized רצוי לזוג במסגרת Vol Targeting (אם None – לא בשימוש).",
+        description="Vol annualized ׳¨׳¦׳•׳™ ׳׳–׳•׳’ ׳‘׳׳¡׳’׳¨׳× Vol Targeting (׳׳ None ג€“ ׳׳ ׳‘׳©׳™׳׳•׳©).",
     )
     risk_budget_fraction: Optional[float] = Field(
         default=None,
         description=(
-            "אחוז מתקציב הסיכון הכולל שמוקצה לזוג (0–1). "
-            "משמש בעתיד לריסק-פריטי/הקצאות חכמות."
+            "׳׳—׳•׳– ׳׳×׳§׳¦׳™׳‘ ׳”׳¡׳™׳›׳•׳ ׳”׳›׳•׳׳ ׳©׳׳•׳§׳¦׳” ׳׳–׳•׳’ (0ג€“1). "
+            "׳׳©׳׳© ׳‘׳¢׳×׳™׳“ ׳׳¨׳™׳¡׳§-׳₪׳¨׳™׳˜׳™/׳”׳§׳¦׳׳•׳× ׳—׳›׳׳•׳×."
         ),
     )
 
     leverage_max: float = Field(
         1.0,
-        description="מינוף מקסימלי לזוג (יחסי). לרוב 1.0 לזוגי מניות/ETF.",
+        description="׳׳™׳ ׳•׳£ ׳׳§׳¡׳™׳׳׳™ ׳׳–׳•׳’ (׳™׳—׳¡׳™). ׳׳¨׳•׳‘ 1.0 ׳׳–׳•׳’׳™ ׳׳ ׳™׳•׳×/ETF.",
         ge=0.0,
     )
     pair_max_exposure_usd: Optional[float] = Field(
         default=None,
-        description="תקרת חשיפה מקומית לזוג. אם None – משתמשים בערך גלובלי מה-Config.",
+        description="׳×׳§׳¨׳× ׳—׳©׳™׳₪׳” ׳׳§׳•׳׳™׳× ׳׳–׳•׳’. ׳׳ None ג€“ ׳׳©׳×׳׳©׳™׳ ׳‘׳¢׳¨׳ ׳’׳׳•׳‘׳׳™ ׳׳”-Config.",
     )
     max_open_trades_per_pair: int = Field(
         1,
-        description="כמה פוזיציות של אותו זוג מותר לפתוח בו זמנית.",
+        description="׳›׳׳” ׳₪׳•׳–׳™׳¦׳™׳•׳× ׳©׳ ׳׳•׳×׳• ׳–׳•׳’ ׳׳•׳×׳¨ ׳׳₪׳×׳•׳— ׳‘׳• ׳–׳׳ ׳™׳×.",
         ge=1,
     )
 
     weight_in_portfolio: float = Field(
         0.0,
-        description="משקל מועדף בתיק (0–1), לשימוש Allocator חכם (לא חובה בשלב ראשון).",
+        description="׳׳©׳§׳ ׳׳•׳¢׳“׳£ ׳‘׳×׳™׳§ (0ג€“1), ׳׳©׳™׳׳•׳© Allocator ׳—׳›׳ (׳׳ ׳—׳•׳‘׳” ׳‘׳©׳׳‘ ׳¨׳׳©׳•׳).",
         ge=0.0,
         le=1.0,
     )
     min_trade_value_usd: Optional[float] = Field(
         default=None,
-        description="ערך מינימלי לעסקה כדי לא לייצר פוזיציות 'זבל' קטנות מדי.",
+        description="׳¢׳¨׳ ׳׳™׳ ׳™׳׳׳™ ׳׳¢׳¡׳§׳” ׳›׳“׳™ ׳׳ ׳׳™׳™׳¦׳¨ ׳₪׳•׳–׳™׳¦׳™׳•׳× '׳–׳‘׳' ׳§׳˜׳ ׳•׳× ׳׳“׳™.",
     )
 
     # ======================================================================
-    # 4. Quality, Stats & ML — איכות הזוג, סטטיסטיקות ו-Edge חכם
+    # 4. Quality, Stats & ML ג€” ׳׳™׳›׳•׳× ׳”׳–׳•׳’, ׳¡׳˜׳˜׳™׳¡׳˜׳™׳§׳•׳× ׳•-Edge ׳—׳›׳
     # ======================================================================
-    # --- סטטיסטיקות mean-reversion וקורלציה ---
+    # --- ׳¡׳˜׳˜׳™׳¡׳˜׳™׳§׳•׳× mean-reversion ׳•׳§׳•׳¨׳׳¦׳™׳” ---
     half_life_bars: Optional[float] = Field(
         default=None,
-        description="Half-life מוערך של ה-Spread (בברים). קטן ⇒ mean reversion מהיר.",
+        description="Half-life ׳׳•׳¢׳¨׳ ׳©׳ ׳”-Spread (׳‘׳‘׳¨׳™׳). ׳§׳˜׳ ג‡’ mean reversion ׳׳”׳™׳¨.",
     )
     hurst_exponent: Optional[float] = Field(
         default=None,
-        description="Hurst exponent של ה-Spread. <0.5 מעיד על Mean Reversion.",
+        description="Hurst exponent ׳©׳ ׳”-Spread. <0.5 ׳׳¢׳™׳“ ׳¢׳ Mean Reversion.",
     )
     corr_lookback_bars: Optional[int] = Field(
         default=None,
-        description="אורך חלון לחישוב קורלציה (אם שונה מברירת מחדל גלובלית).",
+        description="׳׳•׳¨׳ ׳—׳׳•׳ ׳׳—׳™׳©׳•׳‘ ׳§׳•׳¨׳׳¦׳™׳” (׳׳ ׳©׳•׳ ׳” ׳׳‘׳¨׳™׳¨׳× ׳׳—׳“׳ ׳’׳׳•׳‘׳׳™׳×).",
     )
     rolling_corr: Optional[float] = Field(
         default=None,
-        description="קורלציה ממוצעת/אחרונה של הזוג בתקופת האופטימיזציה.",
+        description="׳§׳•׳¨׳׳¦׳™׳” ׳׳׳•׳¦׳¢׳×/׳׳—׳¨׳•׳ ׳” ׳©׳ ׳”׳–׳•׳’ ׳‘׳×׳§׳•׳₪׳× ׳”׳׳•׳₪׳˜׳™׳׳™׳–׳¦׳™׳”.",
     )
 
     cointegration_method: Optional[str] = Field(
         default=None,
-        description="שיטת בדיקת קואינטגרציה (Engle-Granger, Johansen, CADF וכו').",
+        description="׳©׳™׳˜׳× ׳‘׳“׳™׳§׳× ׳§׳•׳׳™׳ ׳˜׳’׳¨׳¦׳™׳” (Engle-Granger, Johansen, CADF ׳•׳›׳•').",
     )
     cointegration_pvalue: Optional[float] = Field(
         default=None,
-        description="p-value של בדיקת הקואינטגרציה לזוג.",
+        description="p-value ׳©׳ ׳‘׳“׳™׳§׳× ׳”׳§׳•׳׳™׳ ׳˜׳’׳¨׳¦׳™׳” ׳׳–׳•׳’.",
     )
     adf_pvalue_spread: Optional[float] = Field(
         default=None,
-        description="p-value של ADF על ה-Spread (סטציונריות).",
+        description="p-value ׳©׳ ADF ׳¢׳ ׳”-Spread (׳¡׳˜׳¦׳™׳•׳ ׳¨׳™׳•׳×).",
     )
 
-    # --- ציונים (Scores) מה-Recommender / Opt ---
+    # --- ׳¦׳™׳•׳ ׳™׳ (Scores) ׳׳”-Recommender / Opt ---
     score_total: float = Field(
         0.0,
-        description="ציון משוקלל כללי (Composite Score) מה-Recommender/Opt.",
+        description="׳¦׳™׳•׳ ׳׳©׳•׳§׳׳ ׳›׳׳׳™ (Composite Score) ׳׳”-Recommender/Opt.",
     )
     score_corr_stability: float = Field(
         0.0,
-        description="מדד יציבות קורלציה (0–1 או סקייל אחר לפי המערכת שלך).",
+        description="׳׳“׳“ ׳™׳¦׳™׳‘׳•׳× ׳§׳•׳¨׳׳¦׳™׳” (0ג€“1 ׳׳• ׳¡׳§׳™׳™׳ ׳׳—׳¨ ׳׳₪׳™ ׳”׳׳¢׳¨׳›׳× ׳©׳׳).",
     )
     score_cointegration: float = Field(
         0.0,
-        description="מדד איכות קואינטגרציה (מבוסס p-value/סטטיסטיקה).",
+        description="׳׳“׳“ ׳׳™׳›׳•׳× ׳§׳•׳׳™׳ ׳˜׳’׳¨׳¦׳™׳” (׳׳‘׳•׳¡׳¡ p-value/׳¡׳˜׳˜׳™׳¡׳˜׳™׳§׳”).",
     )
     score_mean_reversion_speed: float = Field(
         0.0,
-        description="מדד מהירות Mean Reversion (מנורמל מ-half-life/מדדים אחרים).",
+        description="׳׳“׳“ ׳׳”׳™׳¨׳•׳× Mean Reversion (׳׳ ׳•׳¨׳׳ ׳-half-life/׳׳“׳“׳™׳ ׳׳—׳¨׳™׳).",
     )
 
-    # --- תוצאות Backtest מרכזיות ---
+    # --- ׳×׳•׳¦׳׳•׳× Backtest ׳׳¨׳›׳–׳™׳•׳× ---
     backtest_sharpe: float = Field(
         0.0,
-        description="Sharpe Ratio מה-Backtest שנבחר לאופטימיזציה.",
+        description="Sharpe Ratio ׳׳”-Backtest ׳©׳ ׳‘׳—׳¨ ׳׳׳•׳₪׳˜׳™׳׳™׳–׳¦׳™׳”.",
     )
     backtest_sortino: float = Field(
         0.0,
-        description="Sortino Ratio מה-Backtest.",
+        description="Sortino Ratio ׳׳”-Backtest.",
     )
     backtest_max_drawdown: float = Field(
         0.0,
-        description="Max Drawdown (יחסי, למשל -0.15 = -15%).",
+        description="Max Drawdown (׳™׳—׳¡׳™, ׳׳׳©׳ -0.15 = -15%).",
     )
     backtest_winrate: float = Field(
         0.0,
-        description="אחוז עסקאות רווחיות (0–1).",
+        description="׳׳—׳•׳– ׳¢׳¡׳§׳׳•׳× ׳¨׳•׳•׳—׳™׳•׳× (0ג€“1).",
     )
     backtest_trades_count: int = Field(
         0,
-        description="מספר עסקאות ב-Backtest (מדד יציבות סטטיסטית).",
+        description="׳׳¡׳₪׳¨ ׳¢׳¡׳§׳׳•׳× ׳‘-Backtest (׳׳“׳“ ׳™׳¦׳™׳‘׳•׳× ׳¡׳˜׳˜׳™׳¡׳˜׳™׳×).",
         ge=0,
     )
 
-    # --- תוצרי ML/AutoML ---
+    # --- ׳×׳•׳¦׳¨׳™ ML/AutoML ---
     ml_edge_score: Optional[float] = Field(
         default=None,
-        description="Edge מבוסס ML (למשל scaled בין -1 ל-1 או 0–1).",
+        description="Edge ׳׳‘׳•׳¡׳¡ ML (׳׳׳©׳ scaled ׳‘׳™׳ -1 ׳-1 ׳׳• 0ג€“1).",
     )
     ml_confidence: Optional[float] = Field(
         default=None,
-        description="רמת ביטחון (0–1) בתחזית המודל עבור הזוג.",
+        description="׳¨׳׳× ׳‘׳™׳˜׳—׳•׳ (0ג€“1) ׳‘׳×׳—׳–׳™׳× ׳”׳׳•׳“׳ ׳¢׳‘׳•׳¨ ׳”׳–׳•׳’.",
     )
     ml_predicted_horizon_bars: Optional[int] = Field(
         default=None,
-        description="אופק זמן (בברים) שבו המודל צופה את המיספרד/רווח.",
+        description="׳׳•׳₪׳§ ׳–׳׳ (׳‘׳‘׳¨׳™׳) ׳©׳‘׳• ׳”׳׳•׳“׳ ׳¦׳•׳₪׳” ׳׳× ׳”׳׳™׳¡׳₪׳¨׳“/׳¨׳•׳•׳—.",
     )
     model_version: Optional[str] = Field(
         default=None,
-        description="גרסת המודל/פייפליין (לדוגמה 'pairs_ml_v3.1').",
+        description="׳’׳¨׳¡׳× ׳”׳׳•׳“׳/׳₪׳™׳™׳₪׳׳™׳™׳ (׳׳“׳•׳’׳׳” 'pairs_ml_v3.1').",
     )
 
     # ======================================================================
-    # 5. Macro & Regime — הקשר מאקרו/משטר שוק
+    # 5. Macro & Regime ג€” ׳”׳§׳©׳¨ ׳׳׳§׳¨׳•/׳׳©׳˜׳¨ ׳©׳•׳§
     # ======================================================================
     regime_id: Optional[str] = Field(
         default=None,
-        description="מזהה משטר/מצב (למשל 'risk_on', 'risk_off', 'crash', 'range').",
+        description="׳׳–׳”׳” ׳׳©׳˜׳¨/׳׳¦׳‘ (׳׳׳©׳ 'risk_on', 'risk_off', 'crash', 'range').",
     )
     macro_regime_id: Optional[str] = Field(
         default=None,
-        description="משטר מאקרו גלובלי (לפי macro_tab, לוח שנה כלכלי וכו').",
+        description="׳׳©׳˜׳¨ ׳׳׳§׳¨׳• ׳’׳׳•׳‘׳׳™ (׳׳₪׳™ macro_tab, ׳׳•׳— ׳©׳ ׳” ׳›׳׳›׳׳™ ׳•׳›׳•').",
     )
     vol_regime_id: Optional[str] = Field(
         default=None,
-        description="משטר תנודתיות (למשל 'low_vol', 'high_vol').",
+        description="׳׳©׳˜׳¨ ׳×׳ ׳•׳“׳×׳™׳•׳× (׳׳׳©׳ 'low_vol', 'high_vol').",
     )
     macro_score: Optional[float] = Field(
         default=None,
-        description="ציון מאקרו כללי עבור הזוג (0–1 או -1–1).",
+        description="׳¦׳™׳•׳ ׳׳׳§׳¨׳• ׳›׳׳׳™ ׳¢׳‘׳•׳¨ ׳”׳–׳•׳’ (0ג€“1 ׳׳• -1ג€“1).",
     )
 
     # ======================================================================
-    # 6. Operational / Control — שליטה, מיתוג, תיעוד
+    # 6. Operational / Control ג€” ׳©׳׳™׳˜׳”, ׳׳™׳×׳•׳’, ׳×׳™׳¢׳•׳“
     # ======================================================================
     is_active: bool = Field(
         False,
-        description="האם הזוג מאושר למסחר חי כרגע (תחת מגבלות גלובליות).",
+        description="׳”׳׳ ׳”׳–׳•׳’ ׳׳׳•׳©׳¨ ׳׳׳¡׳—׳¨ ׳—׳™ ׳›׳¨׳’׳¢ (׳×׳—׳× ׳׳’׳‘׳׳•׳× ׳’׳׳•׳‘׳׳™׳•׳×).",
     )
     is_suspended: bool = Field(
         False,
-        description="האם הזוג מושהה זמנית (עוקף את is_active לצורך חירום/חדשות).",
+        description="׳”׳׳ ׳”׳–׳•׳’ ׳׳•׳©׳”׳” ׳–׳׳ ׳™׳× (׳¢׳•׳§׳£ ׳׳× is_active ׳׳¦׳•׳¨׳ ׳—׳™׳¨׳•׳/׳—׳“׳©׳•׳×).",
     )
     suspend_reason: Optional[str] = Field(
         default=None,
-        description="סיבת ההקפאה (למשל 'Earnings', 'Macro event', 'Bug investigation').",
+        description="׳¡׳™׳‘׳× ׳”׳”׳§׳₪׳׳” (׳׳׳©׳ 'Earnings', 'Macro event', 'Bug investigation').",
     )
 
     priority_rank: Optional[int] = Field(
         default=None,
-        description="דירוג עדיפות (1=גבוה ביותר). משמש לסינון בפועל במנוע הלייב.",
+        description="׳“׳™׳¨׳•׳’ ׳¢׳“׳™׳₪׳•׳× (1=׳’׳‘׳•׳” ׳‘׳™׳•׳×׳¨). ׳׳©׳׳© ׳׳¡׳™׳ ׳•׳ ׳‘׳₪׳•׳¢׳ ׳‘׳׳ ׳•׳¢ ׳”׳׳™׳™׳‘.",
     )
     tags: List[str] = Field(
         default_factory=list,
-        description="רשימת תגים (למשל ['core', 'tech', 'experimental']).",
+        description="׳¨׳©׳™׳׳× ׳×׳’׳™׳ (׳׳׳©׳ ['core', 'tech', 'experimental']).",
     )
 
     min_liquidity_usd: float = Field(
         0.0,
-        description="נזילות מינימלית נדרשת ליום/טיים-פריים כדי לאפשר פתיחת טריידים.",
+        description="׳ ׳–׳™׳׳•׳× ׳׳™׳ ׳™׳׳׳™׳× ׳ ׳“׳¨׳©׳× ׳׳™׳•׳/׳˜׳™׳™׳-׳₪׳¨׳™׳™׳ ׳›׳“׳™ ׳׳׳₪׳©׳¨ ׳₪׳×׳™׳—׳× ׳˜׳¨׳™׳™׳“׳™׳.",
         ge=0.0,
     )
 
     notes: Optional[str] = Field(
         default=None,
-        description="הערות חופשיות על הזוג (מאנליסט/מפעיל המערכת).",
+        description="׳”׳¢׳¨׳•׳× ׳—׳•׳₪׳©׳™׳•׳× ׳¢׳ ׳”׳–׳•׳’ (׳׳׳ ׳׳™׳¡׳˜/׳׳₪׳¢׳™׳ ׳”׳׳¢׳¨׳›׳×).",
     )
 
     last_optimized_at: Optional[datetime] = Field(
         default=None,
-        description="מועד הריצה האחרונה של האופטימיזציה עבור הזוג.",
+        description="׳׳•׳¢׳“ ׳”׳¨׳™׳¦׳” ׳”׳׳—׳¨׳•׳ ׳” ׳©׳ ׳”׳׳•׳₪׳˜׳™׳׳™׳–׳¦׳™׳” ׳¢׳‘׳•׳¨ ׳”׳–׳•׳’.",
     )
     last_backtest_at: Optional[datetime] = Field(
         default=None,
-        description="מועד ה-Backtest האחרון עבור הזוג.",
+        description="׳׳•׳¢׳“ ׳”-Backtest ׳”׳׳—׳¨׳•׳ ׳¢׳‘׳•׳¨ ׳”׳–׳•׳’.",
     )
     last_ml_update_at: Optional[datetime] = Field(
         default=None,
-        description="מועד העדכון האחרון של תוצרי ה-ML עבור הזוג.",
+        description="׳׳•׳¢׳“ ׳”׳¢׳“׳›׳•׳ ׳”׳׳—׳¨׳•׳ ׳©׳ ׳×׳•׳¦׳¨׳™ ׳”-ML ׳¢׳‘׳•׳¨ ׳”׳–׳•׳’.",
     )
 
     # ======================================================================
-    # Helper methods קלים (לא חובה להשתמש, אבל נוח)
+    # Helper methods ׳§׳׳™׳ (׳׳ ׳—׳•׳‘׳” ׳׳”׳©׳×׳׳©, ׳׳‘׳ ׳ ׳•׳—)
     # ======================================================================
     def is_tradeable_now(self) -> bool:
         """
-        פונקציה נוחה למנוע הלייב/דשבורד:
-            מחזירה True רק אם:
+        ׳₪׳•׳ ׳§׳¦׳™׳” ׳ ׳•׳—׳” ׳׳׳ ׳•׳¢ ׳”׳׳™׳™׳‘/׳“׳©׳‘׳•׳¨׳“:
+            ׳׳—׳–׳™׳¨׳” True ׳¨׳§ ׳׳:
                 - is_active == True
                 - is_suspended == False
 
-        שאר הבדיקות (Risk גלובלי, מגבלות חשיפה וכו') נעשות מחוץ למודל.
+        ׳©׳׳¨ ׳”׳‘׳“׳™׳§׳•׳× (Risk ׳’׳׳•׳‘׳׳™, ׳׳’׳‘׳׳•׳× ׳—׳©׳™׳₪׳” ׳•׳›׳•') ׳ ׳¢׳©׳•׳× ׳׳—׳•׳¥ ׳׳׳•׳“׳.
         """
         return self.is_active and not self.is_suspended

@@ -60,13 +60,14 @@ import os
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, date, timedelta, timezone
+from datetime import datetime, date, timedelta
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Sequence, Tuple, Union, Optional
 
 import pandas as pd
 import requests
+import yfinance as yf
 from pydantic import Field
 
 try:
@@ -254,23 +255,6 @@ def _clean_df(df: pd.DataFrame) -> pd.DataFrame:
     return df.sort_index()
 
 
-def _compute_data_age_hours(df: "pd.DataFrame") -> Optional[float]:
-    """Compute hours since most recent data point. Returns None if cannot determine."""
-    try:
-        from datetime import timezone as _tz
-        if df is None or df.empty:
-            return None
-        last_date = df.index.max()
-        if hasattr(last_date, "to_pydatetime"):
-            last_date = last_date.to_pydatetime()
-        if last_date.tzinfo is None:
-            last_date = last_date.replace(tzinfo=_tz.utc)
-        now = datetime.now(_tz.utc)
-        return (now - last_date).total_seconds() / 3600.0
-    except Exception:
-        return None
-
-
 def _read_local_csv(path: Path) -> pd.DataFrame:
     """
     קורא CSV בצורה בטוחה – בלי parse_dates=["date"] שמתפוצץ אם אין עמודה 'date'.
@@ -289,27 +273,6 @@ def _read_local_csv(path: Path) -> pd.DataFrame:
 # =============================================================
 
 
-def _download_fmp(
-    symbol: str,
-    *,
-    start: Optional[datetime] = None,
-    end: Optional[datetime] = None,
-) -> pd.DataFrame:
-    """Fetch daily OHLCV from FMP (canonical provider)."""
-    try:
-        from common.fmp_client import get_fmp_client
-        client = get_fmp_client()
-        start_str = start.strftime("%Y-%m-%d") if start else None
-        end_str = end.strftime("%Y-%m-%d") if end else None
-        df = client.get_historical_prices(symbol, start=start_str, end=end_str)
-        if df is None or df.empty:
-            return pd.DataFrame()
-        return _clean_df(df)
-    except Exception as exc:
-        logger.warning("FMP download failed for %s: %s", symbol, exc)
-        return pd.DataFrame()
-
-
 def _download_yahoo(
     symbol: str,
     *,
@@ -317,19 +280,8 @@ def _download_yahoo(
     end: Optional[datetime] = None,
     interval: str = "1d",
 ) -> pd.DataFrame:
-    """
-    Fetch daily OHLCV. Routes through FMP first (canonical provider).
-    Falls back to yfinance only if FMP returns empty and yfinance is installed.
-    """
-    # Daily data: try FMP first
-    if interval in ("1d", "1day", "daily"):
-        df = _download_fmp(symbol, start=start, end=end)
-        if not df.empty:
-            return df
-
-    # Fallback: yfinance (lazy import — kept for intraday and last resort)
+    """Try Yahoo Finance, return cleaned DataFrame or empty if failed/empty."""
     try:
-        import yfinance as yf  # noqa: PLC0415
         kwargs: Dict[str, Any] = {
             "interval": interval,
             "progress": False,
@@ -345,9 +297,6 @@ def _download_yahoo(
         if df is None or df.empty:
             return pd.DataFrame()
         return _clean_df(df)
-    except ImportError:
-        logger.debug("yfinance not installed; FMP-only mode active.")
-        return pd.DataFrame()
     except Exception as exc:  # pragma: no cover
         logger.warning("Yahoo download failed for %s: %s", symbol, exc)
         return pd.DataFrame()
@@ -389,7 +338,7 @@ def download_symbol(
     """
     if intraday:
         if start is None or end is None:
-            end = datetime.now(timezone.utc)
+            end = datetime.now(timezone.utc)()
             start = end - timedelta(days=settings.INTRADAY_LOOKBACK_DAYS)
         df = _download_yahoo(symbol, start=start, end=end, interval=settings.INTRADAY_INTERVAL)
         return df
@@ -426,8 +375,8 @@ def _csv_is_stale(path: Path, *, max_age_days: int) -> bool:
         return True
     if max_age_days <= 0:
         return True
-    mtime = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
-    return mtime < datetime.now(timezone.utc) - timedelta(days=max_age_days)
+    mtime = datetime.fromtimestamp(path.stat().st_mtime)
+    return mtime < datetime.now(timezone.utc)() - timedelta(days=max_age_days)
 
 
 def bulk_download(
@@ -987,22 +936,6 @@ def load_price_data(
         first = float(df["close"].iloc[0])
         if first != 0:
             df["close"] = df["close"] / first * 100.0
-
-    # Surveillance hook: detect stale data (P1-SURV2, SURV-DI-001)
-    # Finding: docs/remediation/remediation_ledger.md:P1-SURV2
-    try:
-        _data_age_hours = _compute_data_age_hours(df)
-        if _data_age_hours is not None:
-            from surveillance.engine import get_surveillance_engine
-            _surv = get_surveillance_engine()
-            _surv.detect(
-                rule_id="SURV-DI-001",
-                entity_type="price_data",
-                entity_id=symbol,
-                metric_value=_data_age_hours,
-            )
-    except Exception:
-        pass  # Surveillance errors never break data loading
 
     return df
 

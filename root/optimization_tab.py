@@ -22,7 +22,7 @@ from __future__ import annotations
 # SECTION 0: Standard imports & project root
 # =========================
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Iterable, Mapping, Sequence, Union, TypeAlias, Callable
+from typing import Any, Dict, List, Optional, Tuple, Iterable, Mapping, Sequence, Union, TypeAlias
 
 import os
 import sys
@@ -34,11 +34,9 @@ import math
 import itertools
 import inspect
 from datetime import date, datetime, timezone
-from dataclasses import dataclass
+
 import warnings
 import argparse
-import hashlib
-import io
 
 # -------- Project root, path injection --------
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -1331,7 +1329,7 @@ def render_opt_run_history(service: DashboardService,
         st.info("אין עדיין ריצות אופטימיזציה בהקשר הזה.")
         return
 
-    st.dataframe(runs_df, use_container_width=True)
+    st.dataframe(runs_df, width = "stretch")
     st.caption("טיפ: בהמשך אפשר להוסיף כפתור 'Load' לכל run ולשחזר קונפיג.")
 
 # =========================
@@ -3428,6 +3426,7 @@ def get_session_risk_kwargs() -> Dict[str, Any]:
 7. run_optuna_for_pair(...)      — מנוע אופטימיזציה מלא (Optuna / simulated fallback).
 """
 
+import hashlib
 
 
 # =========================
@@ -4857,1014 +4856,162 @@ def _sidebar_core_config() -> Dict[str, Any]:
 # SECTION 6.2: Main UI entrypoint — render_optimization_tab
 # =========================
 
-# ----------------------------
-# Small, robust utilities
-# ----------------------------
-def _as_dict(x: Any) -> Dict[str, Any]:
-    return x if isinstance(x, dict) else {}
-
-
-def _first_non_empty(*vals: Any, default: Any = None) -> Any:
-    for v in vals:
-        if v is None:
-            continue
-        if isinstance(v, str) and not v.strip():
-            continue
-        return v
-    return default
-
-
-def _normalize_env(env_raw: Any) -> str:
-    e = str(env_raw or "").strip().lower()
-    if not e:
-        return "dev"
-
-    # common aliases -> canonical set
-    if e in {"local"}:
-        return "dev"
-    if e in {"dev", "development"}:
-        return "dev"
-    if e in {"research", "backtest", "sandbox"}:
-        return "research"
-    if e in {"paper", "papertrade", "paper_trading"}:
-        return "paper"
-    if e in {"live", "prod", "production", "staging"}:
-        return "live"
-
-    # fallback conservative
-    return "dev"
-
-
-
-def _safe_int(x: Any, default: int) -> int:
-    try:
-        return int(x)
-    except Exception:
-        return int(default)
-
-
-def _safe_float(x: Any, default: float) -> float:
-    try:
-        return float(x)
-    except Exception:
-        return float(default)
-
-
-def _safe_str(x: Any, default: str = "") -> str:
-    try:
-        s = str(x)
-        return s
-    except Exception:
-        return default
-
-
-def _index_of(options: List[str], value: str, default: int = 0) -> int:
-    try:
-        return options.index(value)
-    except Exception:
-        return default
-
-
-def ss_get(key: str, default: Any = None) -> Any:
-    try:
-        return st.session_state.get(key, default)
-    except Exception:
-        return default
-
-
-def ss_set(key: str, value: Any) -> None:
-    try:
-        st.session_state[key] = value
-    except Exception:
-        return
-
-# ----------------------------
-# Streamlit rendering shims (HF-grade)
-# ----------------------------
-def st_df(df: Any, *, height: int | None = None, key: str | None = None) -> None:
-    """
-    Stable dataframe renderer across Streamlit versions.
-    Never uses width="stretch". Always prefers container width.
-    """
-    kwargs: Dict[str, Any] = {}
-    if height is not None:
-        kwargs["height"] = int(height)
-    if key is not None:
-        kwargs["key"] = str(key)
-
-    # Try modern signature first
-    try:
-        st.dataframe(df, use_container_width=True, **kwargs)
-        return
-    except TypeError:
-        pass
-
-    # Fallback signature
-    try:
-        st.dataframe(df, **kwargs)
-    except Exception:
-        st.write(df)
-
-def st_plot(fig: Any, *, key: str | None = None) -> None:
-    """
-    Stable plotly renderer across Streamlit versions.
-    Never uses width="stretch".
-    """
-    kwargs: Dict[str, Any] = {}
-    if key is not None:
-        kwargs["key"] = str(key)
-    try:
-        st.plotly_chart(fig, use_container_width=True, **kwargs)
-    except TypeError:
-        try:
-            st.plotly_chart(fig, **kwargs)
-        except Exception:
-            st.write(fig)
-
-def _parse_pair_line(ln: str) -> Optional[Tuple[str, str]]:
-    """
-    Accepts: "XLY-XLP", "XLY|XLP", "XLY/XLP", "XLY:XLP", "XLY\\XLP"
-    """
-    s = _safe_str(ln, "").strip().upper()
-    if not s:
-        return None
-    for sep in ("-", "|", "/", "\\", ":", ",", ";"):
-        if sep in s:
-            a, b = [p.strip() for p in s.split(sep, 1)]
-            if a and b and a != b:
-                return a, b
-            return None
-    return None
-
-
-def _parse_batch_pairs(lines: List[str]) -> List[Tuple[str, str]]:
-    out: List[Tuple[str, str]] = []
-    for ln in lines or []:
-        p = _parse_pair_line(ln)
-        if p:
-            out.append(p)
-    # Deduplicate while keeping order
-    seen = set()
-    uniq: List[Tuple[str, str]] = []
-    for a, b in out:
-        k = (a, b)
-        if k in seen:
-            continue
-        seen.add(k)
-        uniq.append(k)
-    return uniq
-
-def _spec_default_any(names: List[str], fallback: Any = None) -> Any:
-    for n in names:
-        try:
-            spec = PARAM_SPECS.get(n)
-            if spec is not None:
-                v = getattr(spec, "default", None)
-                if v is not None:
-                    return v
-        except Exception:
-            continue
-    return fallback
-
-
-def _get_cfg_blob(runtime_ctx: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Best-effort: try multiple known keys for config blobs.
-    Keeps this tab decoupled from any single upstream naming convention.
-    """
-    for k in ("config", "app_config", "app_cfg", "dashboard_config", "settings"):
-        v = runtime_ctx.get(k)
-        if isinstance(v, dict) and v:
-            return v
-    for k in ("config", "app_config", "app_cfg", "dashboard_config", "settings"):
-        v = ss_get(k)
-        if isinstance(v, dict) and v:
-            return v
-    return {}
-
-def _now_utc_z() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
-
-
-def _num_input(
-    label: str,
-    *,
-    key: str,
-    value: float,
-    min_value: Optional[float] = None,
-    max_value: Optional[float] = None,
-    step: float = 0.1,
-    help: Optional[str] = None,
-    format: Optional[str] = None,
-) -> float:
-    kwargs: Dict[str, Any] = {"label": label, "value": float(value), "step": float(step), "key": key}
-    if min_value is not None:
-        kwargs["min_value"] = float(min_value)
-    if max_value is not None:
-        kwargs["max_value"] = float(max_value)
-    if help:
-        kwargs["help"] = help
-    if format:
-        kwargs["format"] = format
-    return float(st.number_input(**kwargs))
-
-# ----------------------------
-# SqlStore → price series loaders (HF-grade, best-effort)
-# ----------------------------
-def _try_get_sql_store(app_ctx_global: Any, *, env: str) -> Any:
-    """
-    Resolve a SqlStore instance in a safe, best-effort way.
-    Priority:
-      1) app_ctx_global.sql_store (already initialized by AppContext)
-      2) SqlStore.from_settings(app_ctx_global.settings, env=env, read_only=True)
-    """
-    # 1) Already attached to AppContext
-    if app_ctx_global is not None:
-        try:
-            s = getattr(app_ctx_global, "sql_store", None)
-            if s is not None:
-                return s
-        except Exception:
-            pass
-
-    # 2) Build from settings if possible
-    try:
-        from core.sql_store import SqlStore  # type: ignore
-    except Exception:
-        SqlStore = None  # type: ignore
-
-    if SqlStore is None or app_ctx_global is None:
-        return None
-
-    try:
-        settings_obj = getattr(app_ctx_global, "settings", None)
-        if settings_obj is None:
-            return None
-        return SqlStore.from_settings(settings_obj, env=env, read_only=True)
-    except Exception:
-        return None
-
-
-def _prices_table_name(store: Any) -> str:
-    # Prefer internal prefix-aware table naming if available
-    try:
-        if hasattr(store, "_tbl") and callable(getattr(store, "_tbl")):
-            return str(store._tbl("prices"))
-    except Exception:
-        pass
-    return "prices"
-
-
-def _coerce_price_series_from_df(df: pd.DataFrame, *, symbol: str) -> pd.Series:
-    """
-    Accepts typical SqlStore.prices shapes:
-      - columns: date, close (or Close), optionally symbol
-      - index can be date-like
-    """
-    if df is None or df.empty:
-        raise ValueError(f"No price rows for {symbol}")
-
-    dfx = df.copy()
-
-    # Normalize date index
-    if "date" in dfx.columns:
-        dfx["date"] = pd.to_datetime(dfx["date"], errors="coerce")
-        dfx = dfx.dropna(subset=["date"]).sort_values("date")
-        dfx = dfx.set_index("date")
-    else:
-        # assume index is date-like
-        try:
-            dfx.index = pd.to_datetime(dfx.index, errors="coerce")
-            dfx = dfx.dropna(axis=0, subset=[dfx.columns[0]]) if len(dfx.columns) else dfx
-            dfx = dfx.sort_index()
-        except Exception:
-            raise ValueError(f"Could not coerce date index for {symbol}")
-
-    # Pick a close-like column
-    col_candidates = ["close", "Close", "adj_close", "Adj Close", "price", "Price"]
-    col = next((c for c in col_candidates if c in dfx.columns), None)
-
-    if col is None:
-        # fallback: first numeric column
-        num_cols = dfx.select_dtypes(include=[np.number]).columns.tolist()
-        col = num_cols[0] if num_cols else dfx.columns[0]
-
-    s = pd.to_numeric(dfx[col], errors="coerce").dropna()
-    s.name = str(symbol)
-    if s.empty:
-        raise ValueError(f"Empty price series after coercion for {symbol}")
-    return s
-
-
-def _load_price_series_from_sqlstore(
-    store: Any,
-    symbol: str,
-    *,
-    start_date: Any,
-    end_date: Any,
-) -> pd.Series:
-    """
-    Best-effort loader:
-      1) store.load_price_history(symbol) if exists
-      2) store.read_table(prices_table) and filter
-    """
-    sym = str(symbol).strip().upper()
-    if not sym:
-        raise ValueError("Empty symbol")
-
-    # Normalize dates
-    sd = pd.to_datetime(start_date, errors="coerce")
-    ed = pd.to_datetime(end_date, errors="coerce")
-    if pd.isna(sd) or pd.isna(ed):
-        # if ctx doesn't provide dates, try load all
-        sd = None
-        ed = None
-
-    # (1) load_price_history if available
-    if hasattr(store, "load_price_history") and callable(getattr(store, "load_price_history")):
-        df = store.load_price_history(sym)  # type: ignore[misc]
-        if isinstance(df, pd.Series):
-            s = df.copy()
-            s.index = pd.to_datetime(s.index, errors="coerce")
-            s = s.dropna().sort_index()
-        else:
-            s = _coerce_price_series_from_df(df, symbol=sym)
-
-        if sd is not None and ed is not None:
-            s = s.loc[(s.index >= sd) & (s.index <= ed)]
-        if s.empty:
-            raise ValueError(f"No rows in requested window for {sym}")
-        return s
-
-    # (2) fallback: read_table("prices")
-    if not hasattr(store, "read_table") or not callable(getattr(store, "read_table")):
-        raise RuntimeError("SqlStore has no load_price_history and no read_table")
-
-    prices_tbl = _prices_table_name(store)
-    df_all = store.read_table(prices_tbl)  # type: ignore[misc]
-    if df_all is None or df_all.empty:
-        raise ValueError("SqlStore.prices is empty")
-
-    cols = {c.lower(): c for c in df_all.columns}
-    sym_col = cols.get("symbol", "symbol" if "symbol" in df_all.columns else None)
-    date_col = cols.get("date", "date" if "date" in df_all.columns else None)
-
-    if sym_col is None or date_col is None:
-        raise ValueError("SqlStore.prices missing required columns: symbol/date")
-
-    df_sym = df_all[df_all[sym_col].astype(str).str.upper() == sym].copy()
-    if df_sym.empty:
-        raise ValueError(f"No price rows for {sym} in SqlStore.prices")
-
-    # keep only date + close-like columns to reduce memory
-    df_sym = df_sym.rename(columns={date_col: "date"})
-
-    # Filter by dates
-    df_sym["date"] = pd.to_datetime(df_sym["date"], errors="coerce")
-    df_sym = df_sym.dropna(subset=["date"])
-    if sd is not None and ed is not None:
-        df_sym = df_sym[(df_sym["date"] >= sd) & (df_sym["date"] <= ed)]
-
-    if df_sym.empty:
-        raise ValueError(f"No price rows in requested window for {sym}")
-
-    return _coerce_price_series_from_df(df_sym, symbol=sym)
-
-@cache_resource(show_spinner=False)
-def _get_sql_store_cached(env: str) -> Any:
-    """
-    Cache SqlStore instance per env. Best-effort.
-    """
-    try:
-        from core.app_context import AppContext  # type: ignore
-        from core.sql_store import SqlStore  # type: ignore
-    except Exception:
-        return None
-
-    try:
-        app_ctx = AppContext.get_global()
-        # Prefer already initialized store if present
-        s = getattr(app_ctx, "sql_store", None)
-        if s is not None:
-            return s
-        settings_obj = getattr(app_ctx, "settings", None)
-        if settings_obj is None:
-            return None
-        return SqlStore.from_settings(settings_obj, env=str(env), read_only=True)
-    except Exception:
-        return None
-
-
-@cache_data(show_spinner=False)
-def _load_price_series_cached(env: str, symbol: str, start_iso: str, end_iso: str) -> pd.Series:
-    """
-    Cached price loader: returns a Close-like Series indexed by datetime.
-    The cache key is (env, symbol, start, end).
-    """
-    store = _get_sql_store_cached(env)
-    if store is None:
-        raise RuntimeError("SqlStore not available")
-
-    sym = str(symbol).strip().upper()
-    sd = pd.to_datetime(start_iso, errors="coerce")
-    ed = pd.to_datetime(end_iso, errors="coerce")
-
-    # 1) Preferred API
-    if hasattr(store, "load_price_history") and callable(getattr(store, "load_price_history")):
-        df = store.load_price_history(sym)  # type: ignore[misc]
-        if isinstance(df, pd.Series):
-            s = df.copy()
-            s.index = pd.to_datetime(s.index, errors="coerce")
-            s = s.dropna().sort_index()
-        else:
-            s = _coerce_price_series_from_df(df, symbol=sym)
-
-        if pd.notna(sd) and pd.notna(ed):
-            s = s.loc[(s.index >= sd) & (s.index <= ed)]
-        if s.empty:
-            raise ValueError(f"No rows for {sym} in requested window")
-        return s
-
-    # 2) Fallback: read_table("prices")
-    if not hasattr(store, "read_table") or not callable(getattr(store, "read_table")):
-        raise RuntimeError("SqlStore has no load_price_history and no read_table")
-
-    prices_tbl = _prices_table_name(store)
-    df_all = store.read_table(prices_tbl)  # type: ignore[misc]
-    if df_all is None or df_all.empty:
-        raise ValueError("SqlStore.prices is empty")
-
-    cols = {c.lower(): c for c in df_all.columns}
-    sym_col = cols.get("symbol")
-    date_col = cols.get("date")
-
-    if not sym_col or not date_col:
-        raise ValueError("SqlStore.prices missing required columns: symbol/date")
-
-    df_sym = df_all[df_all[sym_col].astype(str).str.upper() == sym].copy()
-    if df_sym.empty:
-        raise ValueError(f"No price rows for {sym}")
-
-    df_sym = df_sym.rename(columns={date_col: "date"})
-    df_sym["date"] = pd.to_datetime(df_sym["date"], errors="coerce")
-    df_sym = df_sym.dropna(subset=["date"])
-
-    if pd.notna(sd) and pd.notna(ed):
-        df_sym = df_sym[(df_sym["date"] >= sd) & (df_sym["date"] <= ed)]
-
-    if df_sym.empty:
-        raise ValueError(f"No price rows for {sym} in requested window")
-
-    return _coerce_price_series_from_df(df_sym, symbol=sym)
-
-
-def _iso_date_or_empty(x: Any) -> str:
-    try:
-        if x is None:
-            return ""
-        dt = pd.to_datetime(x, errors="coerce")
-        if pd.isna(dt):
-            return ""
-        return dt.strftime("%Y-%m-%d")
-    except Exception:
-        return ""
-
-# ----------------------------
-# Signal generator adapter for core.optimizer (must be callable)
-# ----------------------------
-@cache_resource(show_spinner=False)
-def _get_signal_engine_default() -> Any:
-    """
-    Returns a SignalGenerator instance (cached resource).
-    If module missing, returns None and caller falls back.
-    """
-    try:
-        from common.signal_generator import SignalGenerator  # type: ignore
-    except Exception:
-        return None
-    try:
-        cfg = SignalGenerator.default_config()
-    except Exception:
-        cfg = {}
-    try:
-        return SignalGenerator(cfg)
-    except Exception:
-        return None
-
-
-def _build_signal_generator_callable() -> Callable[..., pd.DataFrame]:
-    """
-    The callable required by core.optimizer.run_optimization:
-      config['signals']['generator'] must be callable.
-    We keep it very defensive and accept multiple possible call styles.
-    """
-    def _generator(*args: Any, **kwargs: Any) -> pd.DataFrame:
-        # Expected by Backtester (likely): signals(price, hedge, signal_params=...)
-        price = kwargs.get("price", None)
-        hedge = kwargs.get("hedge", None)
-        signal_params = kwargs.get("signal_params", None)
-
-        # also accept positional (price, hedge, signal_params)
-        if price is None and len(args) >= 1:
-            price = args[0]
-        if hedge is None and len(args) >= 2:
-            hedge = args[1]
-        if signal_params is None and len(args) >= 3:
-            signal_params = args[2]
-
-        # Normalize
-        if not isinstance(price, pd.Series):
-            price = pd.Series(price) if price is not None else pd.Series(dtype=float)
-        if hedge is not None and not isinstance(hedge, pd.Series):
-            try:
-                hedge = pd.Series(hedge)
-            except Exception:
-                hedge = None
-
-        params = signal_params if isinstance(signal_params, dict) else {}
-        # Accept both naming conventions
-        z_open = float(params.get("z_open", params.get("z_entry", 2.0)))
-        z_close = float(params.get("z_close", params.get("z_exit", 1.0)))
-        lookback = int(params.get("lookback", params.get("rolling_window", 20)))
-
-        # Try full SignalGenerator
-        sg = _get_signal_engine_default()
-        if sg is not None:
-            try:
-                # Update config in-place if supported
-                cfg = getattr(sg, "cfg", None) or getattr(sg, "config", None)
-                if isinstance(cfg, dict):
-                    # ZScore block (single-series)
-                    zcfg = cfg.get("zscore", {}) if isinstance(cfg.get("zscore", {}), dict) else {}
-                    zcfg["window"] = int(max(5, lookback))
-                    zcfg["entry_threshold"] = float(abs(z_open))
-                    zcfg["exit_threshold"] = float(abs(z_close))
-                    cfg["zscore"] = zcfg
-
-                    # Spread block (two-series) if present
-                    spcfg = cfg.get("spread", {}) if isinstance(cfg.get("spread", {}), dict) else {}
-                    spcfg["window"] = int(max(5, lookback))
-                    spcfg["entry_threshold"] = float(abs(z_open))
-                    spcfg["exit_threshold"] = float(abs(z_close))
-                    cfg["spread"] = spcfg
-
-                # Generate signals (two-series aware)
-                gen = getattr(sg, "generate", None)
-                if callable(gen):
-                    raw = gen(price, series2=hedge)  # type: ignore[misc]
-                else:
-                    raw = None
-
-                # Aggregate to a tradeable consensus if available
-                agg = getattr(sg, "aggregate_signals", None)
-                if callable(agg) and raw is not None:
-                    out = agg(raw)  # type: ignore[misc]
-                else:
-                    out = raw
-
-                if isinstance(out, pd.DataFrame) and not out.empty:
-                    return out
-            except Exception:
-                # fall through to minimal fallback
-                pass
-
-        # Minimal hard fallback: zscore on price only -> entry/exit columns
-        # (keeps core.optimizer alive even if SignalGenerator changes)
-        try:
-            mu = price.rolling(max(5, lookback)).mean()
-            sd = price.rolling(max(5, lookback)).std(ddof=0).replace(0.0, np.nan)
-            z = (price - mu) / sd
-            z = z.replace([np.inf, -np.inf], np.nan).fillna(0.0)
-
-            entry = ((z < -abs(z_open)).astype(int) - (z > abs(z_open)).astype(int))
-            prev_pos = entry.replace(0, np.nan).ffill().shift(1).fillna(0)
-            exit_ = ((prev_pos != 0) & (z.abs() < abs(z_close))).astype(int)
-
-            return pd.DataFrame({"zscore": z, "entry": entry, "exit": exit_}, index=price.index)
-        except Exception:
-            return pd.DataFrame(index=price.index)
-
-    return _generator
-
-
-# ----------------------------
-# Build opt_config for core.optimizer (SQL-first, no CSVs)
-# ----------------------------
-def _build_core_optimizer_config_sql_first(
-    *,
-    cfg: "OptRunConfig",
-    start_date: Any,
-    end_date: Any,
-    ranges: Dict[str, Any],
-    weights: Dict[str, float],
-    app_ctx_global: Any,
-) -> Tuple[Optional[Dict[str, Any]], List[str]]:
-    issues: List[str] = []
-
-    store = _try_get_sql_store(app_ctx_global, env=str(cfg.env))
-    if store is None:
-        issues.append("SqlStore is not available (cannot build SQL-first opt_config).")
-        return None, issues
-
-    # Load price series
-    try:
-        s_price = _load_price_series_from_sqlstore(store, cfg.sym1, start_date=start_date, end_date=end_date)
-        s_hedge = _load_price_series_from_sqlstore(store, cfg.sym2, start_date=start_date, end_date=end_date)
-        df_align = pd.concat({"price": s_price, "hedge": s_hedge}, axis=1).dropna()
-        s_price = df_align["price"]
-        s_hedge = df_align["hedge"]
-        if df_align.shape[0] < 60:
-            issues.append(f"Very short aligned history ({df_align.shape[0]} rows). Results may be unstable.")
-    except Exception as e:
-        issues.append(f"Failed to load price history from SqlStore: {e}")
-        return None, issues
-
-    signal_gen = _build_signal_generator_callable()
-
-    # Backtester kwargs (core.optimizer.Backtester receives **backtest_params)
-    # Keep conservative defaults and defer “policy” to RiskEngine in live.
-    initial_capital = float(getattr(app_ctx_global, "capital", 100_000.0) or 100_000.0) if app_ctx_global else 100_000.0
-    max_gross_usd = float(cfg.quick_knobs.get("max_gross_exposure", 3.0)) * initial_capital  # gross multiple -> dollars
-
-    backtest_params: Dict[str, Any] = {
-        "initial_capital": initial_capital,
-        "max_gross_exposure": max_gross_usd,
-        "commission_bps": float(ss_get("opt_fees_bps", 1.0)),
-        "slippage_bps": float(ss_get("opt_slippage_bps", 2.0)),
-        "data_source": "SQL",
-        # optional: dates can be used by some backtester implementations
-        "start": start_date,
-        "end": end_date,
-    }
-
-    opt_config: Dict[str, Any] = {
-        "seed": int(cfg.seed),
-        "data": {
-            "price": s_price,
-            "hedge": s_hedge,
-            "source": "SQL",
-        },
-        "ranges": make_json_safe(ranges),
-        "signals": {
-            "generator": signal_gen,
-            "quick_knobs": dict(cfg.quick_knobs or {}),
-        },
-        "backtest_params": make_json_safe(backtest_params),
-        "optuna": {
-            "direction": str(cfg.direction),
-            "sampler": str(cfg.sampler_name),
-            "pruner": str(cfg.pruner_name),
-            "timeout_sec": int(cfg.timeout_min) * 60,
-            "n_trials": int(cfg.n_trials),
-            "multi_objective": bool(cfg.multi_objective),
-            "objective_metrics": list(cfg.objective_metrics or []),
-        },
-        "score": {
-            "mode": "hybrid",
-            "hybrid_alpha": 0.70,
-        },
-        # classic score_weights used if metrics module present
-        "score_weights": make_json_safe(weights),
-    }
-
-    return opt_config, issues
-
-@dataclass(frozen=True)
-class OptRunConfig:
-    run_id: str
-    seed: int
-    env: str
-    profile: str
-
-    sym1: str
-    sym2: str
-    opt_mode: str
-
-    n_trials: int
-    timeout_min: int
-    direction: str
-
-    primary_objective: str
-    secondary_objective: str
-    secondary_objective_weight: float
-
-    multi_objective: bool
-    objective_metrics: List[str]
-
-    sampler_name: str
-    pruner_name: str
-    max_concurrent_trials: int
-
-    wf_use: bool
-    wf_folds: int
-    wf_warmup_days: int
-    robust_min_folds: int
-    robust_min_sharpe: float
-
-    scenario_profile: str
-    scenario_tail_weight: float
-    fresh_weight: float
-
-    meta_optimization_enabled: bool
-    experiment_name: str
-    ensure_prices_via_ib: bool
-
-    quick_knobs: Dict[str, float]
-
-    def validate(self) -> List[str]:
-        issues: List[str] = []
-        if not self.run_id.strip():
-            issues.append("run_id is empty.")
-        if self.sym1 == self.sym2:
-            issues.append("sym1 == sym2 (invalid pair).")
-        if self.n_trials < 10:
-            issues.append("n_trials < 10 (too low).")
-        if self.timeout_min < 1:
-            issues.append("timeout_min < 1.")
-        if self.direction not in {"maximize", "minimize"}:
-            issues.append("direction must be maximize|minimize.")
-        if self.sampler_name not in {"TPE", "CMAES"}:
-            issues.append(f"WARN: sampler_name={self.sampler_name!r} is not in the known set (TPE/CMAES).")
-        if self.pruner_name not in {"median", "none"}:
-            issues.append(f"WARN: pruner_name={self.pruner_name!r} is not in the known set (median/none).")
-        if self.wf_use and self.wf_folds < 2:
-            issues.append("wf_use=True but wf_folds < 2.")
-        if self.robust_min_folds < 1:
-            issues.append("robust_min_folds < 1.")
-        if not (0.0 <= self.secondary_objective_weight <= 1.0):
-            issues.append("secondary_objective_weight not in [0,1].")
-        if not (0.0 <= self.scenario_tail_weight <= 1.0):
-            issues.append("scenario_tail_weight not in [0,1].")
-        if not (0.0 <= self.fresh_weight <= 1.0):
-            issues.append("fresh_weight not in [0,1].")
-        return issues
-
-    def as_dict(self) -> Dict[str, Any]:
-        return {
-            "run_id": self.run_id,
-            "seed": int(self.seed),
-            "env": self.env,
-            "profile": self.profile,
-            "sym1": self.sym1,
-            "sym2": self.sym2,
-            "opt_mode": self.opt_mode,
-            "n_trials": int(self.n_trials),
-            "timeout_min": int(self.timeout_min),
-            "direction": self.direction,
-            "primary_objective": self.primary_objective,
-            "secondary_objective": self.secondary_objective,
-            "secondary_objective_weight": float(self.secondary_objective_weight),
-            "multi_objective": bool(self.multi_objective),
-            "objective_metrics": list(self.objective_metrics or []),
-            "sampler_name": self.sampler_name,
-            "pruner_name": self.pruner_name,
-            "max_concurrent_trials": int(self.max_concurrent_trials),
-            "wf_use": bool(self.wf_use),
-            "wf_folds": int(self.wf_folds),
-            "wf_warmup_days": int(self.wf_warmup_days),
-            "robust_min_folds": int(self.robust_min_folds),
-            "robust_min_sharpe": float(self.robust_min_sharpe),
-            "scenario_profile": self.scenario_profile,
-            "scenario_tail_weight": float(self.scenario_tail_weight),
-            "fresh_weight": float(self.fresh_weight),
-            "meta_optimization_enabled": bool(self.meta_optimization_enabled),
-            "experiment_name": self.experiment_name,
-            "ensure_prices_via_ib": bool(self.ensure_prices_via_ib),
-            "quick_knobs": dict(self.quick_knobs or {}),
-        }
 def render_optimization_tab(
     ctx: dict | None = None,
     **ctrl_opt,
 ) -> None:
     """
-    Optimisation Tab — HF-grade orchestrator (No sliders)
-    - Deterministic, safe defaults, and modular flow.
-    - UI (inputs) separated from execution and rendering.
-    - Compatible with your platform: AppContext / DashboardService / core.optimizer path.
+    Main UI entrypoint לטאב האופטימיזציה – גרסה מורחבת ברמת קרן גידור.
+
+    ctx מגיע מה-dashboard (AppContext.asdict), ויכול להכיל:
+        - start_date, end_date
+        - capital, pairs, config, controls, seed, run_id, profile, section
+
+    ctrl_opt מגיע מטופס ה-controls בטאב הראשי (dashboard Tab 8),
+    וכולל בין השאר:
+        - n_trials, timeout_min, direction
+        - param_ranges (טווחים לכל פרמטר)
+        - experiment_name, opt_mode, meta_optimization_enabled וכו'.
     """
 
-    global SETTINGS
+    # Run-control flags – תמיד יהיו מוגדרים כדי למנוע UnboundLocalError
+    dry_run: bool = False
+    run_single: bool = False
+    run_batch: bool = False
 
-    # -----------------------------
-    # 1) AppContext + env/profile (safe)
-    # -----------------------------
-    try:
-        from core.app_context import AppContext  # type: ignore
-    except Exception:
-        AppContext = None  # type: ignore
-
-    app_ctx_global = None
-    if AppContext is not None:
-        try:
-            app_ctx_global = AppContext.get_global()
-        except Exception:
-            app_ctx_global = None
-
-    env_from_app_ctx = _normalize_env(getattr(app_ctx_global, "environment", None)) if app_ctx_global else None
-    env_from_settings = _normalize_env(getattr(SETTINGS, "env", None))
-    effective_env = _normalize_env(_first_non_empty(env_from_app_ctx, env_from_settings, default="dev"))
-    is_live_env = (effective_env == "live")
-
-    st.caption(f"Effective optimisation env: `{effective_env}`")
-
-    # -----------------------------
-    # 2) Services + base dashboard ctx
-    # -----------------------------
+    # ==== 0) Service + base context ====
     service = create_dashboard_service()
     base_ctx = build_default_dashboard_context()
 
-    # -----------------------------
-    # 3) Focus mode
-    # -----------------------------
+    # ==== 0.0) Environment awareness (local/dev/paper/live/prod) ====
+    effective_env = str(getattr(SETTINGS, "env", "local") or "local").lower()
+    is_live_env = effective_env in {"live", "prod"}
+
+    st.caption(f"Effective optimisation env: `{effective_env}`")
+
+    # ==== 0.0) Focus-mode toggle (לפני הכל) ====
     st.sidebar.checkbox(
         "Focus mode (hide heavy analytics)",
-        value=bool(ss_get("opt_focus_mode", False)),
+        value=bool(st.session_state.get("opt_focus_mode", False)),
         key="opt_focus_mode",
-        help="UX only. Collapses heavy panels by default.",
+        help="כאשר זה מופעל – פאנלים כבדים (Analytics/ML וכו') נשארים סגורים כברירת מחדל.",
     )
-    FOCUS = bool(ss_get("opt_focus_mode", False))
+    FOCUS = bool(st.session_state.get("opt_focus_mode", False))
 
-    # -----------------------------
-    # 4) Resolve runtime ctx without overwriting arg ctx
-    # -----------------------------
-    runtime_ctx = _as_dict(ctx) or _as_dict(ss_get("ctx", {}))
-
-    ctx_start = runtime_ctx.get("start_date")
-    ctx_end = runtime_ctx.get("end_date")
-    if app_ctx_global is not None:
-        ctx_start = _first_non_empty(ctx_start, getattr(app_ctx_global, "start_date", None), default=ctx_start)
-        ctx_end = _first_non_empty(ctx_end, getattr(app_ctx_global, "end_date", None), default=ctx_end)
-
-    start_date = _first_non_empty(ctx_start, getattr(base_ctx, "start_date", None))
-    end_date = _first_non_empty(ctx_end, getattr(base_ctx, "end_date", None))
-
-    seed_val = _safe_int(
-        _first_non_empty(
-            ctrl_opt.get("seed"),
-            runtime_ctx.get("seed"),
-            ss_get("global_seed"),
-            getattr(app_ctx_global, "seed", None) if app_ctx_global else None,
-            default=1337,
-        ),
-        1337,
-    )
-    ss_set("global_seed", seed_val)
-
-    run_id = _safe_str(_first_non_empty(runtime_ctx.get("run_id"), ss_get("opt_run_id"), default=""))
-    if not run_id.strip():
-        # deterministic-ish per session (seed + timestamp)
-        run_id = f"opt-{seed_val}-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
-    ss_set("opt_run_id", run_id)
-
-    # -----------------------------
-    # 4.1) Persist a canonical ctx snapshot for other helpers (WF / Replay / analytics)
-    # -----------------------------
-    ctx_snapshot = dict(runtime_ctx or {})
-    ctx_snapshot["start_date"] = start_date
-    ctx_snapshot["end_date"] = end_date
-    ctx_snapshot["env"] = effective_env
-    ctx_snapshot["profile"] = str(st.session_state.get("opt_profile", "default"))
-    ss_set("ctx", ctx_snapshot)
-
-    # -----------------------------
-    # 5) Header + presets
-    # -----------------------------
+    # ==== 0.1) Header יפה למעלה ====
     render_optimization_header(base_ctx, service)
     st.markdown("---")
 
+    # ==== 0.2) Presets bar לפני כל הקונטרולים ====
     preset_info = render_opt_presets(prefix="opt")
-    current_preset = str(preset_info.get("preset", "custom") or "custom").strip().lower()
+    current_preset = preset_info["preset"]
 
-    preset_defaults = {
-        "smoke": (30, 3),
-        "fast": (10, 2),
-        "tail": (300, 45),
-        "deep": (500, 60),
-        "custom": (200, 30),
-    }
-    default_n_trials, default_timeout_min = preset_defaults.get(current_preset, preset_defaults["custom"])
+    if current_preset == "smoke":
+        default_n_trials = 30
+        default_timeout_min = 3
+    elif current_preset == "deep":
+        default_n_trials = 500
+        default_timeout_min = 60
+    elif current_preset == "tail":
+        default_n_trials = 300
+        default_timeout_min = 45
+    elif current_preset == "fast":
+        default_n_trials = 10
+        default_timeout_min = 2
+    else:  # custom
+        default_n_trials = 200
+        default_timeout_min = 30
+
     st.markdown("---")
 
-    # -----------------------------
-    # 6) Quick knobs (manual only) — defaults from config/spec/session (HF-grade)
-    # -----------------------------
-    cfg_blob = _get_cfg_blob(runtime_ctx)
-    strat = _as_dict(cfg_blob.get("strategy")) or _as_dict(cfg_blob.get("Strategy"))
-    risk_cfg = _as_dict(cfg_blob.get("risk")) or _as_dict(cfg_blob.get("Risk"))
+    # ==== 0.3) Signal / Risk מספריים פשוטים מלמעלה (quality-of-life) ====
+    with st.expander("⚙️ Quick signal / risk knobs (ParamSpec-based)", expanded=False):
+        st.markdown("#### Signal parameters (Simple)")
+        try:
+            z_open = render_param_control("opt_sig", "z_open")
+            z_close = render_param_control("opt_sig", "z_close")
+        except Exception:
+            # fallback במקרה ש-PARAM_SPECS לא כולל אותם
+            z_open = st.number_input("Z-open threshold", -5.0, 5.0, 1.5, 0.1, key="opt_z_open_simple")
+            z_close = st.number_input("Z-close threshold", -5.0, 5.0, 0.5, 0.1, key="opt_z_close_simple")
 
-    with st.expander("⚙️ Quick signal / risk knobs (manual defaults)", expanded=False):
-        # ---- Z defaults: prefer cfg.strategy -> session -> ParamSpecs -> system fallback
-        z_open_default = _safe_float(
-            _first_non_empty(
-                strat.get("z_open"),
-                strat.get("z_entry"),  # tolerate alt naming
-                ss_get("opt_z_open_simple"),
-                _spec_default_any(["z_open", "z_entry"], 2.0),
-                default=2.0,
-            ),
-            2.0,
-        )
-        z_close_default = _safe_float(
-            _first_non_empty(
-                strat.get("z_close"),
-                strat.get("z_exit"),
-                ss_get("opt_z_close_simple"),
-                _spec_default_any(["z_close", "z_exit"], 0.5),
-                default=0.5,
-            ),
-            0.5,
-        )
-
-        st.markdown("#### Signal thresholds")
-        z_open = _num_input(
-            "Z-open threshold",
-            key="opt_z_open_simple",
-            value=z_open_default,
-            min_value=-10.0,
-            max_value=10.0,
-            step=0.05,
-            help="Defaults from config/spec/session; manual override is recorded for reproducibility.",
-        )
-        z_close = _num_input(
-            "Z-close threshold",
-            key="opt_z_close_simple",
-            value=z_close_default,
-            min_value=-10.0,
-            max_value=10.0,
-            step=0.05,
-            help="Defaults from config/spec/session; manual override is recorded for reproducibility.",
-        )
-
-        st.markdown("#### Risk exposure hints")
-
-        max_exposure_default = _safe_float(
-            _first_non_empty(
-                strat.get("max_exposure_per_trade"),
-                risk_cfg.get("max_exposure_per_trade"),
-                ss_get("opt_max_exposure_simple"),
-                _spec_default_any(["max_exposure_per_trade"], 0.10),
-                default=0.10,
-            ),
-            0.10,
-        )
-        max_exposure = _num_input(
-            "Max exposure per trade (fraction of NAV)",
-            key="opt_max_exposure_simple",
-            value=max_exposure_default,
-            min_value=0.0,
-            max_value=1.0,
-            step=0.01,
-        )
-
-        # max_gross_exposure: ONLY show if there is a credible source-of-truth
-        mg_src = _first_non_empty(
-            strat.get("max_gross_exposure"),
-            risk_cfg.get("max_gross_exposure"),
-            ss_get("opt_max_gross_simple"),
-            _spec_default_any(["max_gross_exposure"], None),
-            default=None,
-        )
-        max_gross: Optional[float] = None
-        if mg_src is not None:
-            max_gross_default = _safe_float(mg_src, 1.0)
-            max_gross = _num_input(
-                "Max gross exposure (multiple of NAV)",
-                key="opt_max_gross_simple",
-                value=max_gross_default,
+        st.markdown("#### Risk parameters")
+        try:
+            max_exposure = render_param_control("opt_risk", "max_exposure_per_trade")
+        except Exception:
+            max_exposure = st.number_input(
+                "Max exposure per trade",
                 min_value=0.0,
-                max_value=10.0,
-                step=0.05,
+                max_value=1.0,
+                value=0.1,
+                step=0.01,
+                key="opt_max_exposure_simple",
             )
-        else:
-            st.caption("Max gross exposure is hidden (no source-of-truth found in config/spec/session).")
+        try:
+            max_gross = render_param_control("opt_risk", "max_gross_exposure")
+        except Exception:
+            max_gross = st.number_input(
+                "Max gross exposure",
+                min_value=0.0,
+                max_value=5.0,
+                value=1.0,
+                step=0.1,
+                key="opt_max_gross_simple",
+            )
 
-        st.caption("Quick knobs are recorded into run config for reproducibility (but do not replace policy limits).")
+        st.caption(
+            "הערכים כאן הם יותר 'knobs ידניים' להשראה; האופטימיזציה בפועל משתמשת ב־param_ranges "
+            "ובמרחב הפרמטרים המלא."
+        )
 
-    # -----------------------------
-    # 7) Pair-analysis hinting
-    # -----------------------------
-    opt_pair_status = ss_get("opt_pair_status")
+    # ==== 0.4) היסטוריית ריצות בסוף הטאב (נרוץ אחר כך שוב) ====
+    # נשאיר את הקריאה בסוף הפונקציה, אחרי שיש df, כדי שלא יסתיר דברים.
+    # (שמנו כאן רק הערה – הקריאה האמיתית נשארת למטה.)
+
+    # ==== 0.5) ctx ו-seed/run_id מתוך session/ctx חיצוני ====
+    if ctx is None:
+        ctx = st.session_state.get("ctx", {}) or {}
+    if not isinstance(ctx, dict):
+        ctx = {}
+
+    start_date = ctx.get("start_date", getattr(base_ctx, "start_date", None))
+    end_date = ctx.get("end_date", getattr(base_ctx, "end_date", None))
+
+    seed_val = int(ctx.get("seed", st.session_state.get("global_seed", 1337)))
+    st.session_state["global_seed"] = seed_val
+    run_id = ctx.get("run_id") or f"opt-{seed_val}-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+    st.session_state["opt_run_id"] = run_id
+
+    # ==== 0.6) רמזים מטאב ניתוח זוג (opt_pair_status) ==== 
+    opt_pair_status = st.session_state.get("opt_pair_status")
     if isinstance(opt_pair_status, dict):
-        pair_label_hint = str(opt_pair_status.get("pair") or "")
-        if pair_label_hint and not ctrl_opt.get("sym1") and not ctrl_opt.get("sym_x"):
-            p = _parse_pair_line(pair_label_hint)
-            if p:
-                sx, sy = p
+        pair_label = str(opt_pair_status.get("pair") or "")
+        if pair_label and not ctrl_opt.get("sym1") and not ctrl_opt.get("sym_x"):
+            sx = sy = None
+            if "-" in pair_label:
+                parts = pair_label.split("-", 1)
+                sx, sy = parts[0].strip(), parts[1].strip()
+            if sx and sy:
                 ctrl_opt.setdefault("sym1", sx)
                 ctrl_opt.setdefault("sym2", sy)
 
         hint = opt_pair_status.get("opt_hint", {}) or {}
-        if isinstance(hint, dict) and hint:
-            for k in ("primary_objective", "scenario_profile", "scenario_tail_weight", "wf_use"):
-                if hint.get(k) is not None and k not in ctrl_opt:
-                    ctrl_opt[k] = hint.get(k)
-            if hint.get("profile"):
-                ss_set("opt_profile", hint["profile"])
+        if hint:
+            if hint.get("primary_objective") and "primary_objective" not in ctrl_opt:
+                ctrl_opt["primary_objective"] = hint["primary_objective"]
+            if hint.get("profile") and "profile" not in ctrl_opt:
+                st.session_state.setdefault("opt_profile", hint["profile"])
+            if hint.get("scenario_profile") and "scenario_profile" not in ctrl_opt:
+                ctrl_opt["scenario_profile"] = hint["scenario_profile"]
+            if hint.get("scenario_tail_weight") is not None and "scenario_tail_weight" not in ctrl_opt:
+                ctrl_opt["scenario_tail_weight"] = float(hint["scenario_tail_weight"])
+            if hint.get("wf_use") is not None and "wf_use" not in ctrl_opt:
+                ctrl_opt["wf_use"] = bool(hint["wf_use"])
 
-    # -----------------------------
-    # 8) Title + snapshot + profile sidebar
-    # -----------------------------
+    # ==== 1) Title + Settings Sidebar ====
     st.title("⚙️ Pairs-Trading Optimiser — Hedge-Fund Grade")
+
+    # Snapshot מהריצה האחרונה (אם יש)
     _render_optimization_snapshot_panel()
     st.markdown("---")
 
@@ -5873,17 +5020,11 @@ def render_optimization_tab(
         SETTINGS = new_settings
         _configure_logger_from_settings()
         st.success("Profile applied; settings updated for this session.")
-        env_from_settings = _normalize_env(getattr(SETTINGS, "env", None))
-        effective_env = _normalize_env(_first_non_empty(env_from_app_ctx, env_from_settings, default="dev"))
-        is_live_env = (effective_env == "live")
-        st.caption(f"Effective optimisation env: `{effective_env}`")
 
-    # -----------------------------
-    # 9) System Health
-    # -----------------------------
+    # ==== 2) System Health ==== (משאירים כמו שהיה)
     essentials = {
         "Backtester": Backtester is not None,
-    "Optuna": bool(optuna is not None and hasattr(optuna, "create_study") and callable(getattr(optuna, "create_study", None))),
+        "Optuna": (optuna is not None) and (TPESampler is not object),
         "CMA-ES": (CmaEsSampler is not object),
         "MedianPruner": (MedianPruner is not object),
         "Distributions": get_param_distributions is not None,
@@ -5892,765 +5033,1102 @@ def render_optimization_tab(
     with st.expander("🩺 System Health", expanded=not all(essentials.values())):
         for k, v in essentials.items():
             st.write(("✅" if v else "❌"), k)
+        if not essentials["Backtester"]:
+            st.markdown("**Backtester missing** – ודא ש-`core.optimization_backtester` importable.")
+        if not essentials["Optuna"]:
+            st.markdown("**Optuna not ready** – `pip install optuna` ודא ש-TPESampler זמין.")
+        if not essentials["Distributions"]:
+            st.markdown("**Missing distributions** – מצופה `core.distributions.get_param_distributions(ranges)`.")  
+        if not essentials["Metrics (normalize & score)"]:
+            st.markdown("משתמש ב-fallback פנימי למדדים/score.")
 
-    # -----------------------------
-    # 10) Core config (ranges/weights/profile)
-    # -----------------------------
+    # ==== 3) Core Config (ranges, weights, profile) ====
     cfg_core = _sidebar_core_config()
     ranges: Dict[str, ParamRange] = cfg_core["ranges"]
     weights: Dict[str, float] = cfg_core["weights"]
-    profile: str = str(cfg_core["profile"])
+    profile: str = cfg_core["profile"]
 
-    param_ranges_from_upstream = ctrl_opt.get("param_ranges")
-    if isinstance(param_ranges_from_upstream, dict):
-        for name, rng in param_ranges_from_upstream.items():
+    param_ranges_from_tab = ctrl_opt.get("param_ranges")
+    if isinstance(param_ranges_from_tab, dict):
+        for name, rng in param_ranges_from_tab.items():
             if name in ranges:
                 ranges[name] = rng
 
-    # -----------------------------
-    # 11) Run controls (manual-only, safe indexes)
-    # -----------------------------
-    dry_run = False
-    run_single = False
-    run_batch = False
+    # ---- Defaults from ctrl_opt / ctx ----
+    primary_objective = str(ctrl_opt.get("primary_objective", "Sharpe"))
+    secondary_objective = str(ctrl_opt.get("secondary_objective", ""))
+    secondary_weight = float(ctrl_opt.get("secondary_objective_weight", 0.0))
 
+    direction = str(ctrl_opt.get("direction", "maximize"))
+    multi_objective = bool(ctrl_opt.get("multi_objective", False))
+    objective_metrics = list(ctrl_opt.get("objective_metrics") or [])
+
+    sampler_name = str(ctrl_opt.get("sampler_name", "TPE"))
+    pruner_name = str(ctrl_opt.get("pruner_name", "median"))
+    max_concurrent_trials = int(ctrl_opt.get("max_concurrent_trials", 4))
+
+    wf_use = bool(ctrl_opt.get("wf_use", True))
+    wf_folds = int(ctrl_opt.get("wf_folds", 3))
+    wf_warmup = int(ctrl_opt.get("wf_warmup_days", 60))
+    robust_min_folds = int(ctrl_opt.get("robust_min_folds", max(1, wf_folds - 1)))
+    robust_min_sharpe = float(ctrl_opt.get("robust_min_sharpe", 0.3))
+
+    scenario_profile = str(ctrl_opt.get("scenario_profile", "Neutral"))
+    scenario_tail_weight = float(ctrl_opt.get("scenario_tail_weight", 0.3))
+    fresh_weight = float(ctrl_opt.get("fresh_weight", 0.5))
+
+    meta_enabled = bool(ctrl_opt.get("meta_optimization_enabled", False))
+    experiment_name = str(ctrl_opt.get("experiment_name", ""))
+
+    # ==== 4) Sidebar Run Controls (מורחב) ====
     with st.sidebar.expander("Run Controls", expanded=True):
+        # Experiment name חדש
         experiment_name = st.text_input(
             "Experiment name (optional)",
-            value=str(_first_non_empty(ctrl_opt.get("experiment_name"), runtime_ctx.get("experiment_name"), ss_get("opt_experiment_name"), default="") or ""),
+            value=str(ctrl_opt.get("experiment_name", "")),
             key="opt_experiment_name",
         )
 
-        default_sym1 = _first_non_empty(ctrl_opt.get("sym1"), ctrl_opt.get("sym_x"), runtime_ctx.get("sym1"), ss_get("opt_sym1"), default="XLY")
-        default_sym2 = _first_non_empty(ctrl_opt.get("sym2"), ctrl_opt.get("sym_y"), runtime_ctx.get("sym2"), ss_get("opt_sym2"), default="XLP")
-        sym1 = st.text_input("Symbol A", value=str(default_sym1), key="opt_sym1").strip().upper()
-        sym2 = st.text_input("Symbol B", value=str(default_sym2), key="opt_sym2").strip().upper()
+        # Symbols / mode
+        default_sym1 = ctrl_opt.get("sym1") or ctrl_opt.get("sym_x") or ctx.get("sym1") or "XLY"
+        default_sym2 = ctrl_opt.get("sym2") or ctrl_opt.get("sym_y") or ctx.get("sym2") or "XLP"
+        sym1 = st.text_input("Symbol A", value=str(default_sym1), key="opt_sym1")
+        sym2 = st.text_input("Symbol B", value=str(default_sym2), key="opt_sym2")
 
-        opt_mode_raw = str(_first_non_empty(ctrl_opt.get("opt_mode"), ss_get("opt_target_mode"), default="Universe / Top Pairs"))
-        opt_mode_options = ["Universe / Top Pairs", "זוג נבחר בלבד"]
-        opt_mode = st.selectbox(
-            "Target mode",
-            opt_mode_options,
-            index=_index_of(opt_mode_options, opt_mode_raw, default=0),
+        opt_mode = str(ctrl_opt.get("opt_mode", "Universe / Top Pairs"))
+        opt_mode = st.radio(
+            "Target Mode",
+            ["Universe / Top Pairs", "זוג נבחר בלבד"],
+            index=0 if opt_mode == "Universe / Top Pairs" else 1,
             key="opt_target_mode",
         )
 
-        n_trials_default = _safe_int(_first_non_empty(ctrl_opt.get("n_trials"), ss_get("opt_n_trials"), default=default_n_trials), default_n_trials)
-        timeout_default = _safe_int(_first_non_empty(ctrl_opt.get("timeout_min"), ss_get("opt_timeout_min"), default=default_timeout_min), default_timeout_min)
-
-        n_trials = int(st.number_input("n_trials (Optuna trials)", min_value=10, max_value=10_000, value=int(n_trials_default), step=10, key="opt_n_trials"))
-        timeout_min = int(st.number_input("Timeout (minutes)", min_value=1, max_value=720, value=int(timeout_default), step=1, key="opt_timeout_min"))
-
-        primary_opts = ["Sharpe", "Sortino", "Calmar", "Return", "TailRisk"]
-        primary_default = str(_first_non_empty(ctrl_opt.get("primary_objective"), ss_get("opt_primary_obj"), default="Sharpe"))
-        primary_objective = st.selectbox(
-            "Primary objective",
-            primary_opts,
-            index=_index_of(primary_opts, primary_default, default=0),
-            key="opt_primary_obj",
+        # Trials & timeout
+        n_trials = int(
+            st.number_input(
+                "n_trials (סך ניסויים ל-Optuna)",
+                min_value=10,
+                max_value=10000,
+                value=int(ctrl_opt.get("n_trials", default_n_trials)),
+                step=10,
+                key="opt_n_trials",
+            )
+        )
+        timeout_min = int(
+            st.number_input(
+                "Timeout (דקות)",
+                min_value=1,
+                max_value=720,
+                value=int(ctrl_opt.get("timeout_min", default_timeout_min)),
+                step=1,
+                key="opt_timeout_min",
+            )
         )
 
-        secondary_opts = ["None"] + primary_opts
-        secondary_objective = st.selectbox("Secondary objective (optional)", secondary_opts, index=0, key="opt_secondary_obj")
-        secondary_weight = float(st.number_input("Secondary weight (0–1)", min_value=0.0, max_value=1.0,
-                                                value=float(_first_non_empty(ctrl_opt.get("secondary_objective_weight"), ss_get("opt_secondary_weight"), default=0.0)),
-                                                step=0.05, key="opt_secondary_weight"))
+    # =========================
+    # Run optimization section
+    # =========================
+    st.markdown("#### Run optimization")
+
+    # כאן אתה צריך לוודא שיש לך config מוכן ל-run_optimization
+    opt_config = st.session_state.get("opt_config")
+
+    if opt_config is None:
+        st.warning(
+            "לא נמצא config לאופטימיזציה (st.session_state['opt_config']).  \n"
+            "תבנה dict שמתאים ל-run_optimization ותשמור אותו ב-session_state['opt_config'], "
+            "או תחבר לכאן פונקציה שבונה את ה-config מהשירות/קונטקסט."
+        )
+    elif run_optimization is None:
+        st.error("⚠️ run_optimization מ-core.optimizer לא זמין (import נכשל).")
+    else:
+        # יש גם config וגם run_optimization זמין → אפשר להריץ
+        if st.button("🚀 Run optimization", key="opt_run_btn"):
+            with st.spinner("מריץ Optuna אופטימיזציה..."):
+                res = _run_core_optimization(
+                    config=opt_config,
+                    n_trials=int(n_trials),
+                    study_name="dashboard_opt",
+                    candidates=None,
+                )
+
+            if not res:
+                st.warning("האופטימיזציה לא החזירה תוצאות.")
+            else:
+                df = res["df"]
+                summary = res["summary"]
+                ranked = res["ranked"]
+                pareto = res["pareto"]
+                tagged = res["tagged"]
+                best_params = res["best_params"]
+
+                st.success("האופטימיזציה הסתיימה ✅")
+
+                # כמה כרטיסי KPI
+                st.markdown("#### 📊 Optimization summary")
+                col_s1, col_s2, col_s3, col_s4 = st.columns(4)
+                rows = float(summary.get("rows", float(len(df))))
+                best_sharpe = summary.get("best_sharpe")
+                avg_sharpe = summary.get("avg_sharpe")
+                best_score = summary.get("best_score")
+
+                with col_s1:
+                    st.metric("Trials", f"{int(rows)}")
+                with col_s2:
+                    if best_sharpe is not None:
+                        st.metric("Best Sharpe", f"{best_sharpe:.3f}")
+                with col_s3:
+                    if avg_sharpe is not None:
+                        st.metric("Avg Sharpe", f"{avg_sharpe:.3f}")
+                with col_s4:
+                    if best_score is not None:
+                        st.metric("Best score", f"{best_score:.3f}")
+
+                # טבלת top-tagged
+                st.markdown("#### 🏅 Top tagged trials")
+                st.dataframe(tagged.head(50), width = "stretch")
+
+                # Pareto
+                if isinstance(pareto, pd.DataFrame) and not pareto.empty:
+                    st.markdown("#### 🎯 Pareto front")
+                    st.dataframe(pareto, width = "stretch")
+
+                # best params
+                st.markdown("#### ⭐ Best parameter sets")
+                col_b1, col_b2 = st.columns(2)
+                with col_b1:
+                    st.markdown("**Best by Sharpe**")
+                    st.json(best_params.get("by_sharpe") or {})
+                with col_b2:
+                    st.markdown("**Best by score**")
+                    st.json(best_params.get("by_score") or {})
+                _render_feature_selection_summary(df, opt_config)
+
+        # Objectives
+        primary_objective = st.selectbox(
+            "Primary Objective",
+            ["Sharpe", "Sortino", "Calmar", "Return", "TailRisk"],
+            index=["Sharpe", "Sortino", "Calmar", "Return", "TailRisk"].index(
+                str(ctrl_opt.get("primary_objective", "Sharpe"))
+            ),
+            key="opt_primary_obj",
+        )
+        secondary_objective = st.selectbox(
+            "Secondary Objective (optional)",
+            ["None", "Sharpe", "Sortino", "Calmar", "Return", "TailRisk"],
+            index=0,
+            key="opt_secondary_obj",
+        )
+        secondary_weight = float(
+            st.number_input(
+                "משקל Secondary Objective",
+                min_value=0.0,
+                max_value=1.0,
+                value=float(ctrl_opt.get("secondary_objective_weight", 0.0)),
+                step=0.05,
+                key="opt_secondary_weight",
+            )
+        )
         if secondary_objective == "None":
             secondary_objective = ""
 
-        direction_opts = ["maximize", "minimize"]
-        direction_default = str(_first_non_empty(ctrl_opt.get("direction"), ss_get("opt_direction"), default="maximize"))
-        direction = st.selectbox("Score direction", direction_opts, index=_index_of(direction_opts, direction_default, default=0), key="opt_direction")
+        direction = st.selectbox(
+            "Score direction",
+            ["maximize", "minimize"],
+            index=["maximize", "minimize"].index(str(ctrl_opt.get("direction", "maximize"))),
+            key="opt_direction",
+        )
 
-        multi_objective = bool(st.checkbox("Multi-objective (Optuna)", value=bool(_first_non_empty(ctrl_opt.get("multi_objective"), ss_get("opt_multi_objective"), default=False)), key="opt_multi_objective"))
-        objective_metrics: List[str] = []
+        # Multi-objective flag (לעתיד)
+        multi_objective = st.checkbox(
+            "Multi-Objective mode (Optuna)",
+            value=bool(ctrl_opt.get("multi_objective", False)),
+            key="opt_multi_objective",
+        )
         if multi_objective:
-            objective_metrics = list(
-                st.multiselect(
-                    "Metrics for multi-objective",
-                    ["Sharpe", "Profit", "Drawdown", "Sortino", "Calmar", "WinRate"],
-                    default=list(_first_non_empty(ctrl_opt.get("objective_metrics"), ss_get("opt_mo_metrics"), default=["Sharpe", "Profit", "Drawdown"])),
-                    key="opt_mo_metrics",
-                )
+            objective_metrics = st.multiselect(
+                "Metrics למצב Multi-Objective",
+                ["Sharpe", "Profit", "Drawdown", "Sortino", "Calmar", "WinRate"],
+                default=ctrl_opt.get("objective_metrics") or ["Sharpe", "Profit", "Drawdown"],
+                key="opt_mo_metrics",
             )
+        else:
+            objective_metrics = []
 
-        sampler_opts = ["TPE", "CMAES"]
-        sampler_default = str(_first_non_empty(ctrl_opt.get("sampler_name"), ss_get("opt_sampler"), default="TPE")).upper()
-        sampler_name = st.selectbox("Sampler", sampler_opts, index=_index_of(sampler_opts, sampler_default, default=0), key="opt_sampler")
+        # Sampler / Pruner
+        sampler_name = st.selectbox(
+            "Sampler",
+            ["TPE", "CMAES"],
+            index=["TPE", "CMAES"].index(str(ctrl_opt.get("sampler_name", "TPE")).upper()),
+            key="opt_sampler",
+        )
+        pruner_name = st.selectbox(
+            "Pruner",
+            ["median", "none"],
+            index=["median", "none"].index(str(ctrl_opt.get("pruner_name", "median")).lower()),
+            key="opt_pruner",
+        )
+        max_concurrent_trials = int(
+            st.number_input(
+                "Max concurrent trials (hint)",
+                min_value=1,
+                max_value=64,
+                value=int(ctrl_opt.get("max_concurrent_trials", 4)),
+                step=1,
+                key="opt_max_concurrent",
+            )
+        )
 
-        pruner_opts = ["median", "none"]
-        pruner_default = str(_first_non_empty(ctrl_opt.get("pruner_name"), ss_get("opt_pruner"), default="median")).lower()
-        pruner_name = st.selectbox("Pruner", pruner_opts, index=_index_of(pruner_opts, pruner_default, default=0), key="opt_pruner")
+        # WF & Robustness
+        wf_use = st.checkbox(
+            "הפעל Walk-Forward per trial (אם נתמך ב-Backtester)",
+            value=bool(ctrl_opt.get("wf_use", True)),
+            key="opt_wf_use",
+        )
+        wf_folds = int(
+            st.number_input(
+                "WF folds (אם מופעל)",
+                min_value=1,
+                max_value=12,
+                value=int(ctrl_opt.get("wf_folds", 3)),
+                step=1,
+                key="opt_wf_folds",
+            )
+        )
+        wf_warmup = int(
+            st.number_input(
+                "WF warmup days",
+                min_value=0,
+                max_value=365,
+                value=int(ctrl_opt.get("wf_warmup_days", 60)),
+                step=5,
+                key="opt_wf_warmup",
+            )
+        )
+        robust_min_folds = int(
+            st.number_input(
+                "מינ' folds עם ביצועים סבירים",
+                min_value=1,
+                max_value=wf_folds,
+                value=int(ctrl_opt.get("robust_min_folds", max(1, wf_folds - 1))),
+                step=1,
+                key="opt_robust_min_folds",
+            )
+        )
+        robust_min_sharpe = float(
+            st.number_input(
+                "Sharpe מינימלי per fold (Robustness floor)",
+                min_value=-1.0,
+                max_value=3.0,
+                value=float(ctrl_opt.get("robust_min_sharpe", 0.3)),
+                step=0.05,
+                key="opt_robust_min_sharpe",
+            )
+        )
 
-        max_concurrent_trials = int(st.number_input("Max concurrent trials (hint)", min_value=1, max_value=64,
-                                                   value=int(_first_non_empty(ctrl_opt.get("max_concurrent_trials"), ss_get("opt_max_concurrent"), default=4)),
-                                                   step=1, key="opt_max_concurrent"))
+        # Scenario-aware
+        scenario_options = ["Neutral", "Risk-On", "Risk-Off", "Crisis"]
+        scenario_default = str(ctrl_opt.get("scenario_profile", "Neutral"))
+        if scenario_default not in scenario_options:
+            scenario_default = "Neutral"
 
-        wf_use = bool(st.checkbox("Enable Walk-Forward per trial (if supported)",
-                                  value=bool(_first_non_empty(ctrl_opt.get("wf_use"), ss_get("opt_wf_use"), default=True)),
-                                  key="opt_wf_use"))
-        wf_folds = int(st.number_input("WF folds", min_value=1, max_value=12,
-                                       value=int(_first_non_empty(ctrl_opt.get("wf_folds"), ss_get("opt_wf_folds"), default=3)),
-                                       step=1, key="opt_wf_folds"))
-        wf_warmup = int(st.number_input("WF warmup days", min_value=0, max_value=365,
-                                        value=int(_first_non_empty(ctrl_opt.get("wf_warmup_days"), ss_get("opt_wf_warmup"), default=60)),
-                                        step=5, key="opt_wf_warmup"))
-        robust_min_folds = int(st.number_input("Robustness: min folds passing", min_value=1, max_value=max(1, wf_folds),
-                                               value=int(_first_non_empty(ctrl_opt.get("robust_min_folds"), ss_get("opt_robust_min_folds"), default=max(1, wf_folds - 1))),
-                                               step=1, key="opt_robust_min_folds"))
-        robust_min_sharpe = float(st.number_input("Robustness: min Sharpe per fold", min_value=-1.0, max_value=5.0,
-                                                  value=float(_first_non_empty(ctrl_opt.get("robust_min_sharpe"), ss_get("opt_robust_min_sharpe"), default=0.3)),
-                                                  step=0.05, key="opt_robust_min_sharpe"))
+        scenario_profile = st.selectbox(
+            "Scenario Profile (לוגי, ל-analysis & reports)",
+            scenario_options,
+            index=scenario_options.index(scenario_default),
+            key="opt_scenario_profile",
+        )
+        scenario_tail_weight = float(
+            st.number_input(
+                "משקל Tail-Risk בתרחיש (0–1)",
+                min_value=0.0,
+                max_value=1.0,
+                value=float(ctrl_opt.get("scenario_tail_weight", 0.3)),
+                step=0.05,
+                key="opt_scenario_tail_weight",
+            )
+        )
 
-        scenario_opts = ["Neutral", "Risk-On", "Risk-Off", "Crisis"]
-        scenario_default = str(_first_non_empty(ctrl_opt.get("scenario_profile"), ss_get("opt_scenario_profile"), default="Neutral"))
-        scenario_profile = st.selectbox("Scenario profile", scenario_opts, index=_index_of(scenario_opts, scenario_default, default=0), key="opt_scenario_profile")
+        # Fresh vs warm data weight (לניתוח עתידי)
+        fresh_weight = float(
+            st.number_input(
+                "משקל לתקופה האחרונה בתוצאה (0–1, לניתוח עתידי)",
+                min_value=0.0,
+                max_value=1.0,
+                value=float(ctrl_opt.get("fresh_weight", 0.5)),
+                step=0.05,
+                key="opt_fresh_weight",
+            )
+        )
 
-        scenario_tail_weight = float(st.number_input("Scenario tail weight (0–1)", min_value=0.0, max_value=1.0,
-                                                     value=float(_first_non_empty(ctrl_opt.get("scenario_tail_weight"), ss_get("opt_scenario_tail_weight"), default=0.3)),
-                                                     step=0.05, key="opt_scenario_tail_weight"))
-        fresh_weight = float(st.number_input("Recent-period weight (0–1)", min_value=0.0, max_value=1.0,
-                                             value=float(_first_non_empty(ctrl_opt.get("fresh_weight"), ss_get("opt_fresh_weight"), default=0.5)),
-                                             step=0.05, key="opt_fresh_weight"))
-
-        batch_mode = bool(st.checkbox("Batch mode (multiple pairs)", value=bool(_first_non_empty(ctrl_opt.get("batch_mode"), ss_get("opt_batch_mode"), default=False)), key="opt_batch_mode"))
-        batch_pairs: List[Tuple[str, str]] = []
+        # Batch mode
+        batch_mode = st.checkbox(
+            "Run batch over multiple pairs",
+            value=bool(ctrl_opt.get("batch_mode", False)),
+            key="opt_batch_mode",
+        )
+        batch_pairs_raw = ""
         if batch_mode:
-            default_batch = "\n".join(list(ss_get("opt_batch_pairs", [])) or ["XLY-XLP", "QQQ-IWM"])
-            batch_pairs_raw = st.text_area("Batch pairs (one per line: SYM1-SYM2)", value=default_batch, key="opt_batch_pairs_text", height=140)
-            ss_set("opt_batch_pairs", [ln.strip().upper() for ln in batch_pairs_raw.splitlines() if ln.strip()])
-            batch_pairs = _parse_batch_pairs(list(ss_get("opt_batch_pairs", [])) or [])
+            st.caption("Format: lines of `SYM1-SYM2`, e.g.:\nXLY-XLP\nQQQ-IWM")
+            default_batch = "\n".join(
+                list(st.session_state.get("opt_batch_pairs", [])) or ["XLY-XLP", "QQQ-IWM"]
+            )
+            batch_pairs_raw = st.text_area(
+                "Batch pairs",
+                value=default_batch,
+                key="opt_batch_pairs_text",
+            )
+            st.session_state["opt_batch_pairs"] = [
+                ln.strip() for ln in batch_pairs_raw.splitlines() if ln.strip()
+            ]
 
-        meta_enabled = bool(st.checkbox("Meta-Optimization (analysis-only toggle)",
-                                       value=bool(_first_non_empty(ctrl_opt.get("meta_optimization_enabled"), ss_get("opt_meta_enabled"), default=False)),
-                                       key="opt_meta_enabled"))
-        ensure_prices_via_ib = bool(st.checkbox("Ensure SqlStore prices via IBKR before optimisation",
-                                               value=bool(_first_non_empty(ctrl_opt.get("ensure_prices_via_ib"), ss_get("opt_ensure_prices_ib"), default=True)),
-                                               key="opt_ensure_prices_ib"))
+        # Meta-optimization flag
+        meta_enabled = bool(ctrl_opt.get("meta_optimization_enabled", False))
+        meta_enabled = st.checkbox(
+            "Meta-Optimization (לוגי, לניתוח ול-step הבא)",
+            value=meta_enabled,
+            key="opt_meta_enabled",
+        )
 
-        approx_pairs = max(1, len(batch_pairs)) if batch_mode else 1
-        approx_wf_factor = wf_folds if (wf_use and wf_folds > 1) else 1
-        complexity_units = int(n_trials) * int(approx_pairs) * int(approx_wf_factor)
-        st.caption(f"Estimated complexity units ≈ `{complexity_units:,}` (trials × pairs × WF_folds).")
+        # SqlStore/IBKR ingestion לפני אופטימיזציה
+        ensure_prices_via_ib = st.checkbox(
+            "Ensure SqlStore prices via IBKR before optimisation",
+            value=bool(ctrl_opt.get("ensure_prices_via_ib", True)),
+            key="opt_ensure_prices_ib",
+            help=(
+                "כאשר פעיל – לפני כל ריצת אופטימיזציה (single/batch) הטאב ינסה להשלים מחירים חסרים "
+                "ב-SqlStore עבור הזוגות המתאימים דרך IBKR (באופן אינקרמנטלי). "
+                "במקרה של כשל – הריצה תמשיך כרגיל, רק עם לוג."
+            ),
+        )
+
+        # === Run complexity estimator (רעיון חדש) ===
+        approx_pairs = 1 if not batch_mode else max(1, len(st.session_state.get("opt_batch_pairs", [])))
+        approx_wf_factor = wf_folds if wf_use and wf_folds > 1 else 1
+        complexity_units = n_trials * approx_pairs * approx_wf_factor
+        st.caption(
+            f"🔍 Estimated complexity units ≈ `{complexity_units:,}` "
+            f"(~ n_trials × pairs × WF_folds)."
+        )
         if complexity_units > 50_000:
-            st.warning("This run is heavy. Consider lowering n_trials and/or WF folds.")
+            st.warning("הריצה הזו כבדה יחסית – שקול להוריד WF folds או n_trials.")
 
-        dry_run = bool(st.button("🔎 Dry-run config (no optimisation)", key="opt_dry_run"))
+        # ==== Action buttons: dry-run / single / batch ====
+        dry_run = st.button("🔎 Dry-run config (no optimisation)", key="opt_dry_run")
 
-        # LIVE gate: lock execution buttons until explicit allow
         allow_live_opt = True
         if is_live_env:
-            allow_live_opt = bool(st.checkbox("Allow heavy optimisation in LIVE env",
-                                              value=bool(ss_get("opt_allow_live_opt", False)),
-                                              key="opt_allow_live_opt",
-                                              help="Safety gate: required to run heavy optimisation in LIVE."))
+            allow_live_opt = st.checkbox(
+                "Allow heavy optimisation in LIVE/PROD env",
+                value=bool(st.session_state.get("opt_allow_live_opt", False)),
+                key="opt_allow_live_opt",
+                help=(
+                    "בטיחות: בסביבת LIVE/PROD הרצה של Optuna/Batch יכולה להיות כבדה מאוד. "
+                    "סמן רק אם אתה בטוח שאתה רוצה להריץ את זה על סביבת live."
+                ),
+            )
 
-        # Buttons (execution section below)
-        run_single_clicked = bool(st.button("▶ Run (single pair)", type="primary", key="opt_run_single"))
-        run_batch_clicked = bool(st.button("🧪 Run batch", key="opt_run_batch")) if batch_mode else False
+        run_single_raw = st.button("▶ Run (single pair)", type="primary", key="opt_run_single")
+        run_batch_raw = st.button("🧪 Run batch", key="opt_run_batch") if batch_mode else False
 
-        run_single = bool(run_single_clicked and (allow_live_opt or not is_live_env))
-        run_batch = bool(run_batch_clicked and (allow_live_opt or not is_live_env))
+        # החלת gating: ב-LIVE/PROD בלי checkbox → לא מריצים
+        run_single = bool(run_single_raw and (allow_live_opt or not is_live_env))
+        run_batch = bool(run_batch_raw and (allow_live_opt or not is_live_env))
 
-        if is_live_env and not allow_live_opt:
-            st.info("LIVE gating is enabled: optimisation runs are locked until you tick the LIVE gate.")
 
-    # -----------------------------
-    # 12) Build canonical run config once
-    # -----------------------------
-    cfg = OptRunConfig(
-        run_id=run_id,
-        seed=int(seed_val),
-        env=effective_env,
-        profile=str(profile),
-        sym1=str(sym1),
-        sym2=str(sym2),
-        opt_mode=str(opt_mode),
-        n_trials=int(n_trials),
-        timeout_min=int(timeout_min),
-        direction=str(direction),
-        primary_objective=str(primary_objective),
-        secondary_objective=str(secondary_objective),
-        secondary_objective_weight=float(secondary_weight),
-        multi_objective=bool(multi_objective),
-        objective_metrics=list(objective_metrics) if multi_objective else [],
-        sampler_name=str(sampler_name),
-        pruner_name=str(pruner_name),
-        max_concurrent_trials=int(max_concurrent_trials),
-        wf_use=bool(wf_use),
-        wf_folds=int(wf_folds),
-        wf_warmup_days=int(wf_warmup),
-        robust_min_folds=int(robust_min_folds),
-        robust_min_sharpe=float(robust_min_sharpe),
-        scenario_profile=str(scenario_profile),
-        scenario_tail_weight=float(scenario_tail_weight),
-        fresh_weight=float(fresh_weight),
-        meta_optimization_enabled=bool(meta_enabled),
-        experiment_name=str(experiment_name),
-        ensure_prices_via_ib=bool(ensure_prices_via_ib),
-        quick_knobs={
-            "z_open": float(z_open),
-            "z_close": float(z_close),
-            "max_exposure_per_trade": float(max_exposure),
-            **({"max_gross_exposure": float(max_gross)} if max_gross is not None else {}),
-        },
+    # ==== 5) שמירת opt_run_cfg ל-session (שימוש ע"י scoring, WF וכו') ====
+    # וידוא ברירות מחדל לכל המשתנים – גם אם ה-UI של ה-Objectives/WF לא רץ
+    # (למשל כאשר opt_config is None או run_optimization is None).
+
+    direction = locals().get("direction", str(ctrl_opt.get("direction", "maximize")))
+    multi_objective = locals().get("multi_objective", bool(ctrl_opt.get("multi_objective", False)))
+    objective_metrics = locals().get(
+        "objective_metrics",
+        list(ctrl_opt.get("objective_metrics") or []),
     )
-    ss_set("opt_run_cfg", cfg.as_dict())
 
-    issues = cfg.validate()
-    if issues:
-        hard = [m for m in issues if not str(m).startswith("WARN:")]
-        soft = [m for m in issues if str(m).startswith("WARN:")]
+    primary_objective = locals().get(
+        "primary_objective",
+        str(ctrl_opt.get("primary_objective", "Sharpe")),
+    )
+    secondary_objective = locals().get(
+        "secondary_objective",
+        str(ctrl_opt.get("secondary_objective", "")),
+    )
+    secondary_weight = locals().get(
+        "secondary_weight",
+        float(ctrl_opt.get("secondary_objective_weight", 0.0)),
+    )
 
-        with st.expander("⚠️ Config validation", expanded=True):
-            if hard:
-                st.markdown("**Errors (blocking):**")
-                for msg in hard:
-                    st.write(f"- {msg}")
-            if soft:
-                st.markdown("**Warnings (non-blocking):**")
-                for msg in soft:
-                    st.write(f"- {msg}")
+    sampler_name = locals().get(
+        "sampler_name",
+        str(ctrl_opt.get("sampler_name", "TPE")),
+    )
+    pruner_name = locals().get(
+        "pruner_name",
+        str(ctrl_opt.get("pruner_name", "median")),
+    )
+    max_concurrent_trials = locals().get(
+        "max_concurrent_trials",
+        int(ctrl_opt.get("max_concurrent_trials", 4)),
+    )
 
-        # Block execution only on hard errors
-        if hard and (run_single or run_batch):
-            st.error("Run blocked: config has blocking errors.")
-            run_single = False
-            run_batch = False
+    wf_use = locals().get("wf_use", bool(ctrl_opt.get("wf_use", True)))
+    wf_folds = locals().get("wf_folds", int(ctrl_opt.get("wf_folds", 3)))
+    wf_warmup = locals().get("wf_warmup", int(ctrl_opt.get("wf_warmup_days", 60)))
+    robust_min_folds = locals().get(
+        "robust_min_folds",
+        int(ctrl_opt.get("robust_min_folds", max(1, wf_folds - 1))),
+    )
+    robust_min_sharpe = locals().get(
+        "robust_min_sharpe",
+        float(ctrl_opt.get("robust_min_sharpe", 0.3)),
+    )
 
-    # -----------------------------
-    # 13) Dry-run summary
-    # -----------------------------
+    scenario_profile = locals().get(
+        "scenario_profile",
+        str(ctrl_opt.get("scenario_profile", "Neutral")),
+    )
+    scenario_tail_weight = locals().get(
+        "scenario_tail_weight",
+        float(ctrl_opt.get("scenario_tail_weight", 0.3)),
+    )
+    fresh_weight = locals().get(
+        "fresh_weight",
+        float(ctrl_opt.get("fresh_weight", 0.5)),
+    )
+
+    meta_enabled = locals().get(
+        "meta_enabled",
+        bool(ctrl_opt.get("meta_optimization_enabled", False)),
+    )
+    experiment_name = locals().get(
+        "experiment_name",
+        str(ctrl_opt.get("experiment_name", "")),
+    )
+
+    opt_run_cfg = {
+        "run_id": run_id,
+        "seed": seed_val,
+        "sym1": sym1,
+        "sym2": sym2,
+        "opt_mode": opt_mode,
+        "n_trials": n_trials,
+        "timeout_min": timeout_min,
+        "direction": direction,
+        "primary_objective": primary_objective,
+        "secondary_objective": secondary_objective,
+        "secondary_weight": secondary_weight,
+        "multi_objective": multi_objective,
+        "objective_metrics": objective_metrics,
+        "sampler_name": sampler_name,
+        "pruner_name": pruner_name,
+        "max_concurrent_trials": max_concurrent_trials,
+        "wf_use": wf_use,
+        "wf_folds": wf_folds,
+        "wf_warmup": wf_warmup,
+        "robust_min_folds": robust_min_folds,
+        "robust_min_sharpe": robust_min_sharpe,
+        "scenario_profile": scenario_profile,
+        "scenario_tail_weight": scenario_tail_weight,
+        "fresh_weight": fresh_weight,
+        "meta_optimization_enabled": meta_enabled,
+        "experiment_name": experiment_name,
+        "ensure_prices_via_ib": bool(
+            locals().get("ensure_prices_via_ib", ctrl_opt.get("ensure_prices_via_ib", True))
+        ),
+    }
+
+    st.session_state["opt_run_cfg"] = opt_run_cfg
+
+
+    # ==== 5.1 Dry-run config – sanity check בלבד ====
+
     if dry_run:
         with st.expander("Dry-run config summary", expanded=True):
-            st.json(cfg.as_dict())
-            st.caption(f"run_id={cfg.run_id} | seed={cfg.seed} | env={cfg.env} | profile={cfg.profile}")
-
-    # -----------------------------
-    # 14) Core optimizer config diagnostics (SQL-first, production-grade)
-    # -----------------------------
-    core_cfg_ok = True
-    core_cfg_issues: List[str] = []
-
-    # validate dates (needed for cache keys)
-    sd_iso = _iso_date_or_empty(start_date)
-    ed_iso = _iso_date_or_empty(end_date)
-    if not sd_iso or not ed_iso:
-        core_cfg_ok = False
-        core_cfg_issues.append("start_date/end_date missing or invalid (cannot build SQL price window).")
-
-    # validate SqlStore availability
-    if core_cfg_ok:
-        store_probe = _get_sql_store_cached(effective_env)
-        if store_probe is None:
-            core_cfg_ok = False
-            core_cfg_issues.append("SqlStore unavailable (AppContext/sql_store not initialized or import failed).")
-
-    if core_cfg_issues:
-        with st.expander("⚠️ Core optimiser prerequisites (SQL-first)", expanded=True):
-            for msg in core_cfg_issues:
-                st.write(f"- {msg}")
-
-    # store only meta (NOT Series) so other parts can reference it
-    ss_set(
-        "opt_config_meta",
-        {
-            "env": effective_env,
-            "pair": f"{cfg.sym1}-{cfg.sym2}",
-            "start": sd_iso,
-            "end": ed_iso,
-            "source": "SQL",
-        },
-    )
-
-    # -----------------------------
-    # 14.1) Build opt_config (SQL-first) and cache it safely
-    # -----------------------------
-    try:
-        prev_meta = ss_get("opt_config_meta_built", {}) or {}
-    except Exception:
-        prev_meta = {}
-
-    build_meta = {
-        "env": effective_env,
-        "pair": f"{cfg.sym1}-{cfg.sym2}",
-        "start": sd_iso,
-        "end": ed_iso,
-        "profile": str(cfg.profile),
-        "seed": int(cfg.seed),
-        "ranges_hash": None,
-    }
-    try:
-        build_meta["ranges_hash"] = paramspace_hash(ranges)
-    except Exception:
-        build_meta["ranges_hash"] = None
-
-    should_rebuild = (not isinstance(ss_get("opt_config"), dict)) or (prev_meta != build_meta)
-
-    if core_cfg_ok and should_rebuild:
-        try:
-            opt_config_built, issues_built = _build_core_optimizer_config_sql_first(
-                cfg=cfg,
-                start_date=start_date,
-                end_date=end_date,
-                ranges=ranges,
-                weights=weights,
-                app_ctx_global=app_ctx_global,
-            )
-            if issues_built:
-                core_cfg_issues.extend(list(issues_built))
-            if isinstance(opt_config_built, dict) and opt_config_built:
-                ss_set("opt_config", opt_config_built)
-                ss_set("opt_config_meta_built", build_meta)
-        except Exception as e:
-            core_cfg_ok = False
-            core_cfg_issues.append(f"opt_config build failed: {e}")
-            
-    # Always refresh local view from session_state (fix: opt_config was always empty)
-    opt_config = ss_get("opt_config", {})
-
-
-    # -----------------------------
-    # 15) Optional core.optimizer runner (button-driven)
-    # -----------------------------
-    st.markdown("#### Core optimiser (core.optimizer.run_optimization)")
-    opt_config = ss_get("opt_config")
-
-    if run_optimization is None:
-        st.warning("core.optimizer.run_optimization is not available (import failed).")
-    elif not isinstance(opt_config, dict) or not opt_config:
-        st.warning("opt_config is missing or invalid; auto-builder failed.")
-    else:
-        if st.button("🚀 Run core optimisation (HF)", key="opt_run_btn_core"):
-            with st.spinner("Running core optimisation..."):
-                res = _run_core_optimization(
-                    config=opt_config,
-                    n_trials=int(cfg.n_trials),
-                    study_name=f"core_opt::{cfg.sym1}-{cfg.sym2}",
-                    candidates=None,
-                )
-            if not res:
-                st.warning("Core optimisation returned no results.")
+            st.json(opt_run_cfg)
+            issues = []
+            if n_trials < 20:
+                issues.append("n_trials נמוך מ-20 – זה יותר Smoke-test מאשר אופטימיזציה.")
+            if batch_mode and not st.session_state.get("opt_batch_pairs"):
+                issues.append("Batch mode פעיל אבל אין אף pair ברשימה.")
+            if wf_use and wf_folds < 2:
+                issues.append("WF מופעל אבל WF_folds < 2 – אין משמעות אמיתית ל-WF.")
+            if not ranges:
+                issues.append("active_ranges ריק – אין מרחב פרמטרים לאופטימיזציה.")
+            if not weights:
+                issues.append("weights ריק – scoring לא מוגדר היטב.")
+            if issues:
+                st.warning("🔎 Findings:")
+                st.write("\n".join(f"• {msg}" for msg in issues))
             else:
-                df_core = res.get("df")
-                if isinstance(df_core, pd.DataFrame) and not df_core.empty:
-                    ss_set("opt_df", df_core.copy())
-                    st.success("Core optimisation completed.")
-                else:
-                    st.warning("Core optimisation returned an empty dataframe.")
+                st.success("No obvious issues detected in config.")
+        # dry-run לא מריץ כלום – נמשיך הלאה כדי לראות תוצאות קודמות אם יש.
 
-    st.markdown("---")
-
-    # -----------------------------
-    # 16) Canonical HF path: single/batch (Optuna path)
-    # -----------------------------
-    def _ensure_prices_for_pair(pair_a: str, pair_b: str) -> None:
-        if not cfg.ensure_prices_via_ib:
-            return
-        try:
-            _ensure_prices_for_pair_before_opt(pair_a, pair_b, start_date=start_date, end_date=end_date)
-        except Exception as e:
-            try:
-                logger.debug("ensure_prices failed for %s-%s: %s", pair_a, pair_b, e)
-            except Exception:
-                pass
-
+    # ==== 6) Run single / batch ==== 
     res_container = st.container()
-    df_single: Optional[pd.DataFrame] = None
-    df_batch: Optional[pd.DataFrame] = None
-    study_id_single: Optional[int] = None
-    manifests_batch: Dict[str, Dict[str, Any]] = {}
+    df_single = None
+    df_batch = None
 
+    if is_live_env and (run_single or run_batch) and not st.session_state.get("opt_allow_live_opt", False):
+        st.warning("Optuna/Batch optimisation in LIVE/PROD env חסומה עד שתסמן את ה-checkbox ב־Run Controls.")
+
+    # Single pair optimisation
     if run_single:
-        _ensure_prices_for_pair(cfg.sym1, cfg.sym2)
-        with st.spinner(f"Optimising {cfg.sym1}-{cfg.sym2} (Optuna)…"):
-            df_single, study_id_single, manifest_single = optimize_pair_with_telemetry(
-                cfg.sym1,
-                cfg.sym2,
+        st.session_state["_opt_last_single_pair"] = f"{sym1}-{sym2}"
+        with st.spinner(f"Optimising {sym1}-{sym2}…"):
+            df_single, study_id, manifest = optimize_pair_with_telemetry(
+                sym1,
+                sym2,
                 ranges=ranges,
                 weights=weights,
-                n_trials=int(cfg.n_trials),
-                timeout_min=int(cfg.timeout_min),
-                direction=str(cfg.direction),
-                sampler_name=str(cfg.sampler_name),
-                pruner_name=str(cfg.pruner_name),
-                param_mapping=ss_get("opt_param_mapping"),
-                profile=str(cfg.profile),
-                multi_objective=bool(cfg.multi_objective),
-                objective_metrics=list(cfg.objective_metrics) if cfg.multi_objective else [],
+                n_trials=n_trials,
+                timeout_min=timeout_min,
+                direction=direction,
+                sampler_name=sampler_name,
+                pruner_name=pruner_name,
+                param_mapping=st.session_state.get("opt_param_mapping"),
+                profile=profile,
+                multi_objective=multi_objective,
+                objective_metrics=objective_metrics,
                 param_specs=get_param_specs_view(),
                 notify=True,
             )
 
-        ss_set("opt_df", df_single)
-        ss_set("opt_last_manifest", manifest_single if isinstance(manifest_single, dict) else {})
-        ss_set("opt_last_study_id", study_id_single)
+            st.session_state["opt_df"] = df_single
+            st.session_state["opt_last_manifest"] = manifest
+            st.session_state["opt_last_study_id"] = study_id
 
-        best_params, best_score = select_live_candidate_from_opt_df(df_single)
-        if isinstance(manifest_single, dict):
-            man_bp = manifest_single.get("best_params") or {}
-            if man_bp:
-                best_params = man_bp
-            man_bs = (manifest_single.get("metrics") or {}).get("best_score")
-            if man_bs is not None:
-                best_score = _safe_float(man_bs, best_score)
+            # --- רישום best params לזוג הנוכחי (HF-grade) ---
+            # קודם כל נבחר live-candidate מתוך df_single בעזרת DSR/WF אם קיים
+            best_params, best_score = select_live_candidate_from_opt_df(df_single)
 
-        pair_label = f"{cfg.sym1}-{cfg.sym2}"
-        register_best_params_for_pair(pair_label, best_params, score=best_score, profile=str(cfg.profile))
-        push_optimization_metrics_to_ctx(
-            best_params=best_params,
-            best_score=best_score,
-            n_trials=int(cfg.n_trials),
-            objective_name=str(cfg.primary_objective),
-            pair_id=pair_label,
-            profile=str(cfg.profile),
-            mode="single",
-        )
-
-        hist = ss_get("opt_runs_timeline", [])
-        hist = hist if isinstance(hist, list) else []
-        hist.append(
-            {
-                "ts": _now_utc_z(),
-                "run_id": cfg.run_id,
-                "type": "single",
-                "pair": pair_label,
-                "n_trials": int(cfg.n_trials),
-                "timeout_min": int(cfg.timeout_min),
-                "profile": str(cfg.profile),
-                "primary_objective": str(cfg.primary_objective),
-                "experiment_name": str(cfg.experiment_name),
-                "study_id": study_id_single,
-            }
-        )
-        ss_set("opt_runs_timeline", hist[-50:])
-
-        with res_container:
-            if isinstance(df_single, pd.DataFrame) and not df_single.empty:
-                st.success(f"Completed optimisation for {pair_label}. study_id={study_id_single or 'n/a'}")
-            else:
-                st.warning("No results produced (single).")
-
-    if run_batch and batch_mode:
-        batch_pairs = _parse_batch_pairs(list(ss_get("opt_batch_pairs", [])) or [])
-        if not batch_pairs:
-            st.warning("Batch mode enabled but no valid pairs were provided.")
-        else:
-            for a, b in batch_pairs:
-                _ensure_prices_for_pair(a, b)
-
-            with st.spinner(f"Running batch optimisation for {len(batch_pairs)} pairs…"):
-                df_batch, manifests_batch = optimize_pairs_batch(
-                    batch_pairs,
-                    ranges=ranges,
-                    weights=weights,
-                    n_trials=int(cfg.n_trials),
-                    timeout_min=int(cfg.timeout_min),
-                    direction=str(cfg.direction),
-                    sampler_name=str(cfg.sampler_name),
-                    pruner_name=str(cfg.pruner_name),
-                    profile=str(cfg.profile),
-                    multi_objective=bool(cfg.multi_objective),
-                    objective_metrics=list(cfg.objective_metrics) if cfg.multi_objective else [],
-                    param_specs=get_param_specs_view(),
-                    notify_each=False,
-                )
-
-            ss_set("opt_df_batch", df_batch)
-            ss_set("opt_batch_manifests", manifests_batch)
-
-            # Register best params per pair (bounded, safe)
-            if isinstance(df_batch, pd.DataFrame) and (not df_batch.empty) and ("Pair" in df_batch.columns):
+            # אם ה-manifest מכיל best_params/best_score מפורש – ניתן לו עדיפות
+            if isinstance(manifest, dict):
                 try:
-                    for pair_label, sub in df_batch.groupby("Pair"):
-                        bp, bs = select_live_candidate_from_opt_df(sub)
-                        man = manifests_batch.get(str(pair_label), {}) if isinstance(manifests_batch, dict) else {}
-                        if isinstance(man, dict):
-                            man_bp = man.get("best_params") or {}
-                            if man_bp:
-                                bp = man_bp
-                            man_bs = (man.get("metrics") or {}).get("best_score")
-                            if man_bs is not None:
-                                bs = _safe_float(man_bs, bs)
-                        register_best_params_for_pair(str(pair_label), bp, score=bs, profile=str(cfg.profile))
+                    man_best_params = manifest.get("best_params") or {}
+                    if man_best_params:
+                        best_params = man_best_params
+                except Exception:
+                    pass
+                try:
+                    man_best_score = manifest.get("metrics", {}).get("best_score")
+                    if man_best_score is not None:
+                        best_score = float(man_best_score)
                 except Exception:
                     pass
 
-            best_score_batch: Optional[float] = None
-            if isinstance(df_batch, pd.DataFrame) and (not df_batch.empty) and ("Score" in df_batch.columns):
-                try:
-                    best_score_batch = float(pd.to_numeric(df_batch["Score"], errors="coerce").max())
-                except Exception:
-                    best_score_batch = None
+            pair_label = f"{sym1}-{sym2}"
 
-            push_optimization_metrics_to_ctx(
-                best_params={},
-                best_score=best_score_batch,
-                n_trials=int(cfg.n_trials),
-                objective_name=str(cfg.primary_objective),
-                pair_id="batch",
-                profile=str(cfg.profile),
-                mode="batch",
+            # רישום ל-registry ברמת המערכת (עם הגנות LIVE/PROD)
+            register_best_params_for_pair(
+                pair_label,
+                best_params,
+                score=best_score,
+                profile=profile,
             )
 
-            hist = ss_get("opt_runs_timeline", [])
-            hist = hist if isinstance(hist, list) else []
-            hist.append(
+
+            # ננסה להוציא best_params / best_score מתוך manifest אם יש
+            if isinstance(manifest, dict):
+                try:
+                    best_params = manifest.get("best_params") or {}
+                except Exception:
+                    best_params = {}
+                try:
+                    best_score = manifest.get("metrics", {}).get("best_score")
+                except Exception:
+                    best_score = None
+
+            # fallback: מה-DataFrame עצמו
+            if (not best_params) and df_single is not None and not df_single.empty:
+                try:
+                    # נבחר שורה עם Score הכי גבוה (אם קיים)
+                    if "Score" in df_single.columns:
+                        row = df_single.sort_values("Score", ascending=False).iloc[0]
+                    else:
+                        row = df_single.iloc[0]
+                    # פרמטרים = כל מה שלא מטריקות
+                    metric_like = {
+                        c for c in df_single.columns
+                        if METRIC_KEYS.get(str(c).lower()) or c in ("Score", "Pair", "study_id")
+                    }
+                    best_params = {c: row[c] for c in df_single.columns if c not in metric_like}
+                    if "Score" in df_single.columns:
+                        best_score = float(pd.to_numeric(df_single["Score"], errors="coerce").max())
+                except Exception:
+                    best_params = best_params or {}
+                    best_score = best_score
+
+            pair_label = f"{sym1}-{sym2}"
+            register_best_params_for_pair(
+                pair_label,
+                best_params,
+                score=best_score,
+                profile=profile,
+            )
+
+            # --- Snapshot למערכת כולה (Home / Risk / Agents) ---
+            # ננסה להוציא best_score ו-best_params מה-manifest; אם אין, נ fallback ל-DataFrame
+            best_score = None
+            best_params = {}
+
+            if isinstance(manifest, dict):
+                try:
+                    best_score = manifest.get("metrics", {}).get("best_score")
+                except Exception:
+                    best_score = None
+
+            if best_score is None and df_single is not None and not df_single.empty and "Score" in df_single.columns:
+                try:
+                    best_score = float(pd.to_numeric(df_single["Score"], errors="coerce").max())
+                except Exception:
+                    best_score = None
+
+            try:
+                # אם הוספת בעתיד "best_params" ל-manifest – ננסה להשתמש בהם
+                if isinstance(manifest, dict) and "best_params" in manifest:
+                    best_params = manifest.get("best_params") or {}
+            except Exception:
+                best_params = {}
+
+            # --- Snapshot למערכת כולה (Home / Risk / Agents) ---
+            push_optimization_metrics_to_ctx(
+                best_params=best_params,
+                best_score=best_score,
+                n_trials=n_trials,
+                objective_name=str(primary_objective),
+                pair_id=f"{sym1}-{sym2}",
+                profile=profile,
+                mode="single",
+            )
+
+
+            history = st.session_state.get("opt_runs_timeline", [])
+            if not isinstance(history, list):
+                history = []
+            history.append(
                 {
-                    "ts": _now_utc_z(),
-                    "run_id": cfg.run_id,
-                    "type": "batch",
-                    "n_pairs": int(len(batch_pairs)),
-                    "n_trials": int(cfg.n_trials),
-                    "timeout_min": int(cfg.timeout_min),
-                    "profile": str(cfg.profile),
-                    "primary_objective": str(cfg.primary_objective),
-                    "experiment_name": str(cfg.experiment_name),
+                    "ts": datetime.now().isoformat(timespec="seconds"),
+                    "run_id": run_id,
+                    "type": "single",
+                    "pair": f"{sym1}-{sym2}",
+                    "n_trials": n_trials,
+                    "timeout_min": timeout_min,
+                    "profile": profile,
+                    "primary_objective": primary_objective,
+                    "experiment_name": experiment_name,
                 }
             )
-            ss_set("opt_runs_timeline", hist[-50:])
+            st.session_state["opt_runs_timeline"] = history[-50:]
+
+        with res_container:
+            if df_single is not None and not df_single.empty:
+                st.success(f"Completed optimisation for {sym1}-{sym2}. study_id={study_id or 'n/a'}")
+            else:
+                st.warning("No results produced (single pair).")
+
+    # Batch optimisation
+    if run_batch and batch_mode:
+        batch_list: List[Tuple[str, str]] = []
+        for ln in st.session_state.get("opt_batch_pairs", []):
+            ln = ln.strip()
+            if not ln:
+                continue
+            sep_used: Optional[str] = None
+            for sep in ("|", "/", "\\", ":", "-"):
+                if sep in ln:
+                    sep_used = sep
+                    break
+            if not sep_used:
+                continue
+            a, b = ln.split(sep_used, 1)
+            a, b = a.strip(), b.strip()
+            if a and b:
+                batch_list.append((a, b))
+
+        # אם אין בכלל זוגות אחרי הפרסינג – אין מה להריץ
+        if not batch_list:
+            st.warning("Batch mode פעיל אבל לא הוגדר אף pair תקין ברשימה.")
+        else:
+            # וידוא מחירים לכל זוג ב-Batch (Best-effort בלבד, לפני Optuna)
+            # משתמש ב־ensure_prices_via_ib מה־Run Controls (checkbox)
+            ensure_flag = bool(
+                locals().get(
+                    "ensure_prices_via_ib",
+                    ctrl_opt.get("ensure_prices_via_ib", True),
+                )
+            )
+            if ensure_flag:
+                for sx, sy in batch_list:
+                    try:
+                        _ensure_prices_for_pair_before_opt(
+                            sx,
+                            sy,
+                            start_date=start_date,
+                            end_date=end_date,
+                        )
+                    except Exception as e:
+                        logger.debug(
+                            "OptTab: _ensure_prices_for_pair_before_opt failed for batch pair %s-%s: %s",
+                            sx,
+                            sy,
+                            e,
+                        )
+
+            with st.spinner(f"Running batch optimisation for {len(batch_list)} pairs…"):
+                df_batch, manifests = optimize_pairs_batch(
+                    batch_list,
+                    ranges=ranges,
+                    weights=weights,
+                    n_trials=n_trials,
+                    timeout_min=timeout_min,
+                    direction=direction,
+                    sampler_name=sampler_name,
+                    pruner_name=pruner_name,
+                    profile=profile,
+                    multi_objective=multi_objective,
+                    objective_metrics=objective_metrics,
+                    param_specs=get_param_specs_view(),
+                    notify_each=False,
+                )
+                st.session_state["opt_df_batch"] = df_batch
+                st.session_state["opt_batch_manifests"] = manifests
+
+                # --- רישום best params לכל זוג מתוך Batch (HF-grade live candidate) ---
+                if df_batch is not None and not df_batch.empty and "Pair" in df_batch.columns:
+                    try:
+                        for pair_label, sub in df_batch.groupby("Pair"):
+                            # 1) בחירה חכמה מתוך ה-sub באמצעות select_live_candidate_from_opt_df
+                            best_params, best_score = select_live_candidate_from_opt_df(sub)
+
+                            # 2) אם יש manifest ספציפי לזוג – נותן לו זכות veto
+                            man = manifests.get(pair_label) if isinstance(manifests, dict) else None
+                            if isinstance(man, dict):
+                                try:
+                                    man_best_params = man.get("best_params") or {}
+                                    if man_best_params:
+                                        best_params = man_best_params
+                                except Exception:
+                                    pass
+                                try:
+                                    man_best_score = man.get("metrics", {}).get("best_score")
+                                    if man_best_score is not None:
+                                        best_score = float(man_best_score)
+                                except Exception:
+                                    pass
+
+                            register_best_params_for_pair(
+                                str(pair_label),
+                                best_params,
+                                score=best_score,
+                                profile=profile,
+                            )
+                    except Exception as e:
+                        logger.debug("register_best_params_for_pair from batch failed: %s", e)
+
+                # --- Snapshot גם לריצת Batch ---
+                best_score_batch: Optional[float] = None
+                if df_batch is not None and not df_batch.empty and "Score" in df_batch.columns:
+                    try:
+                        best_score_batch = float(pd.to_numeric(df_batch["Score"], errors="coerce").max())
+                    except Exception:
+                        best_score_batch = None
+
+                push_optimization_metrics_to_ctx(
+                    best_params={},   # ב-Batch פחות הגיוני לשמור סט אחד, זה יותר "overview"
+                    best_score=best_score_batch,
+                    n_trials=n_trials,
+                    objective_name=str(primary_objective),
+                    pair_id="batch",
+                    profile=profile,
+                    mode="batch",
+                )
+
+                history = st.session_state.get("opt_runs_timeline", [])
+                if not isinstance(history, list):
+                    history = []
+                history.append(
+                    {
+                        "ts": datetime.now().isoformat(timespec="seconds"),
+                        "run_id": run_id,
+                        "type": "batch",
+                        "n_pairs": len(batch_list),
+                        "n_trials": n_trials,
+                        "timeout_min": timeout_min,
+                        "profile": profile,
+                        "primary_objective": primary_objective,
+                        "experiment_name": experiment_name,
+                    }
+                )
+                st.session_state["opt_runs_timeline"] = history[-50:]
 
             with res_container:
-                if isinstance(df_batch, pd.DataFrame) and not df_batch.empty:
-                    st.success(f"Batch finished — {len(df_batch)} rows across {len(batch_pairs)} pairs.")
+                if df_batch is not None and not df_batch.empty:
+                    st.success(f"Batch finished — {len(df_batch)} rows across {len(batch_list)} pairs.")
                 else:
                     st.warning("Batch produced no rows (check logs).")
 
-    # -----------------------------
-    # 17) Resolve df_all (prefer fresh)
-    # -----------------------------
-    if isinstance(df_batch, pd.DataFrame) and not df_batch.empty:
-        df_all = df_batch.copy()
-    elif isinstance(df_single, pd.DataFrame) and not df_single.empty:
-        df_all = df_single.copy()
+    # ==== 7) Use last results if no fresh run ====
+    df_all = None
+    if df_batch is not None and not df_batch.empty:
+        df_all = df_batch
     else:
-        df_all = ss_get("opt_df_batch")
-        if not isinstance(df_all, pd.DataFrame) or df_all.empty:
-            df_all = ss_get("opt_df")
-        if not isinstance(df_all, pd.DataFrame):
-            df_all = pd.DataFrame()
+        df_all = st.session_state.get("opt_df", pd.DataFrame())
 
-    if df_all.empty:
+    if df_all is None or df_all.empty:
         st.info("Run an optimisation (single or batch) to see results.")
+        # עדיין אפשר לראות היסטוריה
         st.markdown("---")
-        try:
-            render_opt_run_history(service, base_ctx, limit=15)
-        except Exception:
-            pass
+        render_opt_run_history(service, base_ctx)
         return
 
     df = df_all.copy()
 
-    # -----------------------------
-    # 18) KPIs
-    # -----------------------------
-    st.subheader("📊 Quick KPIs (current results)")
+    # =========================
+    # Build optimization config
+    # =========================
+
+    st.markdown("#### Data source")
+
+    price_csv = st.text_input(
+        "Price CSV path (leg A)",
+        value="data/AAPL.csv",
+        key="opt_price_csv",
+        help="קובץ CSV עם מחירי Close של leg A (ניתן להחליף ל-preloaded series בעתיד).",
+    )
+    hedge_csv = st.text_input(
+        "Hedge CSV path (leg B)",
+        value="data/MSFT.csv",
+        key="opt_hedge_csv",
+        help="קובץ CSV עם מחירי Close של leg B.",
+    )
+
+    # כאן אתה יכול בעתיד להחליף את ה-CSV ב-series מהמערכת (SqlStore/IBKR וכו')
+    data_cfg: Dict[str, Any] = {
+        "price_csv": price_csv,
+        "hedge_csv": hedge_csv,
+    }
+
+    # טווחי פרמטרים – היום פשוט מה-UI, מחר מ-PARAM_SPECS
+    ranges_cfg: Dict[str, Any] = {
+        "z_open": (float(z_open) - 1.0, float(z_open) + 1.0),
+        "z_close": (float(z_close) - 1.0, float(z_close) + 1.0),
+        "max_exposure_per_trade": (0.0, float(max_exposure)),
+    }
+
+    # Signal generator – כאן אתה מחבר לפונקציה האמיתית שלך
+    try:
+        from common.signal_generator import generate_signals_for_backtest  # דוגמה – תעדכן לשם האמיתי
+        signal_generator = generate_signals_for_backtest
+    except Exception:
+        signal_generator = None
+
+    signals_cfg: Dict[str, Any] = {
+        "generator": signal_generator,
+    }
+
+    # backtest_params – כאן אתה שם כל מה שה-Backtester שלך צריך
+    backtest_params: Dict[str, Any] = {
+        "start_date": getattr(base_ctx, "start_date", None),
+        "end_date": getattr(base_ctx, "end_date", None),
+        # אפשר להוסיף כאן risk_profile, fees, slippage וכו'
+    }
+
+    # הגדרות Optuna + score
+    optuna_cfg: Dict[str, Any] = {
+        "direction": "maximize",
+        "sampler": "TPE",
+        "pruner": "median",
+        "timeout_sec": int(timeout_min * 60),
+        "n_trials": int(n_trials),
+        "multi_objective": False,
+    }
+
+    score_cfg: Dict[str, Any] = {
+        "mode": "hybrid",      # classic / hf / hybrid
+        "hybrid_alpha": 0.7,   # משקל HF מול classic
+    }
+
+    opt_config: Dict[str, Any] = {
+        "data": data_cfg,
+        "ranges": ranges_cfg,
+        "signals": signals_cfg,
+        "backtest_params": backtest_params,
+        "optuna": optuna_cfg,
+        "score": score_cfg,
+        # אופציונלי:
+        # "seed": 42,
+        # "seed_from_candidates": True,
+    }
+    # נשמור את הקונפיג ל-session כך שהכפתור למעלה יעבוד עם הגרסה העדכנית
+    st.session_state["opt_config"] = opt_config
+
+    # ==== 8) Quick KPIs ====
+    st.subheader("📊 Quick KPIs")
     try:
         c1, c2, c3, c4, c5, c6 = st.columns(6)
+
         if "Score" in df.columns:
-            v = pd.to_numeric(df["Score"], errors="coerce").max()
-            if pd.notna(v):
-                c1.metric("Best Score", f"{float(v):.4f}")
+            best_score = pd.to_numeric(df["Score"], errors="coerce").max()
+            if pd.notna(best_score):
+                c1.metric("Best Score", f"{best_score:.3f}")
+
         if "Sharpe" in df.columns:
-            v = pd.to_numeric(df["Sharpe"], errors="coerce").mean()
-            if pd.notna(v):
-                c2.metric("Avg Sharpe", f"{float(v):.3f}")
+            avg_sharpe = pd.to_numeric(df["Sharpe"], errors="coerce").mean()
+            if pd.notna(avg_sharpe):
+                c2.metric("Avg Sharpe", f"{avg_sharpe:.3f}")
+
         if "Profit" in df.columns:
-            v = pd.to_numeric(df["Profit"], errors="coerce").max()
-            if pd.notna(v):
-                c3.metric("Max Profit", f"{float(v):,.0f}")
+            max_profit = pd.to_numeric(df["Profit"], errors="coerce").max()
+            if pd.notna(max_profit):
+                c3.metric("Max Profit", f"{max_profit:,.0f}")
+
         if "Drawdown" in df.columns:
-            v = pd.to_numeric(df["Drawdown"], errors="coerce").abs().min()
-            if pd.notna(v):
-                c4.metric("Min DD", f"{float(v):.3f}")
-        c5.metric("Rows", f"{len(df):,}")
+            min_dd = pd.to_numeric(df["Drawdown"], errors="coerce").min()
+            if pd.notna(min_dd):
+                c4.metric("Min Drawdown", f"{min_dd:.3f}")
+
+        c5.metric("Total trials", f"{len(df):,}")
+
         if "ParamScore" in df.columns:
-            v = pd.to_numeric(df["ParamScore"], errors="coerce").max()
-            if pd.notna(v):
-                c6.metric("Best ParamScore", f"{float(v):.3f}")
+            best_param_score = pd.to_numeric(df["ParamScore"], errors="coerce").max()
+            if pd.notna(best_param_score):
+                c6.metric("Best ParamScore", f"{best_param_score:.3f}")
     except Exception:
         pass
 
-    # Validation snapshot
+
+    # ==== 8.1 Validation Snapshot (health of opt_df) ====
     try:
         report = validate_opt_df(df)
-        if isinstance(report, dict):
+        if report:
             ok = bool(report.get("ok", False))
-            issues_v = report.get("issues", []) or []
-            if ok and not issues_v:
-                st.success("Validation: opt_df looks healthy.")
+            issues = report.get("issues", []) or []
+            summary = report.get("summary", {}) or {}
+            if ok and not issues:
+                st.success("Validation: opt_df looks healthy (Score/Sharpe/DD present).")
             else:
-                with st.expander("⚠️ Validation issues", expanded=False):
-                    for msg in issues_v:
+                with st.expander("⚠️ Validation issues in optimisation results", expanded=False):
+                    st.write("Detected issues:")
+                    for msg in issues:
                         st.write(f"- {msg}")
-                    st.json(report.get("summary", {}) or {})
-    except Exception:
-        pass
+                    st.caption("Summary:")
+                    st.json(summary)
+    except Exception as e:
+        logger.debug("validate_opt_df failed: %s", e)
 
-    # -----------------------------
-    # 19) Top-N + exports
-    # -----------------------------
-    st.subheader("🏅 Top Results (manual controls)")
-    sort_options = [c for c in ["Score", "ParamScore", "Sharpe", "Profit", "Drawdown"] if c in df.columns]
-    if not sort_options:
-        sort_options = list(df.columns[:1]) if len(df.columns) else ["(none)"]
+    # ==== 9) Top-N view + basic exports ====
+    st.subheader("🏅 Top 20 Results (basic view)")
 
-    sort_by = st.selectbox("Sort by", sort_options, index=0, key="opt_top_sort_by_noslider")
-    top_n = int(st.number_input("Top N", min_value=5, max_value=500, value=20, step=5, key="opt_top_n"))
-    ascending = bool(st.checkbox("Ascending", value=(sort_by in {"Drawdown"}), key="opt_top_ascending"))
+    sort_by = st.selectbox(
+        "Sort Top-20 by",
+        ["Score", "ParamScore"],
+        index=0 if "ParamScore" not in df.columns else 0,
+        key="opt_top_sort_by",
+    )
 
-    try:
-        top = df.sort_values(sort_by, ascending=ascending).head(int(top_n)) if sort_by in df.columns else df.head(int(top_n))
-    except Exception:
-        top = df.head(int(top_n))
+    score_col = sort_by if sort_by in df.columns else ("Score" if "Score" in df.columns else None)
 
-    table_height = int(ss_get("_opt_table_height", 420))
-    st.dataframe(top, use_container_width=True, height=table_height)
+    if score_col:
+        top = df.sort_values(score_col, ascending=False).head(20)
+    else:
+        top = df.head(20)
+
+    table_height = int(st.session_state.get("_opt_table_height", 420))
+    st.dataframe(top, width="stretch", height=table_height)
 
     try:
         ts_str = datetime.now().strftime("%Y%m%d_%H%M%S")
-        st.download_button("💾 Download Top-N (CSV)", data=top.to_csv(index=False).encode("utf-8"),
-                           file_name=f"opt_top{top_n}_{ts_str}.csv", mime="text/csv", key="opt_dl_top_csv")
-        st.download_button("💾 Download ALL results (CSV)", data=df.to_csv(index=False).encode("utf-8"),
-                           file_name=f"opt_all_{ts_str}.csv", mime="text/csv", key="opt_dl_all_csv")
+        st.download_button(
+            "💾 Download Top-20 (CSV)",
+            data=top.to_csv(index=False).encode("utf-8"),
+            file_name=f"opt_top20_{ts_str}.csv",
+            mime="text/csv",
+            key="opt_dl_top20_csv",
+        )
+        st.download_button(
+            "💾 Download ALL results (CSV)",
+            data=df.to_csv(index=False).encode("utf-8"),
+            file_name=f"opt_all_results_{ts_str}.csv",
+            mime="text/csv",
+            key="opt_dl_all_csv",
+        )
     except Exception:
         pass
 
-    st.markdown("---")
-
-    # -----------------------------
-    # 20) Analytics Hub (no sliders)
-    # -----------------------------
-    st.subheader("🔬 Analytics Hub (No Sliders)")
-
-    with st.expander("1) Pareto (manual params)", expanded=not FOCUS):
-        if all(c in df.columns for c in ("Score", "Sharpe", "Drawdown")):
-            min_improvement = float(st.number_input("Sensitivity Δ (min improvement)", min_value=0.0, max_value=1.0, value=0.01, step=0.01, key="pareto_min_improvement_noslider"))
-            max_points = int(st.number_input("Max points (UI subset)", min_value=10, max_value=2000, value=200, step=10, key="pareto_max_points_noslider"))
-
-            pareto_df = _compute_pareto_df(df, score_col="Score", sharpe_col="Sharpe", dd_col="Drawdown",
-                                           max_points=max_points, min_improvement=min_improvement)
-            if pareto_df.empty:
-                st.caption("Pareto frontier empty (insufficient/invalid data).")
-            else:
-                st.caption(f"Pareto points: {len(pareto_df)} / {len(df)}")
-                st.dataframe(pareto_df.head(100), use_container_width=True, height=min(420, table_height))
-                st.download_button("Download Pareto (CSV)", data=pareto_df.to_csv(index=False).encode("utf-8"),
-                                   file_name=f"pareto_{cfg.sym1}-{cfg.sym2}.csv", mime="text/csv", key="pareto_dl_csv_noslider")
-        else:
-            st.caption("Need Score/Sharpe/Drawdown columns for Pareto.")
-
-    with st.expander("2) DSR / Overfit (manual params)", expanded=not FOCUS):
-        if "Sharpe" not in df.columns:
-            st.caption("No Sharpe column; cannot compute DSR.")
-        else:
-            top_k = int(st.number_input("Top-K strategies to evaluate", min_value=5, max_value=2000, value=min(50, len(df)), step=5, key="dsr_topk_noslider"))
-            n_strategies_total = int(st.number_input("Multiple-testing N (n_strategies)", min_value=1, max_value=200_000, value=max(1, len(df)), step=10, key="dsr_n_strategies_noslider"))
-            use_student_t = bool(st.checkbox("Use Student-t if SciPy available", value=True, key="dsr_use_t_noslider"))
-
-            dfx = df.sort_values("Score", ascending=False).head(top_k) if "Score" in df.columns else df.sort_values("Sharpe", ascending=False).head(top_k)
-
-            trades_default = int(ss_get("opt_dsr_default_t", 250))
-            trades_col = next((c for c in ("Trades", "trades", "n_trades", "T") if c in dfx.columns), None)
-
-            rows_dsr: List[Dict[str, Any]] = []
-            for _, r in dfx.iterrows():
-                sh = float(pd.to_numeric(r.get("Sharpe"), errors="coerce") or 0.0)
-                t_eff = int(pd.to_numeric(r.get(trades_col), errors="coerce") or trades_default) if trades_col else trades_default
-                dsr, p_eff = deflated_sharpe_ratio(sh, t=max(1, t_eff), n_strategies=max(1, n_strategies_total), use_student_t=use_student_t, max_strategies=2000)
-                rows_dsr.append({"Sharpe": sh, "T": t_eff, "DSR": dsr, "p_overfit": p_eff})
-
-            dsr_df = pd.DataFrame(rows_dsr)
-            st.dataframe(dsr_df, use_container_width=True, height=min(420, table_height))
-            st.download_button("Download DSR table (CSV)", data=dsr_df.to_csv(index=False).encode("utf-8"),
-                               file_name=f"dsr_{cfg.sym1}-{cfg.sym2}.csv", mime="text/csv", key="dsr_dl_csv_noslider")
-
-    with st.expander("3) Replay Best Trial (SQL) — no sliders", expanded=False):
-        try:
-            _render_replay_best_trial_panel(table_height, df, cfg.sym1, cfg.sym2)
-        except Exception as e:
-            st.caption(f"Replay panel failed: {e}")
-
-    # -----------------------------
-    # 21) History + snapshot
-    # -----------------------------
-    st.subheader("📚 Run History (No Sliders)")
+        # ==== 9.1 Validation Snapshot (using validate_opt_df) ====
     try:
-        render_opt_run_history(service, base_ctx, limit=25)
+        report = validate_opt_df(df)
+        if not report.get("ok", False):
+            with st.expander("⚠️ Validation issues (opt_df)", expanded=False):
+                st.write("Issues detected in optimisation results:")
+                for msg in report.get("issues", []):
+                    st.write(f"- {msg}")
+                st.json(report.get("summary", {}))
     except Exception:
+        # לא מפיל את הטאב בגלל ולידציה
         pass
 
+    # ==== 10) Advanced Analytics & Ops Hub ====
+    st.subheader("🔬 Analytics & Ops Hub — HF-grade view")
+
+    # גובה טבלאות דיפולטי (אפשר לשלוט דרך session_state אם תרצה)
+    TABLE_HEIGHT = int(st.session_state.get("_opt_table_height", 420))
+
+    # 10.1 Analytics Hub (Pareto / DSR / Walk-Forward / וכו')
     try:
-        snap = {
-            "pair": f"{cfg.sym1}-{cfg.sym2}",
-            "rows": int(df.shape[0]),
-            "cols": int(df.shape[1]),
-            "has_Score": bool("Score" in df.columns),
-            "best_score": float(pd.to_numeric(df["Score"], errors="coerce").max()) if "Score" in df.columns else None,
-            "timestamp_utc": _now_utc_z(),
-            "run_id": cfg.run_id,
-            "env": cfg.env,
-            "profile": cfg.profile,
-        }
-        ss_set("opt_last_snapshot", snap)
-    except Exception:
-        pass
+        _render_optimization_analytics_section(TABLE_HEIGHT, df, sym1, sym2)
+    except Exception as e:
+        st.caption(f"Analytics Hub failed: {e}")
 
-    # -----------------------------
-    # 22) Pro sections router — connect all the “unwired” panels
-    # -----------------------------
-    st.markdown("---")
-    st.subheader("🧭 Pro Console (connected sections)")
+    # 10.2 Operations / Ranges / Presets / Datasets / Reports
+    try:
+        _render_optimization_operations_sections(TABLE_HEIGHT, df, sym1, sym2)
+    except Exception as e:
+        st.caption(f"Operations sections failed: {e}")
 
-    tabs = st.tabs(["Monitoring", "Operations", "Extra Analytics", "Portfolio", "Governance", "Macro", "Audit", "Dev/Finalize"])
+    # 10.3 Monitoring / Telemetry / Studies timeline
+    try:
+        _render_optimization_monitoring_sections(TABLE_HEIGHT, df, sym1, sym2)
+    except Exception as e:
+        st.caption(f"Monitoring sections failed: {e}")
 
-    with tabs[0]:
-        try:
-            _render_optimization_monitoring_sections(table_height, df, cfg.sym1, cfg.sym2)
-        except Exception as e:
-            st.caption(f"Monitoring section failed: {e}")
+    # 10.x Replay Best Trial (חיבור ישיר בין Optuna ↔ Backtester אמיתי)
+    try:
+        _render_replay_best_trial_panel(TABLE_HEIGHT, df, sym1, sym2)
+    except Exception as e:
+        st.caption(f"Replay-best-trial panel failed: {e}")
 
-    with tabs[1]:
-        try:
-            _render_optimization_operations_sections(table_height, df, cfg.sym1, cfg.sym2)
-        except Exception as e:
-            st.caption(f"Operations section failed: {e}")
+    # 10.4 Portfolio Constructor Pro (multi-pair sleeve)
+    try:
+        _render_optimization_portfolio_section(TABLE_HEIGHT, df, sym1, sym2)
+    except Exception as e:
+        st.caption(f"Portfolio section failed: {e}")
 
-    with tabs[2]:
-        try:
-            _render_optimization_extra_sections(table_height, df, cfg.sym1, cfg.sym2)
-        except Exception as e:
-            st.caption(f"Extra analytics section failed: {e}")
+    # 10.5 Governance & Reproducibility Manifest
+    try:
+        _render_reproducibility_governance_section(TABLE_HEIGHT, df, sym1, sym2)
+    except Exception as e:
+        st.caption(f"Governance / reproducibility section failed: {e}")
 
-    with tabs[3]:
-        try:
-            _render_optimization_portfolio_section(table_height, df, cfg.sym1, cfg.sym2)
-        except Exception as e:
-            st.caption(f"Portfolio section failed: {e}")
+    # 10.6 Macro & Factor overlay (scenario analysis)
+    try:
+        _render_optimization_macro_factor_section(TABLE_HEIGHT, df, sym1, sym2)
+    except Exception as e:
+        st.caption(f"Macro/factor overlay section failed: {e}")
 
-    with tabs[4]:
-        try:
-            _render_reproducibility_governance_section(table_height, df, cfg.sym1, cfg.sym2)
-        except Exception as e:
-            st.caption(f"Governance section failed: {e}")
+    # 10.7 Audit pack (settings + ranges + presets + snapshot)
+    try:
+        _render_optimization_audit_pack_section(TABLE_HEIGHT, df, sym1, sym2)
+    except Exception as e:
+        st.caption(f"Audit pack section failed: {e}")
 
-    with tabs[5]:
-        try:
-            _render_optimization_macro_factor_section(table_height, df, cfg.sym1, cfg.sym2)
-        except Exception as e:
-            st.caption(f"Macro section failed: {e}")
-
-    with tabs[6]:
-        try:
-            _render_optimization_audit_pack_section(table_height, df, cfg.sym1, cfg.sym2)
-        except Exception as e:
-            st.caption(f"Audit section failed: {e}")
-
-    with tabs[7]:
-        try:
-            _render_optimization_finalize(table_height, df, cfg.sym1, cfg.sym2)
-        except Exception as e:
-            st.caption(f"Finalize section failed: {e}")
+    # 10.8 Finalize (Dev tools, Error console, i18n, snapshot)
+    try:
+        _render_optimization_finalize(TABLE_HEIGHT, df, sym1, sym2)
+    except Exception as e:
+        st.caption(f"Finalize section failed: {e}")
 
 # =========================
 # SECTION 7: Pareto helper
@@ -7135,7 +6613,6 @@ def _run_walkforward_for_params(
         - Score (לפי compute_score)
         - DSR (Deflated Sharpe Ratio, אם אפשר)
         - p_overfit (p_eff לפי DSR)
-        - wf_mode: always "calendar_validation" — see WARNING below
 
     שדרוגים:
     --------
@@ -7146,20 +6623,7 @@ def _run_walkforward_for_params(
     5. שימוש ב-weights מה-session (loaded_weights_eff) אם לא הועברו מפורשות.
     6. הגנה על empty / מעט מדי ימים.
     7. החזרת DataFrame מסודר, מתאים לגרפים/דוחות.
-
-    WARNING (R-001): This function performs POST-OPTIMIZATION CALENDAR VALIDATION,
-    NOT true walk-forward optimization. Parameters were optimized on the full sample
-    period BEFORE this call is made. Each calendar segment applies those SAME fixed
-    parameters. This tests temporal stability of pre-fitted parameters only.
-    It does NOT provide true out-of-sample performance estimates — there is no
-    in-sample re-optimization within each fold. Results should be interpreted as
-    a stability check, not as an unbiased performance estimate.
-    True walk-forward (IS optimization + OOS holdout per fold) is implemented in
-    research/walk_forward.py (WalkForwardHarness).
     """
-    # R-001: calendar_validation mode label — returned in every row so
-    # consumers can distinguish from true walk-forward output.
-    _WF_DISCLAIMER = "calendar_validation"
 
     # ==== 0) נרמול n_splits ו-min_segment_days ====
     if n_splits < 1:
@@ -7175,11 +6639,8 @@ def _run_walkforward_for_params(
         return pd.DataFrame()
 
     # אפשר להגדיר מינימום ימים per segment מה-session
-    min_seg_days = int(st.session_state.get("opt_wf_min_days", 63))
-    # R-001: floor at 63 calendar days (≈1 calendar quarter / ~42 trading days)
-    # to ensure each segment has enough observations for meaningful statistics.
-    # Previously 5, which is dangerously low for reliable Sharpe estimation.
-    min_seg_days = max(63, min_seg_days)
+    min_seg_days = int(st.session_state.get("opt_wf_min_days", 10))
+    min_seg_days = max(5, min_seg_days)
 
     # מתאימים את מספר החלונות כך שיהיו לפחות min_seg_days לכל חלון
     max_splits_reasonable = max(1, len(idx) // min_seg_days)
@@ -7256,9 +6717,6 @@ def _run_walkforward_for_params(
             "Score": score,
             "DSR": dsr,
             "p_overfit": p_eff,
-            # R-001: tag every row so callers know this is NOT true walk-forward.
-            # Use wf_mode == "calendar_validation" to filter/warn in downstream consumers.
-            "wf_mode": _WF_DISCLAIMER,
         }
         rows.append(row)
 
@@ -7396,7 +6854,7 @@ def _render_optimization_analytics_section(TABLE_HEIGHT: int, df: pd.DataFrame, 
                     )
                     st.dataframe(
                         pareto_df.head(50),
-                        use_container_width=True,
+                        width="stretch",
                         height=min(TABLE_HEIGHT, 420),
                     )
 
@@ -7423,7 +6881,7 @@ def _render_optimization_analytics_section(TABLE_HEIGHT: int, df: pd.DataFrame, 
                                 title="Pareto Frontier — Sharpe vs Drawdown (colored by Score)",
                                 hover_data=pareto_df.columns,
                             )
-                            st.plotly_chart(fig_p, use_container_width=True)
+                            st.plotly_chart(fig_p, width = "stretch")
                     except Exception:
                         pass
 
@@ -7439,7 +6897,7 @@ def _render_optimization_analytics_section(TABLE_HEIGHT: int, df: pd.DataFrame, 
                                 title="Pareto Frontier — 3D View (Score / Sharpe / DD)",
                                 hover_data=pareto_df.columns,
                             )
-                            st.plotly_chart(fig3d, use_container_width=True)
+                            st.plotly_chart(fig3d, width = "stretch")
                     except Exception:
                         pass
 
@@ -7570,7 +7028,7 @@ def _render_optimization_analytics_section(TABLE_HEIGHT: int, df: pd.DataFrame, 
                 else:
                     st.dataframe(
                         dsr_df,
-                        use_container_width=True,
+                        width="stretch",
                         height=min(TABLE_HEIGHT, 420),
                     )
 
@@ -7602,7 +7060,7 @@ def _render_optimization_analytics_section(TABLE_HEIGHT: int, df: pd.DataFrame, 
                                 nbins=30,
                                 title="DSR Distribution (Top-K)",
                             )
-                            st.plotly_chart(fig_dsr, use_container_width=True)
+                            st.plotly_chart(fig_dsr, width = "stretch")
                     except Exception:
                         pass
 
@@ -7616,7 +7074,7 @@ def _render_optimization_analytics_section(TABLE_HEIGHT: int, df: pd.DataFrame, 
                                 color="Class",
                                 title="Sharpe vs DSR (Top-K)",
                             )
-                            st.plotly_chart(fig_corr, use_container_width=True)
+                            st.plotly_chart(fig_corr, width = "stretch")
                     except Exception:
                         pass
 
@@ -7672,15 +7130,14 @@ def _render_optimization_analytics_section(TABLE_HEIGHT: int, df: pd.DataFrame, 
                             key=sk("wf_n_splits"),
                         )
                     )
-                    topk = int(st.number_input(
+                    topk = st.slider(
                         "Top-K strategies to test (by Score)",
                         min_value=1,
-                        max_value=max(1, min(20, len(df))),
-                        value=int(min(5, len(df))),
+                        max_value=min(20, len(df)),
+                        value=min(5, len(df)),
                         step=1,
                         key=sk("wf_topk"),
-                    ))
-
+                    )
 
                     # בחירת שורות ל-WF
                     if "Score" in df.columns:
@@ -7722,7 +7179,7 @@ def _render_optimization_analytics_section(TABLE_HEIGHT: int, df: pd.DataFrame, 
                             wf_all = pd.concat(wf_results, ignore_index=True)
                             st.dataframe(
                                 wf_all,
-                                use_container_width=True,
+                                width="stretch",
                                 height=min(TABLE_HEIGHT, 420),
                             )
 
@@ -7739,7 +7196,7 @@ def _render_optimization_analytics_section(TABLE_HEIGHT: int, df: pd.DataFrame, 
                                 st.caption("Walk-Forward Score/DSR stats per strategy rank:")
                                 st.dataframe(
                                     grp,
-                                    use_container_width=True,
+                                    width="stretch",
                                     height=min(TABLE_HEIGHT, 300),
                                 )
                             except Exception:
@@ -7765,7 +7222,7 @@ def _render_optimization_analytics_section(TABLE_HEIGHT: int, df: pd.DataFrame, 
                                         ),
                                         title="Walk-Forward Score heatmap (split × strategy_rank)",
                                     )
-                                    st.plotly_chart(fig_hm, use_container_width=True)
+                                    st.plotly_chart(fig_hm, width = "stretch")
                             except Exception:
                                 pass
 
@@ -8236,7 +7693,7 @@ def _render_optimization_extra_sections(TABLE_HEIGHT: int, df: pd.DataFrame, sym
                             st.subheader("📊 Meta Top Candidates")
                             st.dataframe(
                                 top_candidates,
-                                use_container_width=True,
+                                width="stretch",
                                 height=min(TABLE_HEIGHT, 320),
                             )
 
@@ -8244,7 +7701,7 @@ def _render_optimization_extra_sections(TABLE_HEIGHT: int, df: pd.DataFrame, sym
                                 st.subheader("🧬 Meta Feature Importance (|corr(param, meta_score)|)")
                                 st.dataframe(
                                     feature_importance,
-                                    use_container_width=True,
+                                    width="stretch",
                                     height=min(TABLE_HEIGHT, 260),
                                 )
                                 try:
@@ -8255,7 +7712,7 @@ def _render_optimization_extra_sections(TABLE_HEIGHT: int, df: pd.DataFrame, sym
                                             y="importance",
                                             title="Meta Feature Importance",
                                         )
-                                        st.plotly_chart(fig_fi, use_container_width=True)
+                                        st.plotly_chart(fig_fi, width="stretch")
                                 except Exception:
                                     pass
 
@@ -8333,7 +7790,7 @@ def _render_optimization_extra_sections(TABLE_HEIGHT: int, df: pd.DataFrame, sym
                             imp_sorted = imp_series.sort_values(ascending=False)
                             st.dataframe(
                                 imp_sorted.to_frame("importance"),
-                                use_container_width=True,
+                                width="stretch",
                                 height=min(TABLE_HEIGHT, 420),
                             )
                             try:
@@ -8344,7 +7801,7 @@ def _render_optimization_extra_sections(TABLE_HEIGHT: int, df: pd.DataFrame, sym
                                         y="importance",
                                         title="Feature Importance (higher → more impact on Score)",
                                     )
-                                    st.plotly_chart(fig_imp, use_container_width=True)
+                                    st.plotly_chart(fig_imp, width="stretch")
                             except Exception:
                                 pass
 
@@ -8416,7 +7873,7 @@ def _render_optimization_extra_sections(TABLE_HEIGHT: int, df: pd.DataFrame, sym
                         )
                         st.dataframe(
                             dvis.head(50),
-                            use_container_width=True,
+                            width="stretch",
                             height=min(TABLE_HEIGHT, 360),
                         )
                         try:
@@ -8500,7 +7957,7 @@ def _render_optimization_extra_sections(TABLE_HEIGHT: int, df: pd.DataFrame, sym
 
                 st.dataframe(
                     dfx.head(50),
-                    use_container_width=True,
+                    width="stretch",
                     height=min(TABLE_HEIGHT, 420),
                 )
 
@@ -8525,7 +7982,7 @@ def _render_optimization_extra_sections(TABLE_HEIGHT: int, df: pd.DataFrame, sym
             st.caption("Missingness per column (top):")
             st.dataframe(
                 nan_counts.head(40).to_frame("missing"),
-                use_container_width=True,
+                width="stretch",
                 height=min(TABLE_HEIGHT, 300),
             )
 
@@ -8533,7 +7990,7 @@ def _render_optimization_extra_sections(TABLE_HEIGHT: int, df: pd.DataFrame, sym
             st.caption("Parameter coverage (fraction non-NaN):")
             st.dataframe(
                 param_cov.to_frame("coverage"),
-                use_container_width=True,
+                width="stretch",
                 height=min(TABLE_HEIGHT, 300),
             )
 
@@ -8545,7 +8002,7 @@ def _render_optimization_extra_sections(TABLE_HEIGHT: int, df: pd.DataFrame, sym
                 st.caption("Metric distributions (extended percentiles):")
                 st.dataframe(
                     desc,
-                    use_container_width=True,
+                    width="stretch",
                     height=min(TABLE_HEIGHT, 420),
                 )
         except Exception as e:
@@ -8604,7 +8061,7 @@ def _render_optimization_extra_sections(TABLE_HEIGHT: int, df: pd.DataFrame, sym
 
                 st.dataframe(
                     Z.head(30),
-                    use_container_width=True,
+                    width="stretch",
                     height=min(TABLE_HEIGHT, 380),
                 )
 
@@ -8714,7 +8171,7 @@ def _render_optimization_extra_sections(TABLE_HEIGHT: int, df: pd.DataFrame, sym
                     st.subheader("Permutation Importance")
                     st.dataframe(
                         imp_df,
-                        use_container_width=True,
+                        width="stretch",
                         height=min(TABLE_HEIGHT, 360),
                     )
                 except Exception:
@@ -8757,7 +8214,7 @@ def _render_optimization_extra_sections(TABLE_HEIGHT: int, df: pd.DataFrame, sym
                 st.write({"outliers": int(mask.sum())})
                 st.dataframe(
                     outl.head(50),
-                    use_container_width=True,
+                    width="stretch",
                     height=min(TABLE_HEIGHT, 300),
                 )
                 if mask.any():
@@ -8813,7 +8270,7 @@ def _render_optimization_extra_sections(TABLE_HEIGHT: int, df: pd.DataFrame, sym
             st.caption(f"Generated {len(dsw)} sweep points on {len(keys)} parameters.")
             st.dataframe(
                 dsw.head(30),
-                use_container_width=True,
+                width="stretch",
                 height=min(TABLE_HEIGHT, 280),
             )
 
@@ -8841,7 +8298,7 @@ def _render_optimization_extra_sections(TABLE_HEIGHT: int, df: pd.DataFrame, sym
                         top_sugg = dsw_scored.sort_values("score_pred", ascending=False).head(int(topk))
                         st.dataframe(
                             top_sugg,
-                            use_container_width=True,
+                            width="stretch",
                             height=min(TABLE_HEIGHT, 320),
                         )
                         if st.button("Use Top-K suggestions to tighten ranges", key=sk("sw_use_topk")):
@@ -8996,7 +8453,7 @@ def _render_optimization_operations_sections(TABLE_HEIGHT: int, df: pd.DataFrame
             st.caption("Edit ranges below. Use Apply to persist into active_ranges.")
             df_edit = st.data_editor(
                 df_rng,
-                use_container_width=True,
+                width="stretch",
                 height=TABLE_HEIGHT,
                 num_rows="dynamic",
                 key=sk("rng_editor"),
@@ -9021,7 +8478,7 @@ def _render_optimization_operations_sections(TABLE_HEIGHT: int, df: pd.DataFrame
                     st.session_state["_rng_scaled_preview"] = df_scaled
                     st.dataframe(
                         df_scaled.head(30),
-                        use_container_width=True,
+                        width="stretch",
                         height=min(TABLE_HEIGHT, 260),
                     )
                     st.caption("Scaled preview — click 'Apply to active_ranges' to persist.")
@@ -9184,7 +8641,7 @@ def _render_optimization_operations_sections(TABLE_HEIGHT: int, df: pd.DataFrame
             if keys:
                 ds_sel = st.selectbox("Available datasets", keys, key=sk("ds_sel"))
                 dfx = store.get(ds_sel, pd.DataFrame())
-                st.dataframe(dfx.head(50), use_container_width=True, height=TABLE_HEIGHT)
+                st.dataframe(dfx.head(50), width="stretch", height=TABLE_HEIGHT)
 
                 # derive ranges from dataset
                 d1, d2, d3 = st.columns(3)
@@ -9249,7 +8706,7 @@ def _render_optimization_operations_sections(TABLE_HEIGHT: int, df: pd.DataFrame
                 if up_sw is not None:
                     try:
                         dsw = pd.read_csv(up_sw)
-                        st.dataframe(dsw.head(30), use_container_width=True, height=min(TABLE_HEIGHT, 260))
+                        st.dataframe(dsw.head(30), width="stretch", height=min(TABLE_HEIGHT, 260))
                         if st.button("Use sweep.csv to set active_ranges (min/max per param)", key=sk("ws_use_sw")):
                             rngs: Dict[str, ParamRange] = {}
                             for c in dsw.columns:
@@ -9284,7 +8741,7 @@ def _render_optimization_operations_sections(TABLE_HEIGHT: int, df: pd.DataFrame
                 if df_st.empty:
                     st.caption("No studies found in DuckDB for this pair yet.")
                 else:
-                    st.dataframe(df_st, use_container_width=True, height=min(TABLE_HEIGHT, 260))
+                    st.dataframe(df_st, width="stretch", height=min(TABLE_HEIGHT, 260))
                     st.caption("Select a study to load its trials into opt_df or merge multiple studies.")
 
                     study_ids = df_st["study_id"].astype(int).tolist()
@@ -9323,7 +8780,7 @@ def _render_optimization_operations_sections(TABLE_HEIGHT: int, df: pd.DataFrame
                                 df_all = pd.concat(all_parts, ignore_index=True)
                                 st.session_state["opt_df"] = df_all.copy()
                                 st.success(f"Merged {len(sel_ids_multi)} studies → {len(df_all)} rows in opt_df.")
-                                st.dataframe(df_all.head(100), use_container_width=True, height=min(TABLE_HEIGHT, 260))
+                                st.dataframe(df_all.head(100), width="stretch", height=min(TABLE_HEIGHT, 260))
                                 st.download_button(
                                     "Download merged_studies.csv",
                                     data=df_all.to_csv(index=False).encode("utf-8"),
@@ -9487,515 +8944,390 @@ def _render_optimization_operations_sections(TABLE_HEIGHT: int, df: pd.DataFrame
 - Telemetry מתקדם: גודל df, מידע על DB, גרסאות ספריות.
 """
 
-def _render_optimization_monitoring_sections(
-    TABLE_HEIGHT: int,
-    df: pd.DataFrame,
-    sym1: str,
-    sym2: str,
-) -> None:
-    """
-    Monitoring, Artifacts & Batch Portfolio — HF-grade.
-
-    Design goals:
-    - Zero-crash UI: best-effort only.
-    - Stable Streamlit params (no width="stretch").
-    - Key namespace isolation to avoid collisions across tab sections.
-    - Cached heavy DB reads (trials/artifacts) for responsiveness.
-    - "Light" mode by default; heavy computations behind a toggle.
-    """
+def _render_optimization_monitoring_sections(TABLE_HEIGHT: int, df: pd.DataFrame, sym1: str, sym2: str) -> None:
     FOCUS = bool(st.session_state.get("opt_focus_mode", False))
-    pair_label = f"{str(sym1).strip().upper()}-{str(sym2).strip().upper()}"
-
-    # Namespace for Streamlit keys in this section
-    NS = "mon"
-
-    def _k(s: str) -> str:
-        # Use your global sk() counter to ensure uniqueness across reruns
-        return sk(f"{NS}:{s}")
-
-    # -------------------------
-    # Cached loaders (DuckDB)
-    # -------------------------
-    @cache_data(show_spinner=False)  # type: ignore[misc]
-    def _cached_load_trials(study_id: int) -> pd.DataFrame:
-        return load_trials_from_duck(int(study_id))
-
-    @cache_data(show_spinner=False)  # type: ignore[misc]
-    def _cached_load_artifacts(study_id: int) -> List[Dict[str, Any]]:
-        return load_artifacts_for_study(int(study_id))
-
-    def _safe_best(x: Any) -> float:
-        try:
-            v = float(pd.to_numeric(x, errors="coerce").max())
-            return v
-        except Exception:
-            return float("nan")
-
-    def _try_decode_csv(payload: bytes) -> pd.DataFrame:
-        # Try bytes -> DataFrame; fallback to text decode
-        try:
-            return pd.read_csv(io.BytesIO(payload))
-        except Exception:
-            try:
-                return pd.read_csv(io.StringIO(payload.decode("utf-8", errors="replace")))
-            except Exception:
-                return pd.DataFrame()
-
-    def _try_decode_json(payload: bytes) -> Any:
-        try:
-            return json.loads(payload.decode("utf-8", errors="strict"))
-        except Exception:
-            try:
-                return json.loads(payload.decode("utf-8", errors="replace"))
-            except Exception:
-                return None
+    pair_label = f"{sym1}-{sym2}"
 
     # =========================================================
     # 11.1 Run History & Studies Timeline (DuckDB)
-    # =========================================================
+    # =========================
     with st.expander("📊 Run History & Studies Timeline (DuckDB)", expanded=not FOCUS):
         try:
             if duckdb is None:
                 st.caption("DuckDB not available — cannot show run history.")
             else:
                 df_st = list_studies_for_pair(pair_label, limit=200)
-                if df_st is None or df_st.empty:
+                if df_st.empty:
                     st.caption("No studies found in DuckDB for this pair yet.")
                 else:
-                    # Normalize expected cols (best-effort)
-                    if "created_at" in df_st.columns:
-                        try:
-                            df_st["created_at"] = pd.to_datetime(df_st["created_at"], errors="coerce")
-                        except Exception:
-                            pass
-
-                    # Filters (safe)
-                    sampler_vals = (
-                        sorted(df_st["sampler"].dropna().astype(str).unique().tolist())
-                        if "sampler" in df_st.columns
-                        else []
-                    )
+                    # אפשרות לסנן לפי sampler/profile/direction
                     sampler_filter = st.selectbox(
                         "Filter by sampler",
-                        ["(all)"] + sampler_vals,
-                        key=_k("hist_sampler"),
+                        ["(all)"] + sorted(df_st["sampler"].dropna().astype(str).unique().tolist()),
+                        key=sk("mon_samp"),
                     )
-
                     dir_filter = st.selectbox(
                         "Filter by direction",
                         ["(all)", "maximize", "minimize"],
-                        key=_k("hist_dir"),
+                        key=sk("mon_dir"),
                     )
-
-                    # Light/Heavy toggle
-                    heavy = st.checkbox(
-                        "Compute best_score/best_sharpe per study (heavy)",
-                        value=False if FOCUS else bool(st.session_state.get("opt_mon_heavy", False)),
-                        key=_k("hist_heavy"),
-                        help="Loads trials per study to compute best score/sharpe. Can be slow for many studies.",
-                    )
-                    st.session_state["opt_mon_heavy"] = bool(heavy)
 
                     df_hist = df_st.copy()
-                    if sampler_filter != "(all)" and "sampler" in df_hist.columns:
-                        df_hist = df_hist[df_hist["sampler"].astype(str) == sampler_filter]
+                    if sampler_filter != "(all)":
+                        df_hist = df_hist[df_hist["sampler"] == sampler_filter]
                     if dir_filter != "(all)" and "direction" in df_hist.columns:
-                        df_hist = df_hist[df_hist["direction"].astype(str) == dir_filter]
+                        df_hist = df_hist[df_hist["direction"] == dir_filter]
 
-                    # Sort ascending timeline
-                    if "created_at" in df_hist.columns:
-                        df_hist = df_hist.sort_values("created_at", ascending=True)
-                    else:
-                        df_hist = df_hist.reset_index(drop=True)
-
+                    df_hist = df_hist.sort_values("created_at", ascending=True)
                     st.dataframe(
                         df_hist,
-                        use_container_width=True,
-                        height=min(int(TABLE_HEIGHT), 260),
+                        width="stretch",
+                        height=min(TABLE_HEIGHT, 260),
                     )
 
-                    # ---- Summary KPIs (light) ----
-                    try:
-                        n_studies = int(len(df_hist))
-                        c1, c2, c3 = st.columns(3)
-                        c1.metric("Studies", f"{n_studies:,}")
-                        if "timeout_sec" in df_hist.columns:
-                            c2.metric("Timeout (median sec)", f"{pd.to_numeric(df_hist['timeout_sec'], errors='coerce').median():.0f}")
-                        else:
-                            c2.metric("Timeout (median sec)", "n/a")
-                        if "n_trials" in df_hist.columns:
-                            c3.metric("n_trials (median)", f"{pd.to_numeric(df_hist['n_trials'], errors='coerce').median():.0f}")
-                        else:
-                            c3.metric("n_trials (median)", "n/a")
-                    except Exception:
-                        pass
+                    # ננסה להוציא best_score/best_sharpe לכל study
+                    scores: List[float] = []
+                    sharpes: List[float] = []
+                    times: List[Any] = []
+                    ids: List[int] = []
+                    profiles: List[str] = []
 
-                    # ---- Heavy: compute best_score/best_sharpe per study ----
-                    if heavy:
-                        scores: List[float] = []
-                        sharpes: List[float] = []
-                        times: List[Any] = []
-                        ids: List[int] = []
-                        profiles: List[str] = []
-
-                        # Limit heavy computations if very large
-                        max_heavy = int(
-                            st.number_input(
-                                "Max studies to compute (cap)",
-                                min_value=10,
-                                max_value=500,
-                                value=min(100, len(df_hist)),
-                                step=10,
-                                key=_k("hist_cap"),
-                            )
-                        )
-                        df_calc = df_hist.tail(max_heavy).copy()  # newest subset (timeline already asc)
-
-                        for _, row in df_calc.iterrows():
-                            try:
-                                sid = int(row.get("study_id"))
-                            except Exception:
-                                continue
-
-                            t_created = row.get("created_at")
-                            prof = str(row.get("profile_json", "") or row.get("profile", "") or "")
-                            profiles.append(prof)
-
-                            try:
-                                dft = _cached_load_trials(sid)
-                                if dft is not None and not dft.empty:
-                                    scores.append(_safe_best(dft.get("Score")))
-                                    sharpes.append(_safe_best(dft.get("Sharpe")))
+                    for _, row in df_hist.iterrows():
+                        sid = int(row["study_id"])
+                        t_created = row.get("created_at")
+                        prof = str(row.get("profile_json", "") or row.get("profile", "") or "")
+                        profiles.append(prof)
+                        try:
+                            dft = load_trials_from_duck(sid)
+                            if not dft.empty:
+                                if "Score" in dft.columns:
+                                    scores.append(float(pd.to_numeric(dft["Score"], errors="coerce").max()))
                                 else:
                                     scores.append(float("nan"))
+                                if "Sharpe" in dft.columns:
+                                    sharpes.append(float(pd.to_numeric(dft["Sharpe"], errors="coerce").max()))
+                                else:
                                     sharpes.append(float("nan"))
-                            except Exception:
+                            else:
                                 scores.append(float("nan"))
                                 sharpes.append(float("nan"))
+                        except Exception:
+                            scores.append(float("nan"))
+                            sharpes.append(float("nan"))
+                        times.append(t_created)
+                        ids.append(sid)
 
-                            times.append(t_created)
-                            ids.append(sid)
+                    hist_df = pd.DataFrame(
+                        {
+                            "study_id": ids,
+                            "created_at": times,
+                            "best_score": scores,
+                            "best_sharpe": sharpes,
+                            "profile": profiles,
+                        }
+                    ).dropna(subset=["created_at"])
 
-                        hist_df = pd.DataFrame(
-                            {
-                                "study_id": ids,
-                                "created_at": times,
-                                "best_score": scores,
-                                "best_sharpe": sharpes,
-                                "profile": profiles,
-                            }
-                        )
-                        if "created_at" in hist_df.columns:
-                            hist_df["created_at"] = pd.to_datetime(hist_df["created_at"], errors="coerce")
-                        hist_df = hist_df.dropna(subset=["created_at"])
-
-                        if hist_df.empty:
-                            st.caption("Heavy summary is empty (no valid created_at or trials).")
-                        else:
+                    if not hist_df.empty and px is not None:
+                        try:
+                            fig_hist = px.line(
+                                hist_df,
+                                x="created_at",
+                                y="best_score",
+                                color=hist_df["profile"].astype(str),
+                                markers=True,
+                                title=f"Best Score over studies — {pair_label}",
+                                hover_data=["study_id", "best_sharpe"],
+                            )
+                            st.plotly_chart(fig_hist, width="stretch")
+                        except Exception:
                             st.dataframe(
-                                hist_df.sort_values("created_at", ascending=True),
-                                use_container_width=True,
-                                height=min(int(TABLE_HEIGHT), 260),
+                                hist_df,
+                                width="stretch",
+                                height=min(TABLE_HEIGHT, 260),
                             )
 
-                            # Trend chart
-                            if px is not None:
-                                try:
-                                    fig_hist = px.line(
-                                        hist_df.sort_values("created_at", ascending=True),
-                                        x="created_at",
-                                        y="best_score",
-                                        color=hist_df["profile"].astype(str),
-                                        markers=True,
-                                        title=f"Best Score over studies — {pair_label}",
-                                        hover_data=["study_id", "best_sharpe"],
-                                    )
-                                    st.plotly_chart(fig_hist, use_container_width=True)
-                                except Exception:
-                                    pass
+                    # השוואת שתי ריצות (A vs B)
+                    st.markdown("### Compare two studies (A vs B)")
+                    if not hist_df.empty:
+                        ids_for_compare = hist_df["study_id"].astype(int).tolist()
+                        c1, c2 = st.columns(2)
+                        sid_a = c1.selectbox("Study A", ids_for_compare, key=sk("cmp_a"))
+                        sid_b = c2.selectbox("Study B", ids_for_compare, key=sk("cmp_b"))
 
-                            # Compare two studies
-                            st.markdown("### Compare two studies (A vs B)")
-                            ids_for_compare = hist_df["study_id"].astype(int).tolist()
-                            if ids_for_compare:
-                                c1, c2 = st.columns(2)
-                                sid_a = c1.selectbox("Study A", ids_for_compare, key=_k("cmp_a"))
-                                sid_b = c2.selectbox("Study B", ids_for_compare, key=_k("cmp_b"))
-
-                                if sid_a and sid_b and sid_a != sid_b:
-                                    try:
-                                        dfa = _cached_load_trials(int(sid_a))
-                                        dfb = _cached_load_trials(int(sid_b))
-                                        a_best = _safe_best(dfa.get("Score")) if (dfa is not None and not dfa.empty) else float("nan")
-                                        b_best = _safe_best(dfb.get("Score")) if (dfb is not None and not dfb.empty) else float("nan")
-                                        st.write(
-                                            {
-                                                "study_a": int(sid_a),
-                                                "best_score_a": a_best,
-                                                "n_tr_a": int(len(dfa)) if dfa is not None else 0,
-                                                "study_b": int(sid_b),
-                                                "best_score_b": b_best,
-                                                "n_tr_b": int(len(dfb)) if dfb is not None else 0,
-                                            }
-                                        )
-                                    except Exception as e:
-                                        st.caption(f"Compare failed: {e}")
+                        if sid_a and sid_b and sid_a != sid_b:
+                            try:
+                                dfa = load_trials_from_duck(int(sid_a))
+                                dfb = load_trials_from_duck(int(sid_b))
+                                if "Score" in dfa.columns and "Score" in dfb.columns:
+                                    a_best = float(pd.to_numeric(dfa["Score"], errors="coerce").max())
+                                    b_best = float(pd.to_numeric(dfb["Score"], errors="coerce").max())
+                                else:
+                                    a_best = b_best = float("nan")
+                                st.write(
+                                    {
+                                        "study_a": int(sid_a),
+                                        "best_score_a": a_best,
+                                        "n_tr_a": len(dfa),
+                                        "study_b": int(sid_b),
+                                        "best_score_b": b_best,
+                                        "n_tr_b": len(dfb),
+                                    }
+                                )
+                            except Exception as e:
+                                st.caption(f"Compare failed: {e}")
         except Exception as e:
             st.caption(f"Run history panel failed: {e}")
 
     # =========================================================
-    # 11.2 Manifest & Artifacts Hub (view & compare)
-    # =========================================================
+    # 11.2 Manifest & Artifacts Hub (with comparison)
+    # =========================
     with st.expander("📜 Manifest & Artifacts Hub (view & compare)", expanded=False):
         try:
             if duckdb is None:
                 st.caption("DuckDB not available — cannot show manifests.")
             else:
                 df_st_all = list_studies_for_pair(pair_label, limit=50)
-                sid_options = df_st_all["study_id"].astype(int).tolist() if (df_st_all is not None and not df_st_all.empty and "study_id" in df_st_all.columns) else []
-
-                default_sid = st.session_state.get("opt_last_study_id")
-                if default_sid is None and sid_options:
-                    default_sid = sid_options[0]
+                sid_options = df_st_all["study_id"].astype(int).tolist() if not df_st_all.empty else []
+                default_sid = st.session_state.get("opt_last_study_id") or (sid_options[-1] if sid_options else None)
 
                 c1, c2 = st.columns(2)
                 sid_main = c1.selectbox(
                     "Primary study_id",
-                    sid_options or ([int(default_sid)] if default_sid is not None else []),
-                    index=(sid_options.index(int(default_sid)) if (default_sid in sid_options) else 0) if sid_options else 0,
-                    key=_k("art_sid_main"),
-                ) if (default_sid is not None or sid_options) else None
+                    sid_options or [default_sid],
+                    index=(sid_options.index(default_sid) if default_sid in sid_options else 0) if sid_options else 0,
+                    key=sk("man_sid_main"),
+                ) if default_sid is not None else None
 
                 sid_ref = c2.selectbox(
                     "Reference study_id (for diff)",
                     [None] + sid_options,
                     index=0,
-                    key=_k("art_sid_ref"),
+                    key=sk("man_sid_ref"),
                 ) if sid_options else None
 
                 if sid_main is None:
                     st.caption("No primary study selected.")
                 else:
-                    artifacts_main = _cached_load_artifacts(int(sid_main))
+                    artifacts_main = load_artifacts_for_study(int(sid_main))
                     if not artifacts_main:
                         st.caption("No artifacts stored for primary study.")
                     else:
-                        kinds_main = sorted(set(str(a.get("kind")) for a in artifacts_main if a.get("kind")))
-                        kind_sel = st.selectbox("Artifact kind (primary)", kinds_main, key=_k("art_kind_main"))
-                        filtered_main = [a for a in artifacts_main if str(a.get("kind")) == str(kind_sel)]
+                        kinds_main = sorted(set(a["kind"] for a in artifacts_main))
+                        kind_sel = st.selectbox("Artifact kind (primary)", kinds_main, key=sk("man_kind_main"))
+                        filtered_main = [a for a in artifacts_main if a["kind"] == kind_sel]
                         art_main = filtered_main[-1] if filtered_main else None
 
                         st.write(f"Primary: study_id={sid_main}, kind={kind_sel}")
-                        payload_main = None
                         if art_main is not None:
-                            payload_main = art_main.get("payload")
+                            payload_main = art_main["payload"]
+                            # נסה להציג
+                            if kind_sel.endswith("_json") or kind_sel == "manifest_json":
+                                try:
+                                    obj = json.loads(payload_main.decode("utf-8"))
+                                    st.json(obj)
+                                except Exception as e:
+                                    st.caption(f"Failed to decode JSON artifact: {e}")
+                            elif kind_sel.endswith("_csv"):
+                                try:
+                                    df_art = pd.read_csv(pd.io.common.BytesIO(payload_main))  # type: ignore[arg-type]
+                                except Exception:
+                                    try:
+                                        df_art = pd.read_csv(pd.io.common.StringIO(payload_main.decode("utf-8")))  # type: ignore[arg-type]
+                                    except Exception as e2:
+                                        st.caption(f"Failed to decode CSV artifact: {e2}")
+                                        df_art = pd.DataFrame()
+                                if not df_art.empty:
+                                    st.dataframe(
+                                        df_art.head(50),
+                                        width="stretch",
+                                        height=min(TABLE_HEIGHT, 260),
+                                    )
+                            st.download_button(
+                                "Download primary artifact",
+                                data=payload_main,
+                                file_name=f"artifact_{sid_main}_{kind_sel}.bin",
+                                key=sk("art_dl_main"),
+                            )
 
-                            # Render
-                            if isinstance(payload_main, (bytes, bytearray)):
-                                if str(kind_sel).endswith("_json") or str(kind_sel) == "manifest_json":
-                                    obj = _try_decode_json(payload_main)
-                                    if obj is not None:
-                                        st.json(obj)
-                                    else:
-                                        st.caption("Failed to decode JSON artifact.")
-                                elif str(kind_sel).endswith("_csv"):
-                                    df_art = _try_decode_csv(payload_main)
-                                    if df_art is not None and not df_art.empty:
-                                        st.dataframe(
-                                            df_art.head(80),
-                                            use_container_width=True,
-                                            height=min(int(TABLE_HEIGHT), 260),
-                                        )
-                                    else:
-                                        st.caption("CSV artifact decoded as empty (or decode failed).")
-                                else:
-                                    st.caption("Binary artifact (preview not available).")
-
-                                st.download_button(
-                                    "Download primary artifact",
-                                    data=payload_main,
-                                    file_name=f"artifact_{int(sid_main)}_{kind_sel}.bin",
-                                    key=_k("art_dl_main"),
-                                )
-                            else:
-                                st.caption("Primary artifact payload missing or not bytes.")
-
-                        # Diff (JSON only)
-                        if sid_ref is not None and payload_main is not None:
-                            st.markdown("### Compare artifacts (primary vs reference)")
-                            artifacts_ref = _cached_load_artifacts(int(sid_ref))
-                            artifacts_ref_kind = [a for a in artifacts_ref if str(a.get("kind")) == str(kind_sel)]
+                        # השוואה מול study_ref (אם נבחר)
+                        if sid_ref is not None:
+                            st.markdown("### Compare manifests (primary vs reference)")
+                            artifacts_ref = load_artifacts_for_study(int(sid_ref))
+                            artifacts_ref_kind = [a for a in artifacts_ref if a["kind"] == kind_sel]
                             art_ref = artifacts_ref_kind[-1] if artifacts_ref_kind else None
-
                             if art_ref is None:
                                 st.caption(f"No artifact of kind={kind_sel} in reference study={sid_ref}.")
                             else:
-                                payload_ref = art_ref.get("payload")
-                                if not isinstance(payload_ref, (bytes, bytearray)):
-                                    st.caption("Reference payload missing or not bytes.")
-                                else:
-                                    if str(kind_sel).endswith("_json") or str(kind_sel) == "manifest_json":
-                                        obj_main = _try_decode_json(payload_main) if isinstance(payload_main, (bytes, bytearray)) else None
-                                        obj_ref = _try_decode_json(payload_ref)
-                                        if isinstance(obj_main, dict) and isinstance(obj_ref, dict):
-                                            keys_all = sorted(set(obj_main.keys()) | set(obj_ref.keys()))
-                                            diff_rows = []
-                                            for k in keys_all:
-                                                v1 = obj_main.get(k, "(missing)")
-                                                v2 = obj_ref.get(k, "(missing)")
-                                                if v1 != v2:
-                                                    diff_rows.append({"key": k, "primary": v1, "reference": v2})
-                                            if diff_rows:
-                                                st.dataframe(
-                                                    pd.DataFrame(diff_rows),
-                                                    use_container_width=True,
-                                                    height=min(int(TABLE_HEIGHT), 260),
-                                                )
-                                            else:
-                                                st.caption("No differences in top-level JSON keys.")
-                                        else:
-                                            st.caption("JSON diff supported only when both artifacts decode to dict.")
+                                try:
+                                    # נסה להשוות כ-JSON (אם Manifest)
+                                    obj_main = json.loads(payload_main.decode("utf-8")) if kind_sel.endswith("_json") else None
+                                    obj_ref = json.loads(art_ref["payload"].decode("utf-8")) if kind_sel.endswith("_json") else None
+                                except Exception:
+                                    obj_main = obj_ref = None
+
+                                if obj_main is not None and obj_ref is not None:
+                                    # diff בסיסי: מפתחות שונים/ערכים שונים
+                                    keys_all = sorted(set(obj_main.keys()) | set(obj_ref.keys()))
+                                    diff_rows = []
+                                    for k in keys_all:
+                                        v1 = obj_main.get(k, "(missing)")
+                                        v2 = obj_ref.get(k, "(missing)")
+                                        if v1 != v2:
+                                            diff_rows.append({"key": k, "primary": v1, "reference": v2})
+                                    if diff_rows:
+                                        st.dataframe(
+                                            pd.DataFrame(diff_rows),
+                                            width="stretch",
+                                            height=min(TABLE_HEIGHT, 260),
+                                        )
                                     else:
-                                        st.caption("Diff is implemented for JSON artifacts only.")
+                                        st.caption("No differences in top-level manifest keys.")
+                                else:
+                                    st.caption("Diff is only implemented for JSON manifests.")
         except Exception as e:
             st.caption(f"Manifest & artifacts panel failed: {e}")
 
     # =========================================================
-    # 11.3 Batch Portfolio View (opt_df_batch)
-    # =========================================================
+    # 11.3 Batch Portfolio View (opt_df_batch) — משודרג
+    # =========================
     with st.expander("📂 Batch Portfolio View (opt_df_batch)", expanded=False):
         try:
             df_batch = st.session_state.get("opt_df_batch", pd.DataFrame())
             if df_batch is None or df_batch.empty:
                 st.caption("No batch results loaded (run batch mode to populate opt_df_batch).")
-                return
-            if "Pair" not in df_batch.columns:
-                st.caption("Batch dataframe has no 'Pair' column; cannot build portfolio view.")
-                return
-
-            st.caption(
-                f"Batch results: {len(df_batch)} rows across {int(df_batch['Pair'].nunique())} pairs."
-            )
-
-            stats_cols = [c for c in ("Score", "Sharpe", "Profit", "Drawdown") if c in df_batch.columns]
-            if stats_cols:
-                grp_pairs = df_batch.groupby("Pair")[stats_cols]
-                agg = grp_pairs.agg(["mean", "max", "min"]).reset_index()
-                agg.columns = ["Pair"] + [
-                    f"{c}_{m}" for c, m in itertools.product(stats_cols, ("mean", "max", "min"))
-                ]
-                st.dataframe(
-                    agg,
-                    use_container_width=True,
-                    height=min(int(TABLE_HEIGHT), 260),
-                )
-
-            pairs_available = sorted(df_batch["Pair"].dropna().astype(str).unique().tolist())
-            sel_pairs = st.multiselect(
-                "Select pairs for portfolio sleeve",
-                pairs_available,
-                default=pairs_available[: min(5, len(pairs_available))],
-                key=_k("pf_pairs"),
-            )
-            if not sel_pairs:
-                return
-
-            df_sel = df_batch[df_batch["Pair"].astype(str).isin(sel_pairs)].copy()
-
-            # Representative row per pair: top Score
-            rep_rows = []
-            for p in sel_pairs:
-                sub = df_sel[df_sel["Pair"].astype(str) == str(p)]
-                if "Score" in sub.columns:
-                    sub = sub.sort_values("Score", ascending=False)
-                rep_rows.append(sub.head(1))
-            rep_df = pd.concat(rep_rows, ignore_index=True)
-
-            mode_weights = st.selectbox(
-                "Weighting mode",
-                ["Equal weights", "Score-proportional", "Sharpe/DD heuristic"],
-                index=0,
-                key=_k("pf_mode"),
-            )
-
-            if mode_weights.startswith("Equal"):
-                w_vec = np.ones(len(rep_df))
-            elif mode_weights.startswith("Score"):
-                w_vec = pd.to_numeric(rep_df.get("Score", pd.Series(index=rep_df.index)), errors="coerce").fillna(1.0).to_numpy()
             else:
-                sh = pd.to_numeric(rep_df.get("Sharpe", pd.Series(index=rep_df.index, dtype=float)), errors="coerce").fillna(0.0)
-                dd = pd.to_numeric(rep_df.get("Drawdown", pd.Series(index=rep_df.index, dtype=float)), errors="coerce").abs().fillna(0.1)
-                w_vec = (sh / (1.0 + dd)).replace([np.inf, -np.inf], np.nan).fillna(0.0).to_numpy()
-                if not np.any(np.abs(w_vec) > 0):
-                    w_vec = np.ones(len(rep_df))
+                if "Pair" not in df_batch.columns:
+                    st.caption("Batch dataframe has no 'Pair' column; cannot build portfolio view.")
+                else:
+                    st.caption(f"Batch results: {len(df_batch)} rows across {df_batch['Pair'].nunique()} pairs.")
+                    # KPIs לכל זוג
+                    stats_cols = [c for c in ("Score", "Sharpe", "Profit", "Drawdown") if c in df_batch.columns]
+                    grp_pairs = df_batch.groupby("Pair")[stats_cols]
+                    agg = grp_pairs.agg(["mean", "max", "min"]).reset_index()
+                    agg.columns = ["Pair"] + [f"{c}_{m}" for c, m in itertools.product(stats_cols, ("mean", "max", "min"))]
+                    st.dataframe(
+                        agg,
+                        width="stretch",
+                        height=min(TABLE_HEIGHT, 260),
+                    )
 
-            w_sum = float(np.sum(np.abs(w_vec)) or 1.0)
-            rep_df = rep_df.copy()
-            rep_df["weight"] = w_vec / w_sum
+                    pairs_available = sorted(df_batch["Pair"].unique().tolist())
+                    sel_pairs = st.multiselect(
+                        "Select pairs for portfolio sleeve",
+                        pairs_available,
+                        default=pairs_available[: min(5, len(pairs_available))],
+                        key=sk("pf_pairs"),
+                    )
+                    if sel_pairs:
+                        df_sel = df_batch[df_batch["Pair"].isin(sel_pairs)].copy()
 
-            st.dataframe(
-                rep_df[["Pair"] + [c for c in ("Score", "Sharpe", "Drawdown") if c in rep_df.columns] + ["weight"]],
-                use_container_width=True,
-                height=min(int(TABLE_HEIGHT), 280),
-            )
+                        # מציגים צירוף אחד per pair (Score הגבוה ביותר)
+                        rep_rows = []
+                        for p in sel_pairs:
+                            sub = df_sel[df_sel["Pair"] == p]
+                            if "Score" in sub.columns:
+                                sub = sub.sort_values("Score", ascending=False)
+                            rep_rows.append(sub.head(1))
+                        rep_df = pd.concat(rep_rows, ignore_index=True)
 
-            # Approx KPIs
-            try:
-                port_score = float((pd.to_numeric(rep_df.get("Score", 0.0), errors="coerce").fillna(0.0) * rep_df["weight"]).sum()) if "Score" in rep_df.columns else float("nan")
-                port_sharpe = float((pd.to_numeric(rep_df.get("Sharpe", 0.0), errors="coerce").fillna(0.0) * rep_df["weight"]).sum()) if "Sharpe" in rep_df.columns else float("nan")
-                port_dd = float((pd.to_numeric(rep_df.get("Drawdown", 0.0), errors="coerce").abs().fillna(0.0) * np.abs(rep_df["weight"])).sum()) if "Drawdown" in rep_df.columns else float("nan")
-            except Exception:
-                port_score = port_sharpe = port_dd = float("nan")
+                        mode_weights = st.selectbox(
+                            "Weighting mode",
+                            ["Equal weights", "Score-proportional", "Sharpe/DD heuristic"],
+                            index=0,
+                            key=sk("pf_mode"),
+                        )
 
-            st.write(
-                {
-                    "Portfolio Score (approx)": port_score,
-                    "Portfolio Sharpe (approx)": port_sharpe,
-                    "Portfolio DD (weighted sum)": port_dd,
-                }
-            )
+                        if mode_weights.startswith("Equal"):
+                            w_vec = np.ones(len(rep_df))
+                        elif mode_weights.startswith("Score"):
+                            w_vec = pd.to_numeric(rep_df.get("Score", pd.Series(index=rep_df.index)), errors="coerce").fillna(1.0).to_numpy()
+                        else:
+                            # Sharpe/DD heuristic ~ Sharpe / (1+DD)
+                            sh = pd.to_numeric(rep_df.get("Sharpe", pd.Series(index=rep_df.index, dtype=float)), errors="coerce").fillna(0.0)
+                            dd = pd.to_numeric(rep_df.get("Drawdown", pd.Series(index=rep_df.index, dtype=float)), errors="coerce").fillna(0.1)
+                            w_vec = (sh / (1.0 + dd)).replace([np.inf, -np.inf], np.nan).fillna(0.0).to_numpy()
+                            if not np.any(np.abs(w_vec) > 0):
+                                w_vec = np.ones(len(rep_df))
 
-            st.download_button(
-                "Download portfolio_representation.csv",
-                data=rep_df.to_csv(index=False).encode("utf-8"),
-                file_name=f"portfolio_rep_{pair_label}.csv",
-                mime="text/csv",
-                key=_k("pf_rep_dl"),
-            )
+                        w_sum = np.sum(np.abs(w_vec)) or 1.0
+                        w = w_vec / w_sum
+                        rep_df["weight"] = w
+
+                        st.caption("Representative portfolio of selected pairs (one strategy per pair):")
+                        st.dataframe(
+                            rep_df[["Pair"] + [c for c in ("Score", "Sharpe", "Drawdown") if c in rep_df.columns] + ["weight"]],
+                            width="stretch",
+                            height=min(TABLE_HEIGHT, 280),
+                        )
+
+                        # approx portfolio KPIs
+                        try:
+                            if "Score" in rep_df.columns:
+                                port_score = float((pd.to_numeric(rep_df["Score"], errors="coerce") * rep_df["weight"]).sum())
+                            else:
+                                port_score = float("nan")
+                            if "Sharpe" in rep_df.columns:
+                                port_sharpe = float((pd.to_numeric(rep_df["Sharpe"], errors="coerce") * rep_df["weight"]).sum())
+                            else:
+                                port_sharpe = float("nan")
+                            if "Drawdown" in rep_df.columns:
+                                port_dd = float((pd.to_numeric(rep_df["Drawdown"], errors="coerce") * np.abs(rep_df["weight"])).sum())
+                            else:
+                                port_dd = float("nan")
+                        except Exception:
+                            port_score = port_sharpe = port_dd = float("nan")
+
+                        st.write(
+                            {
+                                "Portfolio Score (approx)": port_score,
+                                "Portfolio Sharpe (approx)": port_sharpe,
+                                "Portfolio DD (weighted sum)": port_dd,
+                            }
+                        )
+
+                        st.download_button(
+                            "Download portfolio_representation.csv",
+                            data=rep_df.to_csv(index=False).encode("utf-8"),
+                            file_name=f"portfolio_rep_{pair_label}.csv",
+                            mime="text/csv",
+                            key=sk("pf_rep_dl"),
+                        )
         except Exception as e:
             st.caption(f"Batch portfolio panel failed: {e}")
 
     # =========================================================
     # 11.4 Telemetry & Environment Snapshot
-    # =========================================================
+    # =========================
     with st.expander("📡 Telemetry & Environment Snapshot", expanded=False):
         try:
             info: Dict[str, Any] = {
-                "pair": pair_label,
-                "rows": int(df.shape[0]) if isinstance(df, pd.DataFrame) else 0,
-                "cols": int(df.shape[1]) if isinstance(df, pd.DataFrame) else 0,
+                "rows": int(df.shape[0]) if df is not None else 0,
+                "cols": int(df.shape[1]) if df is not None else 0,
             }
             try:
-                info["bytes"] = int(df.memory_usage(deep=True).sum()) if isinstance(df, pd.DataFrame) else 0
+                mem = int(df.memory_usage(deep=True).sum()) if df is not None else 0
+                info["bytes"] = mem
             except Exception:
                 pass
 
-            # DB info
+            # DB info (אם קיים DuckDB)
             if duckdb is not None:
                 try:
                     conn = get_ro_duck()
-                    info["duckdb_studies"] = int(conn.execute("SELECT COUNT(*) FROM studies").fetchone()[0])
-                    info["duckdb_trials"] = int(conn.execute("SELECT COUNT(*) FROM trials").fetchone()[0])
+                    c_st = conn.execute("SELECT COUNT(*) FROM studies").fetchone()[0]
+                    c_tr = conn.execute("SELECT COUNT(*) FROM trials").fetchone()[0]
+                    info["duckdb_studies"] = int(c_st)
+                    info["duckdb_trials"] = int(c_tr)
                 except Exception:
                     pass
                 try:
-                    info["duckdb_path"] = str(DB_PATH)
-                    info["duckdb_file_bytes"] = int(DB_PATH.stat().st_size) if DB_PATH.exists() else None
+                    if DB_PATH.exists():
+                        info["duckdb_file_bytes"] = int(DB_PATH.stat().st_size)
                 except Exception:
                     pass
 
-            # Versions
-            info["versions"] = {
+            # גרסאות ספריות מרכזיות
+            versions = {
                 "python": sys.version.split()[0],
                 "pandas": _safe_version("pandas"),
                 "numpy": _safe_version("numpy"),
@@ -10004,35 +9336,26 @@ def _render_optimization_monitoring_sections(
                 "sklearn": _safe_version("sklearn"),
                 "streamlit": _safe_version("streamlit"),
             }
+            info["versions"] = versions
+
             st.json(info)
 
-            # Rolling Score monitoring (no sliders)
-            if isinstance(df, pd.DataFrame) and (not df.empty) and ("Score" in df.columns):
-                win = int(
-                    st.number_input(
-                        "Rolling monitoring window (rows)",
-                        min_value=5,
-                        max_value=2000,
-                        value=60,
-                        step=5,
-                        key=_k("mon_win"),
-                    )
-                )
-                s = pd.to_numeric(df["Score"], errors="coerce").reset_index(drop=True)
-                mon = s.rolling(win, min_periods=max(5, win // 3)).mean()
-                mon_df = pd.DataFrame({"idx": mon.index, "Score_roll": mon.values})
-
-                if px is not None:
-                    try:
+            # Rolling Score monitoring
+            if df is not None and "Score" in df.columns:
+                try:
+                    win = st.slider("Rolling monitoring window (rows)", 5, 400, 60, key=sk("mon_win"))
+                    s = pd.to_numeric(df["Score"], errors="coerce").reset_index(drop=True)
+                    mon = s.rolling(win, min_periods=max(5, win // 3)).mean()
+                    mon_df = pd.DataFrame({"idx": mon.index, "Score_roll": mon.values})
+                    if px is not None:
                         fig_mon = px.line(mon_df, x="idx", y="Score_roll", title="Rolling mean Score (monitoring)")
-                        st.plotly_chart(fig_mon, use_container_width=True)
-                    except Exception:
-                        st.dataframe(mon_df.tail(80), use_container_width=True, height=min(int(TABLE_HEIGHT), 260))
-                else:
-                    st.dataframe(mon_df.tail(80), use_container_width=True, height=min(int(TABLE_HEIGHT), 260))
+                        st.plotly_chart(fig_mon, width="stretch")
+                    else:
+                        st.dataframe(mon_df.tail(50), width="stretch", height=min(TABLE_HEIGHT, 260))
+                except Exception:
+                    pass
         except Exception as e:
             st.caption(f"Telemetry panel failed: {e}")
-
 """
 חלק 12/15 — Portfolio Constructor Pro & Governance / Reproducibility Hub
 =======================================================================
@@ -10113,7 +9436,7 @@ def _render_optimization_portfolio_section(
             agg.columns = ["Pair"] + [f"{c}_{m}" for c, m in itertools.product(stats_cols, ("mean", "max", "min"))]
             st.dataframe(
                 agg,
-                use_container_width=True,
+                width="stretch",
                 height=min(TABLE_HEIGHT, 260),
             )
 
@@ -10146,7 +9469,7 @@ def _render_optimization_portfolio_section(
             cols_show = ["Pair"] + [c for c in ("Score", "Sharpe", "Drawdown", "Profit") if c in rep_df.columns]
             st.dataframe(
                 rep_df[cols_show],
-                use_container_width=True,
+                width="stretch",
                 height=min(TABLE_HEIGHT, 260),
             )
 
@@ -10224,7 +9547,7 @@ def _render_optimization_portfolio_section(
             cols_port = ["Pair", "weight", "dollars"] + [c for c in ("Score", "Sharpe", "Drawdown", "Profit") if c in rep_df.columns]
             st.dataframe(
                 rep_df[cols_port],
-                use_container_width=True,
+                width="stretch",
                 height=min(TABLE_HEIGHT, 280),
             )
 
@@ -10720,7 +10043,7 @@ def _render_optimization_macro_factor_section(
                         df_factors["Date"] = pd.to_datetime(df_factors["Date"], errors="coerce")
                     st.dataframe(
                         df_factors.head(20),
-                        use_container_width=True,
+                        width="stretch",
                         height=min(TABLE_HEIGHT, 260),
                     )
                 except Exception as e:
@@ -10849,7 +10172,7 @@ def _render_optimization_macro_factor_section(
                 df_join = df_join.sort_values("ScenarioImpact", ascending=False)
                 st.dataframe(
                     df_join,
-                    use_container_width=True,
+                    width="stretch",
                     height=min(TABLE_HEIGHT, 360),
                 )
 
@@ -10862,7 +10185,7 @@ def _render_optimization_macro_factor_section(
                             y="ScenarioImpact",
                             title="Scenario Impact per pair (factor shock · exposure)",
                         )
-                        st.plotly_chart(fig_imp, use_container_width=True)
+                        st.plotly_chart(fig_imp, width="stretch")
                 except Exception:
                     pass
 

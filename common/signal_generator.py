@@ -352,14 +352,6 @@ def zscore_signals(price: PriceSeries, cfg: ZScoreConfig) -> SignalFrame:
         return pd.DataFrame(index=price.index, columns=["zscore", "entry", "exit"]).fillna(0.0)
 
     _validate_series(price, "price")
-
-    # Guard against constant or near-constant series
-    if price.nunique() < 3 or price.std() < 1e-10:
-        return pd.DataFrame(
-            {"zscore": 0.0, "entry": 0, "exit": 0},
-            index=price.index,
-        )
-
     from common.feature_engineering import zscore as fe_zscore
 
     z = fe_zscore(price, cfg.window)
@@ -407,14 +399,6 @@ def bollinger_signals(price: PriceSeries, cfg: BollingerConfig) -> SignalFrame:
         ).fillna(0.0)
 
     _validate_series(price, "price")
-
-    # Guard against constant or near-constant series
-    if price.nunique() < 3 or price.std() < 1e-10:
-        return pd.DataFrame(
-            {"upper": 0.0, "lower": 0.0, "entry": 0, "exit": 0},
-            index=price.index,
-        )
-
     from common.feature_engineering import bollinger_bands
 
     bands = bollinger_bands(price, cfg.window, cfg.num_std)
@@ -498,17 +482,6 @@ def rsi_signals(price: PriceSeries, cfg: RSIConfig) -> SignalFrame:
         return pd.DataFrame(index=price.index, columns=["rsi", "entry", "exit"]).fillna(0.0)
 
     _validate_series(price, "price")
-
-    # Guard against constant or near-constant series
-    if price.nunique() < 3 or price.std() < 1e-10:
-        return pd.DataFrame(
-            {"rsi": 50.0, "entry": 0, "exit": 0},
-            index=price.index,
-        )
-
-    if cfg.lower >= cfg.upper:
-        raise ValueError(f"RSI lower ({cfg.lower}) must be < upper ({cfg.upper})")
-
     from common.feature_engineering import rsi as fe_rsi
 
     r = fe_rsi(price, cfg.window)

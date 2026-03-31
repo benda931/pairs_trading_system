@@ -64,7 +64,6 @@ from .data_providers import (
     MarketDataProvider,
     IBKRProvider,
     YahooProvider,
-    FMPProvider,
     normalize_symbols,
     available_providers_summary,
 )
@@ -710,40 +709,34 @@ class MarketDataRouter:
 def build_default_router(
     ib: Any | None = None,
     *,
-    use_fmp: bool = True,
-    fmp_api_key: str | None = None,
-    use_yahoo: bool = False,
+    use_yahoo: bool = True,
     yahoo_auto_adjust: bool = False,
     prefer: Sequence[str] | None = None,
     allow_fallbacks: bool = True,
     strict: bool = False,
 ) -> MarketDataRouter:
     """
-    Build the canonical market-data router.
+    Helper לחיבור מהיר בתוך המערכת שלך.
 
-    Provider priority (lower number = higher priority):
-      IBKR  (10) — live/paper trading, most accurate
-      FMP   (20) — canonical historical data provider
-      Yahoo (50) — legacy fallback, disabled by default
+    בונה Router עם:
+    - IBKRProvider (אם ib לא None)
+    - YahooProvider (אופציונלי, כ-fallback)
 
     Parameters
     ----------
     ib : IB | None
-        Connected ib_insync.IB object. If None, IBKR is skipped.
-    use_fmp : bool
-        Include FMPProvider as the canonical data source (default True).
-    fmp_api_key : str | None
-        FMP API key. If None, reads from FMP_API_KEY env var or config.
+        אובייקט IB פעיל (ib_insync.IB). אם None → לא נשתמש ב-IBKR.
     use_yahoo : bool
-        Include YahooProvider as a last-resort fallback (default False).
+        אם True → נוסיף YahooProvider (אם yfinance מותקן).
     yahoo_auto_adjust : bool
-        Use adjusted close prices from Yahoo.
+        האם להשתמש במחירים מתוקנים ב-Yahoo (Adj Close).
     prefer : Sequence[str] | None
-        Explicit provider priority order. If None, derived from `.priority`.
+        סדר עדיפויות שמות ספקים (לדוגמה ["ibkr","yahoo"]).
+        אם None → ייגזר מתוך priority של הספקים.
     allow_fallbacks : bool
-        Try next provider if the preferred one fails.
+        אם True → ננסה ספקים נוספים אם הראשון נכשל.
     strict : bool
-        Raise instead of returning empty DataFrame when all providers fail.
+        אם True + require_non_empty=True → ייזרק Exception אם הכל נכשל.
 
     Returns
     -------
@@ -751,34 +744,26 @@ def build_default_router(
     """
     providers: List[MarketDataProvider] = []
 
-    # IBKR — highest priority (live data, most accurate)
+    # IBKR
     if ib is not None:
         try:
             providers.append(IBKRProvider(ib=ib))
-            logger.info("build_default_router: IBKRProvider added (priority 10).")
+            logger.info("build_default_router: IBKRProvider added.")
         except Exception as exc:
             logger.warning("build_default_router: failed to init IBKRProvider: %s", exc)
 
-    # FMP — canonical historical data provider
-    if use_fmp:
-        try:
-            providers.append(FMPProvider(api_key=fmp_api_key))
-            logger.info("build_default_router: FMPProvider added (priority 20).")
-        except Exception as exc:
-            logger.warning("build_default_router: failed to init FMPProvider: %s", exc)
-
-    # Yahoo — legacy last-resort fallback (disabled by default)
+    # Yahoo
     if use_yahoo:
         try:
             providers.append(YahooProvider(auto_adjust=yahoo_auto_adjust))
-            logger.info("build_default_router: YahooProvider added (priority 50).")
+            logger.info("build_default_router: YahooProvider added.")
         except Exception as exc:
             logger.warning("build_default_router: failed to init YahooProvider: %s", exc)
 
     if not providers:
         raise RuntimeError(
             "build_default_router: no providers could be initialized. "
-            "Set FMP_API_KEY env var or pass fmp_api_key, or connect IBKR."
+            "Ensure at least IBKR or yfinance is available."
         )
 
     return MarketDataRouter(

@@ -595,9 +595,7 @@ def compute_pair_signal(
     quality_score = None
     try:
         if _evaluate_pair_quality is not None:
-            raw_q = float(_evaluate_pair_quality(s1, s2))
-            if np.isfinite(raw_q):
-                quality_score = float(np.clip(raw_q, 0.0, 100.0))
+            quality_score = float(_evaluate_pair_quality(s1, s2))
     except Exception:
         quality_score = None
 

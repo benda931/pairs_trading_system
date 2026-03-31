@@ -326,13 +326,11 @@ class DashboardConfig(BaseModel):
         if v is None:
             return "2020-01-01"
         v_str = str(v).strip()
+        # פשוט – רק לוודא אורך וצורת שנה-חודש-יום
         try:
-            dt = datetime.strptime(v_str, "%Y-%m-%d")
-            if dt.year < 1990 or dt.year > 2100:
-                logger.warning("Date year %d outside typical range [1990-2100], using default", dt.year)
-                return "2020-01-01"
+            datetime.strptime(v_str, "%Y-%m-%d")
         except ValueError:
-            logger.warning("Invalid date format %r, using default 2020-01-01", v_str)
+            # במקרה של ערך חסר/שבור – ניפול לברירת מחדל
             return "2020-01-01"
         return v_str
 

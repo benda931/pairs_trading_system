@@ -1,0 +1,2990 @@
+# -*- coding: utf-8 -*-
+"""
+smart_scan_tab.py — HF-grade Smart Scan Tab
+===========================================
+
+- בנוי לעבוד גם בסביבת Dashboard מלאה (עם DashboardService / DashboardContext),
+  וגם כסקריפט עצמאי/דמו (fallback ל-Any אם המודולים לא קיימים).
+- משתמש ב-Streamlit כ-UI engine, numpy/pandas כבסיס דאטה, ו-logging ללוגים.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import (
+    Any,
+    Dict,
+    List,
+    Optional,
+    Tuple,
+    Literal,
+    TYPE_CHECKING,
+)
+
+import logging
+
+import numpy as np
+import pandas as pd
+import streamlit as st
+
+# ------------------------------------------------
+# Logger מרכזי ל-Smart Scan
+# ------------------------------------------------
+logger = logging.getLogger("SmartScan")
+if not logger.handlers:
+    handler = logging.StreamHandler()
+    handler.setFormatter(
+        logging.Formatter(
+            fmt="%(asctime)s | %(levelname)-8s | SmartScan | %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
+        )
+    )
+    logger.addHandler(handler)
+logger.setLevel(logging.INFO)
+
+# ------------------------------------------------
+# טיפוסים בזמן Type-check בלבד (Pylance / mypy)
+# ------------------------------------------------
+if TYPE_CHECKING:
+    from core.dashboard_models import DashboardContext
+    from core.dashboard_service import DashboardService
+else:
+    # בזמן ריצה, אם המודולים לא קיימים, נשתמש ב-Any
+    DashboardContext = Any  # type: ignore[assignment]
+    DashboardService = Any  # type: ignore[assignment]
+
+# ------------------------------------------------
+# יצירת Service + Context מתוך dashboard_service_factory
+# ------------------------------------------------
+try:
+    from root.dashboard_service_factory import (
+        create_dashboard_service,
+        build_default_dashboard_context,
+    )
+except Exception:
+    # fallback – מאפשר להריץ את הטאב גם בלי Dashboard מלא (למשל בדמו/בדיקות)
+    def create_dashboard_service() -> Any:
+        logger.warning(
+            "create_dashboard_service() fallback — "
+            "DashboardService not available; running SmartScan in demo mode."
+        )
+        return None
+
+    def build_default_dashboard_context() -> Any:
+        logger.warning(
+            "build_default_dashboard_context() fallback — "
+            "DashboardContext not available; using empty context."
+        )
+        return None
+
+# ============================
+# 1.1 טווח אופטימלי לפרמטר
+# ============================
+
+@dataclass
+class ParamOptimalRange:
+    """
+    טווח אופטימלי לפרמטר יחיד.
+
+    בתוך [optimal_min, optimal_max] → ציון בסיס 1.
+    בין hard_min ל-optimal_min או בין optimal_max ל-hard_max → ציון יורד ל-0.
+    מחוץ [hard_min, hard_max] → 0.
+
+    weight:
+        משקל הפרמטר בציון הכולל (לא כל פרמטר חשוב באותה מידה).
+    shape:
+        1.0 = ליניארי, >1 = ירידה חדה (עונש גדול מהר יותר),
+        <1 = ירידה רכה (סובלני יותר).
+    """
+
+    name: str
+    hard_min: float
+    optimal_min: float
+    optimal_max: float
+    hard_max: float
+    weight: float = 1.0
+    shape: float = 1.0
+
+    def score(self, value: Optional[float]) -> float:
+        """
+        מחשב ציון 0–1 לערך בודד של הפרמטר.
+        """
+        if value is None or not np.isfinite(value):
+            return 0.0
+
+        x = float(value)
+        hmin, omin, omax, hmax = (
+            float(self.hard_min),
+            float(self.optimal_min),
+            float(self.optimal_max),
+            float(self.hard_max),
+        )
+
+        # טווח לא תקין → ציון 0
+        if hmax <= hmin:
+            return 0.0
+
+        # בתוך הטווח האופטימלי → ציון מלא
+        if omin <= x <= omax:
+            base = 1.0
+        # מתחת לטווח האופטימלי אבל מעל hard_min
+        elif hmin <= x < omin:
+            base = (x - hmin) / (omin - hmin)
+        # מעל הטווח האופטימלי אבל מתחת ל-hard_max
+        elif omax < x <= hmax:
+            base = (hmax - x) / (hmax - omax)
+        else:
+            base = 0.0
+
+        base = max(0.0, min(1.0, base))
+        if self.shape != 1.0 and base > 0.0:
+            base = base ** float(self.shape)
+
+        return float(base)
+
+
+# ============================================
+# 1.2 ParamOptimismConfig + פרופילים דיפולטיים
+# ============================================
+
+@dataclass
+class ParamOptimismConfig:
+    """
+    קונפיגורציה לציון אופטימיות פרמטרים.
+
+    ranges:
+        name → ParamOptimalRange
+    source:
+        מקור קונפיגורציה (לוגית בלבד) — "default_profile", "ml_adapted", וכו'.
+    profile:
+        "default" / "defensive" / "aggressive" וכו'.
+    """
+
+    ranges: Dict[str, ParamOptimalRange]
+    source: str = "default_profile"
+    profile: str = "default"
+
+    @classmethod
+    def from_simple_dict(
+        cls,
+        data: Dict[str, Dict[str, Any]],
+        *,
+        profile: str = "custom",
+        source: str = "manual",
+    ) -> "ParamOptimismConfig":
+        """
+        בניית קונפיגורציה ממילון פשוט (מ-YAML/JSON/DB).
+        """
+        ranges: Dict[str, ParamOptimalRange] = {}
+        for name, cfg in data.items():
+            try:
+                ranges[name] = ParamOptimalRange(
+                    name=name,
+                    hard_min=float(cfg["hard_min"]),
+                    optimal_min=float(cfg["optimal_min"]),
+                    optimal_max=float(cfg["optimal_max"]),
+                    hard_max=float(cfg["hard_max"]),
+                    weight=float(cfg.get("weight", 1.0)),
+                    shape=float(cfg.get("shape", 1.0)),
+                )
+            except Exception as e:
+                logger.warning("Invalid optimal range config for %s: %s", name, e)
+        return cls(ranges=ranges, source=source, profile=profile)
+
+    @classmethod
+    def default_for_profile(cls, profile: str = "default") -> "ParamOptimismConfig":
+        """
+        יוצר ParamOptimismConfig דיפולטי לפי פרופיל:
+
+        profile = "default":
+            - z_entry: סביב 2.0–2.5
+            - z_exit: סביב 0.3–0.8
+            - lookback: סביב 40–80 ימים
+            - hl_bars: סביב 20–80 ברים
+            - corr_min: >= 0.6
+
+        profile = "defensive":
+            - z_entry גבוה יותר (פחות כניסות), hl קצר יותר, corr_min גבוה יותר.
+        profile = "aggressive":
+            - z_entry נמוך יותר, hl ארוך יותר יחסית, פחות דגש על corr.
+
+        זה לא "מחקר מדעי" אלא טווחים סבירים לפי ספרות פופולרית ופרקטיקה,
+        משמשים כברירת מחדל עד שה-ML ילמד טווחים פרטניים מההיסטוריה.
+        """
+        p = profile.lower().strip()
+        if p not in {"default", "defensive", "aggressive"}:
+            p = "default"
+
+        if p == "defensive":
+            cfg_raw = {
+                "z_entry": {
+                    "hard_min": 1.5,
+                    "optimal_min": 2.2,
+                    "optimal_max": 2.8,
+                    "hard_max": 4.0,
+                    "weight": 2.5,
+                    "shape": 1.2,
+                },
+                "z_exit": {
+                    "hard_min": 0.1,
+                    "optimal_min": 0.5,
+                    "optimal_max": 0.9,
+                    "hard_max": 1.5,
+                    "weight": 2.0,
+                    "shape": 1.0,
+                },
+                "lookback": {
+                    "hard_min": 30,
+                    "optimal_min": 50,
+                    "optimal_max": 90,
+                    "hard_max": 200,
+                    "weight": 1.0,
+                    "shape": 1.0,
+                },
+                "hl_bars": {
+                    "hard_min": 10,
+                    "optimal_min": 20,
+                    "optimal_max": 60,
+                    "hard_max": 200,
+                    "weight": 1.5,
+                    "shape": 1.0,
+                },
+                "corr_min": {
+                    "hard_min": 0.3,
+                    "optimal_min": 0.7,
+                    "optimal_max": 0.9,
+                    "hard_max": 1.0,
+                    "weight": 2.0,
+                    "shape": 2.0,
+                },
+            }
+        elif p == "aggressive":
+            cfg_raw = {
+                "z_entry": {
+                    "hard_min": 1.0,
+                    "optimal_min": 1.5,
+                    "optimal_max": 2.2,
+                    "hard_max": 3.5,
+                    "weight": 2.0,
+                    "shape": 1.0,
+                },
+                "z_exit": {
+                    "hard_min": 0.1,
+                    "optimal_min": 0.3,
+                    "optimal_max": 0.7,
+                    "hard_max": 1.2,
+                    "weight": 1.5,
+                    "shape": 1.0,
+                },
+                "lookback": {
+                    "hard_min": 10,
+                    "optimal_min": 30,
+                    "optimal_max": 60,
+                    "hard_max": 160,
+                    "weight": 1.0,
+                    "shape": 1.0,
+                },
+                "hl_bars": {
+                    "hard_min": 5,
+                    "optimal_min": 10,
+                    "optimal_max": 80,
+                    "hard_max": 250,
+                    "weight": 1.0,
+                    "shape": 0.8,
+                },
+                "corr_min": {
+                    "hard_min": 0.2,
+                    "optimal_min": 0.5,
+                    "optimal_max": 0.8,
+                    "hard_max": 1.0,
+                    "weight": 1.5,
+                    "shape": 1.5,
+                },
+            }
+        else:  # default
+            cfg_raw = {
+                "z_entry": {
+                    "hard_min": 1.0,
+                    "optimal_min": 2.0,
+                    "optimal_max": 2.7,
+                    "hard_max": 4.0,
+                    "weight": 2.0,
+                    "shape": 1.0,
+                },
+                "z_exit": {
+                    "hard_min": 0.1,
+                    "optimal_min": 0.4,
+                    "optimal_max": 0.8,
+                    "hard_max": 1.3,
+                    "weight": 1.5,
+                    "shape": 1.0,
+                },
+                "lookback": {
+                    "hard_min": 20,
+                    "optimal_min": 40,
+                    "optimal_max": 80,
+                    "hard_max": 200,
+                    "weight": 1.0,
+                    "shape": 1.0,
+                },
+                "hl_bars": {
+                    "hard_min": 10,
+                    "optimal_min": 20,
+                    "optimal_max": 80,
+                    "hard_max": 220,
+                    "weight": 1.2,
+                    "shape": 1.0,
+                },
+                "corr_min": {
+                    "hard_min": 0.2,
+                    "optimal_min": 0.6,
+                    "optimal_max": 0.85,
+                    "hard_max": 1.0,
+                    "weight": 1.8,
+                    "shape": 1.5,
+                },
+            }
+
+        cfg = cls.from_simple_dict(cfg_raw, profile=p, source="default_profile")
+        logger.info("ParamOptimismConfig default_for_profile=%s created.", p)
+        return cfg
+
+    def score_vector(self, params: Dict[str, Any]) -> Tuple[float, Dict[str, float]]:
+        """
+        מחשב ציון אופטימיות משוקלל (0–1) לוקטור פרמטרים + ציוני per-param.
+        """
+        if not self.ranges:
+            return 0.0, {}
+
+        per_param_scores: Dict[str, float] = {}
+        weighted_sum = 0.0
+        weight_sum = 0.0
+
+        for name, rng in self.ranges.items():
+            v = params.get(name)
+            s = rng.score(v)
+            per_param_scores[name] = s
+            w = float(rng.weight)
+            weighted_sum += s * w
+            weight_sum += abs(w)
+
+        if weight_sum <= 0:
+            total = 0.0
+        else:
+            total = weighted_sum / weight_sum
+
+        total = float(max(0.0, min(1.0, total)))
+        return total, per_param_scores
+
+
+# ==================================================
+# 1.3 פונקציות להכנת ציון מ-Fair Value (מרחק באחוזים)
+# ==================================================
+
+def fair_value_pct_score(
+    pct_diff: Optional[float],
+    *,
+    tol_pct: float = 0.02,
+    max_pct: float = 0.20,
+    shape: float = 1.0,
+) -> float:
+    """
+    ציון לפי מרחק מה-Fair Value באחוזים (0–1).
+
+    pct_diff:
+        מרחק מה-FV באחוזים: 0.05 = +5%, -0.03 = -3%.
+    tol_pct:
+        טווח סבילה סביב 0, שבו הציון ≈ 1. לדוגמה: +/-2%.
+    max_pct:
+        מעבר למרחק זה → ציון 0 (למשל 20% deviation).
+    shape:
+        1.0 = ליניארי, >1 = ירידה חדה, <1 = רכה יותר.
+    """
+    if pct_diff is None or not np.isfinite(pct_diff):
+        return 0.0
+
+    d = abs(float(pct_diff))
+    tol = float(max(tol_pct, 0.0))
+    m = float(max(max_pct, tol + 1e-6))  # לוודא m > tol
+
+    if d <= tol:
+        base = 1.0
+    elif d >= m:
+        base = 0.0
+    else:
+        # ירידה ליניארית מ-1 ל-0
+        base = (m - d) / (m - tol)
+
+    base = max(0.0, min(1.0, base))
+    if shape != 1.0 and base > 0.0:
+        base = base ** float(shape)
+
+    return float(base)
+
+
+def build_fv_score_map(
+    df_fv: pd.DataFrame,
+    *,
+    pair_col_candidates: Tuple[str, ...] = ("pair", "pair_label", "symbol_pair"),
+    pct_diff_cols: Tuple[str, ...] = ("fv_pct_diff", "fair_value_pct_diff"),
+) -> Dict[str, float]:
+    """
+    מקבל DataFrame עם מידע Fair Value ומחזיר map: pair → fv_score (0–1).
+
+    df_fv צפוי להכיל:
+        - עמודת pair (pair / pair_label / symbol_pair)
+        - עמודת מרחק באחוזים (fv_pct_diff / fair_value_pct_diff)
+    """
+    if df_fv is None or df_fv.empty:
+        return {}
+
+    df = df_fv.copy()
+
+    # pair column
+    pair_col = None
+    for cand in pair_col_candidates:
+        if cand in df.columns:
+            pair_col = cand
+            break
+    if pair_col is None:
+        logger.warning("FV score: no pair column found.")
+        return {}
+
+    # pct diff column
+    pct_col = None
+    for cand in pct_diff_cols:
+        if cand in df.columns:
+            pct_col = cand
+            break
+    if pct_col is None:
+        logger.warning("FV score: no pct diff column (fv_pct_diff/fair_value_pct_diff) found.")
+        return {}
+
+    scores: Dict[str, float] = {}
+    vals_pct = pd.to_numeric(df[pct_col], errors="coerce")
+
+    for p, diff in zip(df[pair_col].astype(str), vals_pct):
+        s = fair_value_pct_score(diff, tol_pct=0.02, max_pct=0.20, shape=1.0)
+        scores[str(p)] = s
+
+    return scores
+
+
+# =======================================================
+# 1.4 שילוב: Base Param Score + Score File + Fair Value
+# =======================================================
+
+def apply_param_optimism_scan(
+    df: pd.DataFrame,
+    cfg: ParamOptimismConfig,
+    *,
+    param_cols: Optional[List[str]] = None,
+    df_score_file: Optional[pd.DataFrame] = None,
+    df_fair_value: Optional[pd.DataFrame] = None,
+    w_base: float = 0.6,
+    w_file: float = 0.2,
+    w_fv: float = 0.2,
+) -> pd.DataFrame:
+    """
+    מריץ Param Optimism על DataFrame של פרמטרים, ויוצר:
+
+    param_optimism_score_base  : ציון לפי טווחי הפרמטרים בלבד (0–1).
+    param_optimism_score_file  : ציון/בוסט לפי קובץ ציונים חיצוני (0–1).
+    param_optimism_score_fv    : ציון לפי מרחק מה-FV באחוזים (0–1).
+    param_optimism_score_total : ציון משוקלל כולל (0–1).
+
+    df:
+        חייב לכלול עמודת pair (pair / pair_label / symbol_pair) + פרמטרים.
+
+    df_score_file (אופציונלי):
+        pair + עמודת score (param_score_file / file_score / score / optimism_score).
+
+    df_fair_value (אופציונלי):
+        pair + fv_pct_diff / fair_value_pct_diff.
+
+    המשקלים:
+        w_base, w_file, w_fv – משקל היחסי של כל רכיב בציון הכולל.
+    """
+    if df is None or df.empty:
+        return df
+
+    df = df.copy()
+
+    # זיהוי עמודת pair
+    pair_col = None
+    for cand in df.columns:
+        if str(cand).lower() in ("pair", "pair_label", "symbol_pair"):
+            pair_col = cand
+            break
+    if pair_col is None:
+        pair_col = "pair"
+        df[pair_col] = [f"PAIR_{i}" for i in range(len(df))]
+
+    if param_cols is None:
+        param_cols = list(cfg.ranges.keys())
+
+    # ---- Base param score ----
+    base_scores: List[float] = []
+    per_param_details: List[Dict[str, float]] = []
+
+    for _, row in df.iterrows():
+        params = {name: row.get(name) for name in param_cols}
+        total, per_param = cfg.score_vector(params)
+        base_scores.append(total)
+        per_param_details.append(per_param)
+
+    df["param_optimism_score_base"] = base_scores
+    df["param_optimism_details"] = per_param_details
+
+    # ---- Score file component ----
+    file_score_map: Dict[str, float] = {}
+    if df_score_file is not None and not df_score_file.empty:
+        sff = df_score_file.copy()
+        score_col_file = None
+        for cand in ("param_score_file", "file_score", "score", "optimism_score"):
+            if cand in sff.columns:
+                score_col_file = cand
+                break
+        if score_col_file is not None:
+            pair_col_file = None
+            for cand in sff.columns:
+                if str(cand).lower() in ("pair", "pair_label", "symbol_pair"):
+                    pair_col_file = cand
+                    break
+            if pair_col_file is not None:
+                sff = sff[[pair_col_file, score_col_file]].dropna()
+                vals = pd.to_numeric(sff[score_col_file], errors="coerce")
+                vmin, vmax = float(vals.min()), float(vals.max())
+                if vmax > vmin:
+                    norm_vals = (vals - vmin) / (vmax - vmin)
+                else:
+                    norm_vals = vals * 0.0
+                for p, v in zip(sff[pair_col_file].astype(str), norm_vals):
+                    file_score_map[str(p)] = float(max(0.0, min(1.0, v)))
+
+    file_scores: List[float] = []
+    for _, row in df.iterrows():
+        p = str(row[pair_col])
+        file_scores.append(file_score_map.get(p, 0.0))
+    df["param_optimism_score_file"] = file_scores
+
+    # ---- Fair Value component ----
+    fv_score_map: Dict[str, float] = {}
+    if df_fair_value is not None and not df_fair_value.empty:
+        fv_score_map = build_fv_score_map(df_fair_value)
+
+    fv_scores: List[float] = []
+    for _, row in df.iterrows():
+        p = str(row[pair_col])
+        fv_scores.append(fv_score_map.get(p, 0.0))
+    df["param_optimism_score_fv"] = fv_scores
+
+    # ---- Total combined score ----
+    w_base = float(max(0.0, w_base))
+    w_file = float(max(0.0, w_file))
+    w_fv = float(max(0.0, w_fv))
+    total_w = w_base + w_file + w_fv
+    if total_w <= 0:
+        w_base = 1.0
+        total_w = 1.0
+
+    base_arr = df["param_optimism_score_base"].astype(float).to_numpy()
+    file_arr = df["param_optimism_score_file"].astype(float).to_numpy()
+    fv_arr = df["param_optimism_score_fv"].astype(float).to_numpy()
+
+    total_score = (w_base * base_arr + w_file * file_arr + w_fv * fv_arr) / total_w
+    df["param_optimism_score_total"] = np.clip(total_score, 0.0, 1.0)
+
+    return df
+
+
+# ==========================================================
+# 1.5 "וו" ל-ML — התאמת טווחים לפי היסטוריית אופטימיזציה (hook)
+# ==========================================================
+
+def adapt_param_optimism_from_history(
+    cfg: ParamOptimismConfig,
+    df_history: pd.DataFrame,
+    *,
+    score_col: str = "Score",
+    top_quantile: float = 0.2,
+) -> ParamOptimismConfig:
+    """
+    Hook עתידי ל-ML/Meta-Optimization:
+
+    מתוך df_history (למשל opt_df) אפשר:
+    - לקחת Top-X% ריצות.
+    - להסתכל על התפלגות הפרמטרים.
+    - לעדכן את הטווחים (optimal_min/max) לפי quantiles.
+
+    כרגע מימוש זה:
+    - לוקח את top_quantile לפי Score,
+    - לכל פרמטר שקיים ב-cfg.ranges,
+      שם optimal_min/max לפי q25/q75, ושומר hard_min/max.
+
+    אפשר להחליף בעתיד ללוגיקה מורכבת יותר (ML אמיתי).
+    """
+    if df_history is None or df_history.empty:
+        return cfg
+
+    if score_col not in df_history.columns:
+        return cfg
+
+    try:
+        df_sorted = df_history.sort_values(score_col, ascending=False)
+    except Exception:
+        df_sorted = df_history.copy()
+
+    k = max(10, int(len(df_sorted) * float(top_quantile)))
+    df_top = df_sorted.head(k)
+
+    new_ranges: Dict[str, ParamOptimalRange] = {}
+    for name, rng in cfg.ranges.items():
+        if name not in df_top.columns:
+            new_ranges[name] = rng
+            continue
+        vals = pd.to_numeric(df_top[name], errors="coerce").dropna()
+        if vals.empty:
+            new_ranges[name] = rng
+            continue
+        q25 = float(vals.quantile(0.25))
+        q75 = float(vals.quantile(0.75))
+        # נשמור hard_min/max קיימים אך נעדכן את ה-optimal
+        new_ranges[name] = ParamOptimalRange(
+            name=name,
+            hard_min=rng.hard_min,
+            optimal_min=q25,
+            optimal_max=q75,
+            hard_max=rng.hard_max,
+            weight=rng.weight,
+            shape=rng.shape,
+        )
+
+    logger.info("ParamOptimismConfig adapted from history (top %.0f%%).", top_quantile * 100)
+    return ParamOptimismConfig(
+        ranges=new_ranges,
+        source="ml_adapted",
+        profile=cfg.profile,
+    )
+
+# =============================================
+# Part 2/5 — Fundamental Optimism & Quality
+# =============================================
+
+from dataclasses import dataclass
+from typing import Literal
+
+FundMode = Literal["range", "higher_better", "lower_better"]
+
+
+@dataclass
+class FundamentalFactorSpec:
+    """
+    פקטור פנדומנטלי בודד:
+
+    name:
+        שם הפקטור, לדוגמה: "pe", "roe", "debt_to_equity", "eps_growth_5y".
+
+    mode:
+        "range"          → יש טווח אופטימלי (כמו ParamOptimalRange).
+        "higher_better"  → ערך גבוה יותר עד גבול מסוים → ציון גבוה.
+        "lower_better"   → ערך נמוך יותר עד גבול מסוים → ציון גבוה.
+
+    optimal_min / optimal_max:
+        עבור mode="range":
+            - בתוך הטווח → ציון ≈ 1.
+            - מחוץ לו → ציון יורד.
+        עבור modes אחרים:
+            משמש כנקודת רפרנס/סטוריישן (למשל ערך "טוב מאוד").
+
+    hard_min / hard_max:
+        גבולות תחתונים/עליונים:
+        - מחוץ לטווח הזה → ציון 0.
+        - בין hard לבין optimal → ציון יורד חלק.
+
+    weight:
+        משקל הפקטור בציון הפנדומנטלי הכולל (לא כל פקטור חשוב באותה מידה).
+
+    shape:
+        1.0 = ליניארי, >1 = יותר חדה, <1 = יותר רכה.
+
+    Notes:
+    ------
+    - ב"range": מתאים למקרים כמו P/E "נורמלי" (לא גבוה מדי, לא נמוך מדי בצורה חשודה).
+    - ב"higher_better": מתאים ל-ROE, EPS Growth, Margin.
+    - ב"lower_better": מתאים ל-Debt/Equity, Volatility, Payout Ratio (במקרים מסוימים).
+    """
+
+    name: str
+    mode: FundMode
+    hard_min: float
+    optimal_min: float
+    optimal_max: float
+    hard_max: float
+    weight: float = 1.0
+    shape: float = 1.0
+
+    def score(self, value: Optional[float]) -> float:
+        if value is None or not np.isfinite(value):
+            return 0.0
+
+        x = float(value)
+        hmin = float(self.hard_min)
+        omin = float(self.optimal_min)
+        omax = float(self.optimal_max)
+        hmax = float(self.hard_max)
+
+        if hmax <= hmin:
+            return 0.0
+
+        # ערכים מחוץ לגבולות קשיחים → 0
+        if x <= hmin or x >= hmax:
+            base = 0.0
+        elif self.mode == "range":
+            # דומה ל-ParamOptimalRange: "פעמון שטוח"
+            if omin <= x <= omax:
+                base = 1.0
+            elif hmin < x < omin:
+                base = (x - hmin) / (omin - hmin)
+            elif omax < x < hmax:
+                base = (hmax - x) / (hmax - omax)
+            else:
+                base = 0.0
+        elif self.mode == "higher_better":
+            # hmin → 0, omin→0.5, omax→1, hmax→0
+            if x <= hmin:
+                base = 0.0
+            elif x >= omax:
+                base = 1.0
+            elif x <= omin:
+                # scale up בין hmin→omin
+                base = 0.5 * (x - hmin) / (omin - hmin)
+            else:  # בין omin ל-omax
+                base = 0.5 + 0.5 * (x - omin) / (omax - omin)
+        else:  # lower_better
+            # hmin→1, omin→1, omax→0.5, hmax→0
+            if x >= hmax:
+                base = 0.0
+            elif x <= omin:
+                base = 1.0
+            elif x <= omax:
+                base = 0.5 + 0.5 * (omax - x) / (omax - omin)
+            else:  # בין omax ל-hmax
+                base = 0.5 * (hmax - x) / (hmax - omax)
+
+        base = max(0.0, min(1.0, base))
+        if self.shape != 1.0 and base > 0.0:
+            base = base ** float(self.shape)
+        return float(base)
+
+
+@dataclass
+class FundamentalOptimismConfig:
+    """
+    קונפיגורציה ל-Fundamental Optimism:
+
+    factors:
+        name → FundamentalFactorSpec
+
+    profile:
+        "default" / "defensive" / "aggressive" (הרעיון זהה לחלק 1).
+
+    source:
+        "default_profile", "manual", "ml_adapted", וכו'.
+    """
+
+    factors: Dict[str, FundamentalFactorSpec]
+    profile: str = "default"
+    source: str = "default_profile"
+
+    @classmethod
+    def from_simple_dict(
+        cls,
+        data: Dict[str, Dict[str, Any]],
+        *,
+        profile: str = "custom",
+        source: str = "manual",
+    ) -> "FundamentalOptimismConfig":
+        factors: Dict[str, FundamentalFactorSpec] = {}
+        for name, cfg in data.items():
+            try:
+                factors[name] = FundamentalFactorSpec(
+                    name=name,
+                    mode=str(cfg.get("mode", "range")).lower(),  # type: ignore[arg-type]
+                    hard_min=float(cfg["hard_min"]),
+                    optimal_min=float(cfg["optimal_min"]),
+                    optimal_max=float(cfg["optimal_max"]),
+                    hard_max=float(cfg["hard_max"]),
+                    weight=float(cfg.get("weight", 1.0)),
+                    shape=float(cfg.get("shape", 1.0)),
+                )
+            except Exception as e:
+                logger.warning("Invalid fundamental factor config for %s: %s", name, e)
+        return cls(factors=factors, profile=profile, source=source)
+
+    @classmethod
+    def default_for_profile(cls, profile: str = "default") -> "FundamentalOptimismConfig":
+        """
+        יוצר קונפיגורציה דיפולטית לפקטורים פנדומנטליים לפי פרופיל.
+
+        הגיון (גבוה-רמה, מבוסס פרקטיקה שלקרן איכות/ערך):
+
+        default:
+            - P/E: טווח "בריא" בערך [10,25], לא נמוך מדי (אולי מלכודת ערך),
+              ולא גבוה מדי (ציפיות קיצוניות).
+            - ROE: higher_better, טווח מועדף נגיד [8%,25%].
+            - Debt/Equity: lower_better, נמוך מ-0.5 עדיף, מעל 2 בעייתי.
+            - EPS Growth 5Y: higher_better, 0–5% סביר, 5–15% טוב, מעבר לזה סטוריישן.
+        defensive:
+            יותר דגש על:
+            - Debt נמוך,
+            - ROE יציב,
+            - P/E לא גבוה.
+
+        aggressive:
+            יותר דגש על:
+            - Growth (EPS, Revenue),
+            - ROE גבוה,
+            - פחות רגיש ל-P/E גבוה.
+
+        בהמשך:
+            - ניתן לעדכן את הטווחים מתוך היסטוריית אופטימיזציה (adapt_fundamentals_from_history).
+        """
+        p = profile.lower().strip()
+        if p not in {"default", "defensive", "aggressive"}:
+            p = "default"
+
+        if p == "defensive":
+            raw = {
+                "pe": {
+                    "mode": "range",
+                    "hard_min": 5.0,
+                    "optimal_min": 10.0,
+                    "optimal_max": 20.0,
+                    "hard_max": 30.0,
+                    "weight": 2.0,
+                    "shape": 1.0,
+                },
+                "roe": {
+                    "mode": "higher_better",
+                    "hard_min": 0.0,
+                    "optimal_min": 0.08,   # 8%
+                    "optimal_max": 0.20,   # 20%
+                    "hard_max": 0.35,
+                    "weight": 2.5,
+                    "shape": 1.0,
+                },
+                "debt_to_equity": {
+                    "mode": "lower_better",
+                    "hard_min": 0.0,
+                    "optimal_min": 0.0,
+                    "optimal_max": 0.5,
+                    "hard_max": 2.0,
+                    "weight": 2.5,
+                    "shape": 1.2,
+                },
+                "eps_growth_5y": {
+                    "mode": "higher_better",
+                    "hard_min": -0.10,
+                    "optimal_min": 0.02,
+                    "optimal_max": 0.10,
+                    "hard_max": 0.25,
+                    "weight": 1.5,
+                    "shape": 1.0,
+                },
+            }
+        elif p == "aggressive":
+            raw = {
+                "pe": {
+                    "mode": "range",
+                    "hard_min": 5.0,
+                    "optimal_min": 15.0,
+                    "optimal_max": 35.0,
+                    "hard_max": 60.0,
+                    "weight": 1.0,
+                    "shape": 1.0,
+                },
+                "roe": {
+                    "mode": "higher_better",
+                    "hard_min": 0.0,
+                    "optimal_min": 0.10,
+                    "optimal_max": 0.25,
+                    "hard_max": 0.45,
+                    "weight": 2.0,
+                    "shape": 1.0,
+                },
+                "debt_to_equity": {
+                    "mode": "lower_better",
+                    "hard_min": 0.0,
+                    "optimal_min": 0.0,
+                    "optimal_max": 1.0,
+                    "hard_max": 3.0,
+                    "weight": 1.5,
+                    "shape": 1.0,
+                },
+                "eps_growth_5y": {
+                    "mode": "higher_better",
+                    "hard_min": -0.20,
+                    "optimal_min": 0.05,
+                    "optimal_max": 0.20,
+                    "hard_max": 0.40,
+                    "weight": 2.5,
+                    "shape": 1.0,
+                },
+            }
+        else:  # default
+            raw = {
+                "pe": {
+                    "mode": "range",
+                    "hard_min": 5.0,
+                    "optimal_min": 10.0,
+                    "optimal_max": 25.0,
+                    "hard_max": 40.0,
+                    "weight": 1.5,
+                    "shape": 1.0,
+                },
+                "roe": {
+                    "mode": "higher_better",
+                    "hard_min": 0.0,
+                    "optimal_min": 0.08,
+                    "optimal_max": 0.20,
+                    "hard_max": 0.40,
+                    "weight": 2.0,
+                    "shape": 1.0,
+                },
+                "debt_to_equity": {
+                    "mode": "lower_better",
+                    "hard_min": 0.0,
+                    "optimal_min": 0.0,
+                    "optimal_max": 0.8,
+                    "hard_max": 2.5,
+                    "weight": 2.0,
+                    "shape": 1.0,
+                },
+                "eps_growth_5y": {
+                    "mode": "higher_better",
+                    "hard_min": -0.15,
+                    "optimal_min": 0.03,
+                    "optimal_max": 0.12,
+                    "hard_max": 0.30,
+                    "weight": 1.8,
+                    "shape": 1.0,
+                },
+            }
+
+        cfg = cls.from_simple_dict(raw, profile=p, source="default_profile")
+        logger.info("FundamentalOptimismConfig default_for_profile=%s created.", p)
+        return cfg
+
+    def score_vector(self, factors: Dict[str, Any]) -> Tuple[float, Dict[str, float]]:
+        """
+        מחשב ציון פנדומנטלי משוקלל (0–1) + ציוני per-factor.
+        """
+        if not self.factors:
+            return 0.0, {}
+
+        details: Dict[str, float] = {}
+        ws = 0.0
+        ssum = 0.0
+
+        for name, spec in self.factors.items():
+            v = factors.get(name)
+            s = spec.score(v)
+            details[name] = s
+            w = float(spec.weight)
+            ssum += s * w
+            ws += abs(w)
+
+        if ws <= 0:
+            total = 0.0
+        else:
+            total = ssum / ws
+
+        total = float(max(0.0, min(1.0, total)))
+        return total, details
+
+
+def apply_fundamental_optimism_scan(
+    df: pd.DataFrame,
+    cfg: FundamentalOptimismConfig,
+    *,
+    factor_cols_map: Optional[Dict[str, str]] = None,
+) -> pd.DataFrame:
+    """
+    מריץ Fundamental Optimism על DataFrame של זוגות.
+
+    df:
+        צפוי לכלול עמודות פקטורים פנדומנטליים ברמת זוג:
+        לדוגמה:
+            "pe", "roe", "debt_to_equity", "eps_growth_5y"
+
+        אם factor_cols_map לא None:
+            מיפוי בין שמות הפקטורים בקונפיג לשמות העמודות ב-df, לדוגמה:
+                {"pe": "pair_pe", "roe": "pair_roe"}
+
+    מוסיף:
+        - fundamental_score_total   (0–1)
+        - fundamental_score_details (dict per-factor)
+    """
+    if df is None or df.empty:
+        return df
+
+    df = df.copy()
+
+    if factor_cols_map is None:
+        factor_cols_map = {name: name for name in cfg.factors.keys()}
+
+    scores: List[float] = []
+    details_list: List[Dict[str, float]] = []
+
+    for _, row in df.iterrows():
+        fvals: Dict[str, Any] = {}
+        for name, spec in cfg.factors.items():
+            col = factor_cols_map.get(name, name)
+            fvals[name] = row.get(col)
+        total, d = cfg.score_vector(fvals)
+        scores.append(total)
+        details_list.append(d)
+
+    df["fundamental_score_total"] = scores
+    df["fundamental_score_details"] = details_list
+    return df
+
+
+def adapt_fundamentals_from_history(
+    cfg: FundamentalOptimismConfig,
+    df_history: pd.DataFrame,
+    *,
+    score_col: str = "Score",
+    top_quantile: float = 0.2,
+) -> FundamentalOptimismConfig:
+    """
+    Hook ל-ML/Meta-Optimization לחלק הפנדומנטלי:
+
+    df_history:
+        DataFrame של תוצאות (למשל opt_df) עם עמודת Score
+        ועמודות פנדומנטליות רלוונטיות (pe, roe, ...).
+
+    לוגיקה:
+        - לוקחים Top top_quantile לפי Score.
+        - לכל פקטור שקיים ב-cfg.factors וגם ב-df_history:
+            * אם mode="range" → optimal_min/max = q25/q75.
+            * אם higher/lower → מעדכנים רק optimal_max/min לפי quantiles, ומשאירים hard_min/max.
+    """
+    if df_history is None or df_history.empty or score_col not in df_history.columns:
+        return cfg
+
+    try:
+        df_sorted = df_history.sort_values(score_col, ascending=False)
+    except Exception:
+        df_sorted = df_history.copy()
+
+    k = max(10, int(len(df_sorted) * float(top_quantile)))
+    df_top = df_sorted.head(k)
+
+    new_factors: Dict[str, FundamentalFactorSpec] = {}
+    for name, spec in cfg.factors.items():
+        if name not in df_top.columns:
+            new_factors[name] = spec
+            continue
+
+        vals = pd.to_numeric(df_top[name], errors="coerce").dropna()
+        if vals.empty:
+            new_factors[name] = spec
+            continue
+
+        q25 = float(vals.quantile(0.25))
+        q75 = float(vals.quantile(0.75))
+
+        if spec.mode == "range":
+            new_factors[name] = FundamentalFactorSpec(
+                name=name,
+                mode=spec.mode,
+                hard_min=spec.hard_min,
+                optimal_min=q25,
+                optimal_max=q75,
+                hard_max=spec.hard_max,
+                weight=spec.weight,
+                shape=spec.shape,
+            )
+        elif spec.mode == "higher_better":
+            # נזיז את optimal_min/max כלפי ה-Top
+            new_factors[name] = FundamentalFactorSpec(
+                name=name,
+                mode=spec.mode,
+                hard_min=spec.hard_min,
+                optimal_min=q25,
+                optimal_max=q75,
+                hard_max=spec.hard_max,
+                weight=spec.weight,
+                shape=spec.shape,
+            )
+        else:  # lower_better
+            # ערכים טובים יותר נמצאים נמוך → נשתמש ב-q25 "למטה"
+            new_factors[name] = FundamentalFactorSpec(
+                name=name,
+                mode=spec.mode,
+                hard_min=spec.hard_min,
+                optimal_min=spec.optimal_min,
+                optimal_max=q75,
+                hard_max=spec.hard_max,
+                weight=spec.weight,
+                shape=spec.shape,
+            )
+
+    logger.info("FundamentalOptimismConfig adapted from history (top %.0f%%).", top_quantile * 100)
+    return FundamentalOptimismConfig(
+        factors=new_factors,
+        profile=cfg.profile,
+        source="ml_adapted",
+    )
+
+# =============================================
+# Part 3/5 — Macro Fit Optimism (HF-grade)
+# =============================================
+
+from typing import Literal
+
+MacroMode = Literal["range", "higher_better", "lower_better", "enum_regime", "beta_exposure"]
+
+
+@dataclass
+class MacroFactorSpec:
+    """
+    פקטור מאקרו לתזמון / התאמה ברמת זוג (Pair Macro Fit).
+
+    דוגמאות לפקטורים:
+        - global_regime      : 'Risk-On' / 'Risk-Off' / 'Neutral' / 'Crisis'
+        - local_regime       : משטר סקטור/מדינה, למשל 'China_slowdown', 'Tech_boom'
+        - level_rates        : רמת הריבית (למשל 10Y yield)
+        - slope_curve        : שיפוע עקום (10Y-2Y)
+        - level_vol          : VIX / Volatility
+        - credit_spread      : HY-OAS / IG-OAS
+        - beta_equity        : בטא למדד מניות (SPX/World)
+        - beta_rates         : בטא לריביות
+        - beta_vol           : בטא ל-VIX
+        - beta_fx            : בטא ל-FX index
+
+    mode:
+        "range"
+            → יש טווח אופטימלי [optimal_min, optimal_max].
+        "higher_better"
+            → ערך גבוה עד גבול מסוים → יותר טוב.
+        "lower_better"
+            → ערך נמוך עד גבול מסוים → יותר טוב.
+        "enum_regime"
+            → הערכת משטר לפי מילון enum_scores (מבוסס label string).
+        "beta_exposure"
+            → בטא מבוקשת; מתגמל בטא "מתאימה" לפרופיל המאקרו.
+
+    enum_scores:
+        משמש כאשר mode="enum_regime":
+            dict[label_lower → score 0–1], למשל:
+                {
+                  "risk-on": 0.8,
+                  "risk-off": 0.4,
+                  "crisis": 0.1,
+                  "neutral": 0.6,
+                }
+
+    horizon:
+        "short" / "medium" / "long" — למיפוי פקטורים שמתאימים לזמני אחזקה שונים.
+
+    style_tags:
+        רשימת תוויות שמסבירות לאיזה סוג אסטרטגיה הפקטור רלוונטי:
+        לדוגמה: ["mean_reversion", "carry", "trend"].
+
+    pair_side:
+        "long", "short", "both" — אם לפקטור יש משמעות שונה לסטרטגיה שמועדפת long/short.
+
+    Remarks:
+    --------
+    - בשילוב עם macro_context גלובלי, ניתן להכיל גם פקטורים שרלוונטיים לכל המערכת
+      (למשל yield_curve_slope, global_regime), וגם פקטורים ברמת זוג (row).
+    """
+
+    name: str
+    mode: MacroMode
+    hard_min: float = 0.0
+    optimal_min: float = 0.0
+    optimal_max: float = 0.0
+    hard_max: float = 0.0
+    weight: float = 1.0
+    shape: float = 1.0
+    enum_scores: Optional[Dict[str, float]] = None
+    horizon: str = "medium"
+    style_tags: Optional[List[str]] = None
+    pair_side: str = "both"  # "long", "short", "both"
+
+    def score(self, value: Any, *, beta_target: Optional[float] = None) -> float:
+        """
+        מחשב ציון 0–1 לערך של הפקטור.
+
+        עבור mode="beta_exposure":
+            value = beta בפועל, beta_target = רמת בטא רצויה (אם ידועה).
+        """
+        if self.mode == "enum_regime":
+            return self._score_enum_regime(value)
+
+        if self.mode == "beta_exposure":
+            return self._score_beta_exposure(value, beta_target=beta_target)
+
+        if value is None or not np.isfinite(value):
+            return 0.0
+
+        x = float(value)
+        hmin = float(self.hard_min)
+        omin = float(self.optimal_min)
+        omax = float(self.optimal_max)
+        hmax = float(self.hard_max)
+
+        if hmax <= hmin:
+            return 0.0
+
+        # מחוץ לגבולות קשיחים → 0
+        if x <= hmin or x >= hmax:
+            base = 0.0
+        elif self.mode == "range":
+            if omin <= x <= omax:
+                base = 1.0
+            elif hmin < x < omin:
+                base = (x - hmin) / (omin - hmin)
+            elif omax < x < hmax:
+                base = (hmax - x) / (hmax - omax)
+            else:
+                base = 0.0
+        elif self.mode == "higher_better":
+            if x <= hmin:
+                base = 0.0
+            elif x >= omax:
+                base = 1.0
+            elif x <= omin:
+                base = 0.5 * (x - hmin) / (omin - hmin)
+            else:  # בין omin ל-omax
+                base = 0.5 + 0.5 * (x - omin) / (omax - omin)
+        else:  # lower_better
+            if x >= hmax:
+                base = 0.0
+            elif x <= omin:
+                base = 1.0
+            elif x <= omax:
+                base = 0.5 + 0.5 * (omax - x) / (omax - omin)
+            else:
+                base = 0.5 * (hmax - x) / (hmax - omax)
+
+        base = max(0.0, min(1.0, base))
+        if self.shape != 1.0 and base > 0.0:
+            base = base ** float(self.shape)
+
+        return float(base)
+
+    def _score_enum_regime(self, value: Any) -> float:
+        """
+        mode="enum_regime" — ציון לפי תווית משטר (Risk-On/Off/Neutral/Crisis, וכו').
+        """
+        if not self.enum_scores:
+            return 0.5  # נייטרלי אם לא הוגדר כלום
+
+        try:
+            lab = str(value or "").lower().strip()
+        except Exception:
+            return 0.0
+
+        if not lab:
+            return 0.5
+
+        # match לפי substring (למשל 'risk-on', 'risk on', 'risk_on'...)
+        best = None
+        for key, val in self.enum_scores.items():
+            if key in lab:
+                best = float(val)
+                break
+
+        if best is None:
+            return 0.5
+        return float(np.clip(best, 0.0, 1.0))
+
+    def _score_beta_exposure(self, value: Any, *, beta_target: Optional[float]) -> float:
+        """
+        mode="beta_exposure" — ציון לפי מרחק מ-beta_target.
+
+        אם beta_target=None → מניחים יעד 0 (ניטרלי).
+
+        לוגיקה:
+            distance = |beta - beta_target|
+            distance 0 → score=1
+            אם distance >= hard_max → score=0
+            אחרת — יורד ליניארית ומתעגל לפי shape.
+        """
+        if value is None or not np.isfinite(value):
+            return 0.0
+
+        beta = float(value)
+        if beta_target is None:
+            beta_target = 0.0
+
+        d = abs(beta - float(beta_target))
+        threshold = float(self.hard_max) if self.hard_max > 0 else 2.0
+
+        if d >= threshold:
+            base = 0.0
+        else:
+            base = 1.0 - d / threshold
+
+        base = max(0.0, min(1.0, base))
+        if self.shape != 1.0 and base > 0.0:
+            base = base ** float(self.shape)
+
+        return float(base)
+
+
+@dataclass
+class MacroOptimismConfig:
+    """
+    קונפיגורציה ל-Macro Fit Optimism.
+
+    factors:
+        name → MacroFactorSpec
+    profile:
+        "default" / "defensive" / "aggressive"
+    source:
+        "default_profile" / "manual" / "ml_adapted"
+    """
+
+    factors: Dict[str, MacroFactorSpec]
+    profile: str = "default"
+    source: str = "default_profile"
+
+    @classmethod
+    def from_simple_dict(
+        cls,
+        data: Dict[str, Dict[str, Any]],
+        *,
+        profile: str = "custom",
+        source: str = "manual",
+    ) -> "MacroOptimismConfig":
+        factors: Dict[str, MacroFactorSpec] = {}
+        for name, cfg in data.items():
+            try:
+                enum_scores = cfg.get("enum_scores", None)
+                factors[name] = MacroFactorSpec(
+                    name=name,
+                    mode=str(cfg.get("mode", "range")).lower(),  # type: ignore[arg-type]
+                    hard_min=float(cfg.get("hard_min", 0.0)),
+                    optimal_min=float(cfg.get("optimal_min", 0.0)),
+                    optimal_max=float(cfg.get("optimal_max", 0.0)),
+                    hard_max=float(cfg.get("hard_max", 0.0)),
+                    weight=float(cfg.get("weight", 1.0)),
+                    shape=float(cfg.get("shape", 1.0)),
+                    enum_scores=enum_scores,
+                    horizon=str(cfg.get("horizon", "medium")),
+                    style_tags=list(cfg.get("style_tags", []) or []),
+                    pair_side=str(cfg.get("pair_side", "both")),
+                )
+            except Exception as e:
+                logger.warning("Invalid macro factor config for %s: %s", name, e)
+        return cls(factors=factors, profile=profile, source=source)
+
+    @classmethod
+    def default_for_profile(cls, profile: str = "default") -> "MacroOptimismConfig":
+        """
+        דיפולט מקצועי למאקרו, לפי פרופיל:
+
+        default:
+            - global_regime: אוהבים neutral / light risk-on.
+            - level_vol   : lower_better, טווח רצוי ~ [10,25] (VIX).
+            - credit_spread: lower_better, HY-OAS נמוך.
+            - beta_equity  : beta_exposure → יעד 0.5~0.8.
+            - beta_vol     : beta_exposure → יעד קרוב ל-0 (לא בטא גבוהה ל-Vol).
+
+        defensive:
+            - מעדיף regimes risk-off/defensive.
+            - מאוד עונש על vol גבוה / credit spreads גבוהים.
+            - beta_equity נמוך, beta_vol נמוך מאוד.
+
+        aggressive:
+            - מוטה risk-on, סובל קצת יותר vol/spreads,
+            - מעדיף beta_equity גבוה יותר (למשל 0.8–1.2).
+
+        בהמשך ניתן לעדכן את הטווחים מתוך adapt_macro_from_history.
+        """
+        p = profile.lower().strip()
+        if p not in {"default", "defensive", "aggressive"}:
+            p = "default"
+
+        if p == "defensive":
+            raw = {
+                "global_regime": {
+                    "mode": "enum_regime",
+                    "weight": 2.0,
+                    "shape": 1.0,
+                    "enum_scores": {
+                        "risk-off": 0.9,
+                        "defensive": 0.85,
+                        "neutral": 0.6,
+                        "risk-on": 0.4,
+                        "crisis": 0.3,
+                    },
+                    "horizon": "medium",
+                },
+                "level_vol": {
+                    "mode": "lower_better",
+                    "hard_min": 8.0,
+                    "optimal_min": 10.0,
+                    "optimal_max": 20.0,
+                    "hard_max": 35.0,
+                    "weight": 2.0,
+                    "shape": 1.2,
+                    "horizon": "short",
+                },
+                "credit_spread": {
+                    "mode": "lower_better",
+                    "hard_min": 0.0,
+                    "optimal_min": 0.0,
+                    "optimal_max": 0.04,
+                    "hard_max": 0.10,
+                    "weight": 2.0,
+                    "shape": 1.2,
+                    "horizon": "medium",
+                },
+                "beta_equity": {
+                    "mode": "beta_exposure",
+                    "hard_max": 1.0,   # threshold for distance
+                    "weight": 1.5,
+                    "shape": 1.0,
+                    "horizon": "medium",
+                },
+                "beta_vol": {
+                    "mode": "beta_exposure",
+                    "hard_max": 1.0,
+                    "weight": 2.0,
+                    "shape": 1.5,
+                    "horizon": "short",
+                },
+            }
+        elif p == "aggressive":
+            raw = {
+                "global_regime": {
+                    "mode": "enum_regime",
+                    "weight": 2.0,
+                    "shape": 1.0,
+                    "enum_scores": {
+                        "risk-on": 0.9,
+                        "neutral": 0.7,
+                        "defensive": 0.5,
+                        "risk-off": 0.4,
+                        "crisis": 0.2,
+                    },
+                    "horizon": "medium",
+                },
+                "level_vol": {
+                    "mode": "range",
+                    "hard_min": 8.0,
+                    "optimal_min": 12.0,
+                    "optimal_max": 25.0,
+                    "hard_max": 40.0,
+                    "weight": 1.5,
+                    "shape": 1.0,
+                    "horizon": "short",
+                },
+                "credit_spread": {
+                    "mode": "range",
+                    "hard_min": 0.02,
+                    "optimal_min": 0.03,
+                    "optimal_max": 0.06,
+                    "hard_max": 0.12,
+                    "weight": 1.0,
+                    "shape": 1.0,
+                    "horizon": "medium",
+                },
+                "beta_equity": {
+                    "mode": "beta_exposure",
+                    "hard_max": 1.5,
+                    "weight": 2.0,
+                    "shape": 1.0,
+                    "horizon": "medium",
+                },
+                "beta_vol": {
+                    "mode": "beta_exposure",
+                    "hard_max": 1.5,
+                    "weight": 1.5,
+                    "shape": 1.0,
+                    "horizon": "short",
+                },
+            }
+        else:  # default
+            raw = {
+                "global_regime": {
+                    "mode": "enum_regime",
+                    "weight": 1.5,
+                    "shape": 1.0,
+                    "enum_scores": {
+                        "risk-on": 0.75,
+                        "neutral": 0.7,
+                        "defensive": 0.65,
+                        "risk-off": 0.5,
+                        "crisis": 0.3,
+                    },
+                    "horizon": "medium",
+                },
+                "level_vol": {
+                    "mode": "lower_better",
+                    "hard_min": 8.0,
+                    "optimal_min": 10.0,
+                    "optimal_max": 22.0,
+                    "hard_max": 40.0,
+                    "weight": 1.5,
+                    "shape": 1.0,
+                    "horizon": "short",
+                },
+                "credit_spread": {
+                    "mode": "lower_better",
+                    "hard_min": 0.0,
+                    "optimal_min": 0.0,
+                    "optimal_max": 0.05,
+                    "hard_max": 0.12,
+                    "weight": 1.5,
+                    "shape": 1.0,
+                    "horizon": "medium",
+                },
+                "beta_equity": {
+                    "mode": "beta_exposure",
+                    "hard_max": 1.2,
+                    "weight": 1.8,
+                    "shape": 1.0,
+                    "horizon": "medium",
+                },
+                "beta_vol": {
+                    "mode": "beta_exposure",
+                    "hard_max": 1.2,
+                    "weight": 1.8,
+                    "shape": 1.2,
+                    "horizon": "short",
+                },
+            }
+
+        cfg = cls.from_simple_dict(raw, profile=p, source="default_profile")
+        logger.info("MacroOptimismConfig default_for_profile=%s created.", p)
+        return cfg
+
+    def score_vector(
+        self,
+        row: pd.Series,
+        *,
+        factor_cols_map: Optional[Dict[str, str]] = None,
+        macro_context: Optional[Dict[str, Any]] = None,
+        beta_targets: Optional[Dict[str, float]] = None,
+    ) -> Tuple[float, Dict[str, float]]:
+        """
+        מחשב ציון מאקרו משוקלל (0–1) + פירוט לכל פקטור.
+
+        row:
+            שורה אחת של df שמייצגת זוג (יכול להכיל בטאיות, labels וכו').
+        factor_cols_map:
+            how factor_name → column_name in df, למשל {"global_regime": "macro_regime"}.
+        macro_context:
+            קונטקסט גלובלי שנשמר ע"י macro_engine (לדוגמה st.session_state["macro_context"]),
+            יכול להכיל:
+                - "global_regime"
+                - "vix_level"
+                - "hy_oas"
+                וכו' — נעדיף להשתמש בו אם אין בערך בשורה.
+        beta_targets:
+            מילון factor_name → beta_target; אם לא קיים, משתמשים ב-Dfault 0 או 0.5 וכו'.
+        """
+        if not self.factors:
+            return 0.0, {}
+
+        if factor_cols_map is None:
+            factor_cols_map = {name: name for name in self.factors.keys()}
+        if macro_context is None:
+            macro_context = {}
+        if beta_targets is None:
+            beta_targets = {}
+
+        details: Dict[str, float] = {}
+        ws = 0.0
+        ssum = 0.0
+
+        for name, spec in self.factors.items():
+            col = factor_cols_map.get(name, name)
+
+            # value יכול להגיע מה-row או מה-macro_context
+            if col in row.index and row.get(col) is not None:
+                v = row.get(col)
+            else:
+                v = macro_context.get(name)
+
+            beta_target = beta_targets.get(name)
+            s = spec.score(v, beta_target=beta_target)
+            details[name] = s
+            w = float(spec.weight)
+            ssum += s * w
+            ws += abs(w)
+
+        if ws <= 0:
+            total = 0.0
+        else:
+            total = ssum / ws
+
+        total = float(max(0.0, min(1.0, total)))
+        return total, details
+
+
+def apply_macro_optimism_scan(
+    df: pd.DataFrame,
+    cfg: MacroOptimismConfig,
+    *,
+    factor_cols_map: Optional[Dict[str, str]] = None,
+    macro_context: Optional[Dict[str, Any]] = None,
+    beta_targets: Optional[Dict[str, float]] = None,
+) -> pd.DataFrame:
+    """
+    מוסיף לכל שורה:
+        - macro_score_total
+        - macro_score_details
+
+    משלב מידע:
+        - ברמת pair (row), מתוך df.
+        - ברמת macro_context גלובלי (למשל st.session_state["macro_context"]).
+    """
+    if df is None or df.empty:
+        return df
+
+    df = df.copy()
+    scores: List[float] = []
+    details_list: List[Dict[str, float]] = []
+
+    if macro_context is None:
+        macro_context = {}
+        # אם שמרת macro_context ב-session → נשתמש בו
+        try:
+            macro_context = st.session_state.get("macro_context", {}) or {}
+        except Exception:
+            macro_context = {}
+
+    for _, row in df.iterrows():
+        total, d = cfg.score_vector(
+            row,
+            factor_cols_map=factor_cols_map,
+            macro_context=macro_context,
+            beta_targets=beta_targets,
+        )
+        scores.append(total)
+        details_list.append(d)
+
+    df["macro_score_total"] = scores
+    df["macro_score_details"] = details_list
+    return df
+
+
+def adapt_macro_from_history(
+    cfg: MacroOptimismConfig,
+    df_history: pd.DataFrame,
+    *,
+    score_col: str = "Score",
+    top_quantile: float = 0.2,
+) -> MacroOptimismConfig:
+    """
+    Hook ל-ML/Meta-Optimization לחלק המאקרו:
+
+    df_history:
+        DataFrame של ריצות (למשל opt_df) עם Score
+        ועמודות מאקרו רלוונטיות (global_regime, level_vol, credit_spread, beta_equity, ...).
+
+    לוגיקה:
+        - לוקחים Top-X% לפי Score.
+        - עבור factors מספריים:
+            * mode="range"/"higher"/"lower"/"beta_exposure" → מעדכנים optimal_min/max לפי q25/q75.
+        - עבור enum_regime:
+            * בונים enum_scores לפי תדירויות של labels בין הטובים.
+    """
+    if df_history is None or df_history.empty or score_col not in df_history.columns:
+        return cfg
+
+    try:
+        df_sorted = df_history.sort_values(score_col, ascending=False)
+    except Exception:
+        df_sorted = df_history.copy()
+
+    k = max(10, int(len(df_sorted) * float(top_quantile)))
+    df_top = df_sorted.head(k)
+
+    new_factors: Dict[str, MacroFactorSpec] = {}
+
+    for name, spec in cfg.factors.items():
+        if spec.mode == "enum_regime":
+            col = name
+            if col not in df_top.columns:
+                new_factors[name] = spec
+                continue
+            labs = df_top[col].astype(str).str.lower()
+            counts = labs.value_counts(normalize=True)
+            enum_scores: Dict[str, float] = {}
+            for lab, freq in counts.items():
+                # regimes שהופיעו יותר ב-top יקבלו ציון גבוה יותר
+                enum_scores[lab] = float(np.clip(freq * 1.2, 0.1, 1.0))
+            new_factors[name] = MacroFactorSpec(
+                name=name,
+                mode=spec.mode,
+                hard_min=spec.hard_min,
+                optimal_min=spec.optimal_min,
+                optimal_max=spec.optimal_max,
+                hard_max=spec.hard_max,
+                weight=spec.weight,
+                shape=spec.shape,
+                enum_scores=enum_scores,
+                horizon=spec.horizon,
+                style_tags=spec.style_tags,
+                pair_side=spec.pair_side,
+            )
+        else:
+            col = name
+            if col not in df_top.columns:
+                new_factors[name] = spec
+                continue
+            vals = pd.to_numeric(df_top[col], errors="coerce").dropna()
+            if vals.empty:
+                new_factors[name] = spec
+                continue
+            q25 = float(vals.quantile(0.25))
+            q75 = float(vals.quantile(0.75))
+            new_factors[name] = MacroFactorSpec(
+                name=name,
+                mode=spec.mode,
+                hard_min=spec.hard_min,
+                optimal_min=q25,
+                optimal_max=q75,
+                hard_max=spec.hard_max,
+                weight=spec.weight,
+                shape=spec.shape,
+                enum_scores=spec.enum_scores,
+                horizon=spec.horizon,
+                style_tags=spec.style_tags,
+                pair_side=spec.pair_side,
+            )
+
+    logger.info("MacroOptimismConfig adapted from history (top %.0f%%).", top_quantile * 100)
+    return MacroOptimismConfig(
+        factors=new_factors,
+        profile=cfg.profile,
+        source="ml_adapted",
+    )
+
+# =============================================
+# Part 4/5 — Metrics / Performance Optimism (HF-grade)
+# =============================================
+
+MetricsMode = Literal["range", "higher_better", "lower_better"]
+
+@dataclass
+class MetricsFactorSpec:
+    """
+    פקטור ביצועים / סיכון אחד, לדוגמה:
+
+    name:
+        "Sharpe", "Sortino", "Calmar", "Drawdown", "TailRisk",
+        "WinRate", "DSR", "Trades", "Skew", "Kurtosis",
+        "MaxConsecLosses", "UlcerIndex", "ExposurePct", "AvgBarsHeld", "Profit".
+
+    mode:
+        "range"
+            → יש טווח אופטימלי (Sharpe 1–3, WinRate 0.5–0.7 וכו').
+        "higher_better"
+            → ערך גבוה יותר טוב (Sharpe, Sortino, Calmar, Profit, Trades).
+        "lower_better"
+            → ערך נמוך יותר טוב (Drawdown, TailRisk, UlcerIndex, MaxConsecLosses).
+
+    hard_min / hard_max:
+        גבולות קשיחים; מעבר אליהם → ציון 0.
+    optimal_min / optimal_max:
+        טווח "Sweet spot" שבו הציון ≈ 1.
+
+    weight:
+        משקל הפקטור בציון metrics הכולל.
+    shape:
+        1.0 = ליניארי, >1 = ירידה/עלייה חדה יותר (פחות סובלני),
+        <1  = רכה יותר (סובלני יותר).
+
+    horizon:
+        "short" / "medium" / "long" — אופציונלי, מכוון לחיבור עם אסטרטגיה רב-אופקית.
+    style_tags:
+        למשל: ["risk", "tail", "path", "capacity"] — מאפיינים את סוג הפקטור.
+    """
+
+    name: str
+    mode: MetricsMode
+    hard_min: float
+    optimal_min: float
+    optimal_max: float
+    hard_max: float
+    weight: float = 1.0
+    shape: float = 1.0
+    horizon: str = "medium"
+    style_tags: Optional[List[str]] = None
+
+    def score(self, value: Optional[float]) -> float:
+        if value is None or not np.isfinite(value):
+            return 0.0
+
+        x = float(value)
+        hmin = float(self.hard_min)
+        omin = float(self.optimal_min)
+        omax = float(self.optimal_max)
+        hmax = float(self.hard_max)
+
+        if hmax <= hmin:
+            return 0.0
+
+        if self.mode == "higher_better":
+            if x <= hmin:
+                base = 0.0
+            elif x >= omax:
+                base = 1.0
+            elif x <= omin:
+                base = 0.5 * (x - hmin) / (omin - hmin)
+            else:  # בין omin ל-omax
+                base = 0.5 + 0.5 * (x - omin) / (omax - omin)
+        elif self.mode == "lower_better":
+            if x >= hmax:
+                base = 0.0
+            elif x <= omin:
+                base = 1.0
+            elif x <= omax:
+                base = 0.5 + 0.5 * (omax - x) / (omax - omin)
+            else:  # בין omax ל-hmax
+                base = 0.5 * (hmax - x) / (hmax - omax)
+        else:  # "range"
+            if x <= hmin or x >= hmax:
+                base = 0.0
+            elif omin <= x <= omax:
+                base = 1.0
+            elif hmin < x < omin:
+                base = (x - hmin) / (omin - hmin)
+            elif omax < x < hmax:
+                base = (hmax - x) / (hmax - omax)
+            else:
+                base = 0.0
+
+        base = max(0.0, min(1.0, base))
+        if self.shape != 1.0 and base > 0.0:
+            base = base ** float(self.shape)
+
+        return float(base)
+
+
+@dataclass
+class MetricsOptimismConfig:
+    """
+    קונפיגורציה לציון Metrics Optimism.
+
+    factors:
+        שם → MetricsFactorSpec (Sharpe/Sortino/DD/WinRate/DSR/...).
+
+    profile:
+        "default" / "defensive" / "aggressive"
+    source:
+        "default_profile" / "manual" / "ml_adapted"
+    """
+
+    factors: Dict[str, MetricsFactorSpec]
+    profile: str = "default"
+    source: str = "default_profile"
+
+    @classmethod
+    def from_simple_dict(
+        cls,
+        data: Dict[str, Dict[str, Any]],
+        *,
+        profile: str = "custom",
+        source: str = "manual",
+    ) -> "MetricsOptimismConfig":
+        factors: Dict[str, MetricsFactorSpec] = {}
+        for name, cfg in data.items():
+            try:
+                factors[name] = MetricsFactorSpec(
+                    name=name,
+                    mode=str(cfg.get("mode", "range")).lower(),  # type: ignore[arg-type]
+                    hard_min=float(cfg["hard_min"]),
+                    optimal_min=float(cfg["optimal_min"]),
+                    optimal_max=float(cfg["optimal_max"]),
+                    hard_max=float(cfg["hard_max"]),
+                    weight=float(cfg.get("weight", 1.0)),
+                    shape=float(cfg.get("shape", 1.0)),
+                    horizon=str(cfg.get("horizon", "medium")),
+                    style_tags=list(cfg.get("style_tags", []) or []),
+                )
+            except Exception as e:
+                logger.warning("Invalid metrics factor config for %s: %s", name, e)
+        return cls(factors=factors, profile=profile, source=source)
+
+    @classmethod
+    def default_for_profile(cls, profile: str = "default") -> "MetricsOptimismConfig":
+        """
+        דיפולט מקצועי לציון Metrics לפי פרופיל:
+
+        default:
+            - Sharpe          : range [0.7, 2.5]
+            - Drawdown        : lower_better [0, 0.20]
+            - WinRate         : higher_better [0.48, 0.68]
+            - DSR             : higher_better [0.0, 2.5]
+            - Trades          : higher_better [15, 300]
+            - TailRisk        : lower_better [0, 0.20] (CVaR / ES / Worst-Case)
+            - MaxConsecLosses : lower_better [0, 6]
+            - UlcerIndex      : lower_better [0, 0.10] (path risk)
+            - ExposurePct     : range [0.20, 0.70]
+            - Profit          : higher_better (scaled בינארי, נותן בונוס).
+
+        defensive:
+            - יותר משקל ל-DD, TailRisk, UlcerIndex.
+            - דרישה גבוהה יותר ל-DSR / Sharpe.
+
+        aggressive:
+            - יותר משקל ל-Profit, Sharpe, Trades.
+            - סובל קצת יותר DD/Tail, אבל עדיין מעניש קצוות.
+
+        שים לב:
+        -------
+        - אם df לא מכיל חלק מהעמודות — פשוט יקבל 0.0 לפקטור הזה (ולא ישבור).
+        - אפשר לעדכן את הטווחים מתוך adapt_metrics_from_history (בהמשך).
+        """
+        p = profile.lower().strip()
+        if p not in {"default", "defensive", "aggressive"}:
+            p = "default"
+
+        if p == "defensive":
+            raw = {
+                "Sharpe": {
+                    "mode": "range",
+                    "hard_min": 0.0,
+                    "optimal_min": 1.0,
+                    "optimal_max": 2.5,
+                    "hard_max": 4.0,
+                    "weight": 2.5,
+                    "shape": 1.0,
+                    "horizon": "medium",
+                },
+                "Drawdown": {
+                    "mode": "lower_better",
+                    "hard_min": 0.0,
+                    "optimal_min": 0.0,
+                    "optimal_max": 0.15,
+                    "hard_max": 0.35,
+                    "weight": 3.0,
+                    "shape": 1.3,
+                    "horizon": "medium",
+                    "style_tags": ["risk", "tail"],
+                },
+                "TailRisk": {
+                    "mode": "lower_better",
+                    "hard_min": 0.0,
+                    "optimal_min": 0.0,
+                    "optimal_max": 0.20,
+                    "hard_max": 0.50,
+                    "weight": 2.5,
+                    "shape": 1.3,
+                    "horizon": "medium",
+                    "style_tags": ["tail"],
+                },
+                "WinRate": {
+                    "mode": "higher_better",
+                    "hard_min": 0.40,
+                    "optimal_min": 0.50,
+                    "optimal_max": 0.72,
+                    "hard_max": 0.90,
+                    "weight": 1.8,
+                    "shape": 1.0,
+                    "horizon": "medium",
+                },
+                "DSR": {
+                    "mode": "higher_better",
+                    "hard_min": -1.0,
+                    "optimal_min": 0.0,
+                    "optimal_max": 2.5,
+                    "hard_max": 4.0,
+                    "weight": 2.5,
+                    "shape": 1.0,
+                    "horizon": "long",
+                    "style_tags": ["quality"],
+                },
+                "Trades": {
+                    "mode": "higher_better",
+                    "hard_min": 10,
+                    "optimal_min": 30,
+                    "optimal_max": 250,
+                    "hard_max": 800,
+                    "weight": 1.5,
+                    "shape": 1.0,
+                    "horizon": "long",
+                },
+                "MaxConsecLosses": {
+                    "mode": "lower_better",
+                    "hard_min": 0,
+                    "optimal_min": 0,
+                    "optimal_max": 5,
+                    "hard_max": 15,
+                    "weight": 1.8,
+                    "shape": 1.2,
+                    "horizon": "medium",
+                    "style_tags": ["path"],
+                },
+                "UlcerIndex": {
+                    "mode": "lower_better",
+                    "hard_min": 0.0,
+                    "optimal_min": 0.0,
+                    "optimal_max": 0.08,
+                    "hard_max": 0.25,
+                    "weight": 2.0,
+                    "shape": 1.2,
+                    "horizon": "long",
+                    "style_tags": ["path", "risk"],
+                },
+                "ExposurePct": {
+                    "mode": "range",
+                    "hard_min": 0.0,
+                    "optimal_min": 0.25,
+                    "optimal_max": 0.60,
+                    "hard_max": 1.0,
+                    "weight": 1.0,
+                    "shape": 1.0,
+                    "horizon": "medium",
+                    "style_tags": ["capacity"],
+                },
+                "Profit": {
+                    "mode": "higher_better",
+                    "hard_min": -1e6,
+                    "optimal_min": 0.0,
+                    "optimal_max": 1e5,
+                    "hard_max": 5e5,
+                    "weight": 1.5,
+                    "shape": 1.0,
+                    "horizon": "long",
+                    "style_tags": ["pnl"],
+                },
+            }
+        elif p == "aggressive":
+            raw = {
+                "Sharpe": {
+                    "mode": "higher_better",
+                    "hard_min": 0.0,
+                    "optimal_min": 1.0,
+                    "optimal_max": 3.0,
+                    "hard_max": 5.0,
+                    "weight": 2.8,
+                    "shape": 1.0,
+                    "horizon": "medium",
+                },
+                "Drawdown": {
+                    "mode": "lower_better",
+                    "hard_min": 0.0,
+                    "optimal_min": 0.0,
+                    "optimal_max": 0.25,
+                    "hard_max": 0.50,
+                    "weight": 2.0,
+                    "shape": 1.0,
+                    "horizon": "medium",
+                    "style_tags": ["risk"],
+                },
+                "TailRisk": {
+                    "mode": "lower_better",
+                    "hard_min": 0.0,
+                    "optimal_min": 0.0,
+                    "optimal_max": 0.25,
+                    "hard_max": 0.60,
+                    "weight": 1.8,
+                    "shape": 1.0,
+                    "horizon": "medium",
+                    "style_tags": ["tail"],
+                },
+                "WinRate": {
+                    "mode": "range",
+                    "hard_min": 0.30,
+                    "optimal_min": 0.45,
+                    "optimal_max": 0.65,
+                    "hard_max": 0.85,
+                    "weight": 1.2,
+                    "shape": 1.0,
+                    "horizon": "medium",
+                },
+                "DSR": {
+                    "mode": "higher_better",
+                    "hard_min": -1.0,
+                    "optimal_min": 0.5,
+                    "optimal_max": 3.0,
+                    "hard_max": 4.5,
+                    "weight": 2.5,
+                    "shape": 1.0,
+                    "horizon": "long",
+                    "style_tags": ["quality"],
+                },
+                "Trades": {
+                    "mode": "higher_better",
+                    "hard_min": 15,
+                    "optimal_min": 40,
+                    "optimal_max": 450,
+                    "hard_max": 1500,
+                    "weight": 1.8,
+                    "shape": 1.0,
+                    "horizon": "long",
+                },
+                "MaxConsecLosses": {
+                    "mode": "lower_better",
+                    "hard_min": 0,
+                    "optimal_min": 0,
+                    "optimal_max": 7,
+                    "hard_max": 20,
+                    "weight": 1.5,
+                    "shape": 1.1,
+                    "horizon": "medium",
+                    "style_tags": ["path"],
+                },
+                "UlcerIndex": {
+                    "mode": "lower_better",
+                    "hard_min": 0.0,
+                    "optimal_min": 0.0,
+                    "optimal_max": 0.12,
+                    "hard_max": 0.30,
+                    "weight": 1.5,
+                    "shape": 1.1,
+                    "horizon": "long",
+                    "style_tags": ["path", "risk"],
+                },
+                "ExposurePct": {
+                    "mode": "range",
+                    "hard_min": 0.0,
+                    "optimal_min": 0.30,
+                    "optimal_max": 0.75,
+                    "hard_max": 1.0,
+                    "weight": 1.2,
+                    "shape": 1.0,
+                    "horizon": "medium",
+                    "style_tags": ["capacity"],
+                },
+                "Profit": {
+                    "mode": "higher_better",
+                    "hard_min": -1e6,
+                    "optimal_min": 2e4,
+                    "optimal_max": 2e5,
+                    "hard_max": 1e6,
+                    "weight": 2.0,
+                    "shape": 1.0,
+                    "horizon": "long",
+                    "style_tags": ["pnl"],
+                },
+            }
+        else:  # default
+            raw = {
+                "Sharpe": {
+                    "mode": "range",
+                    "hard_min": 0.0,
+                    "optimal_min": 0.7,
+                    "optimal_max": 2.5,
+                    "hard_max": 4.0,
+                    "weight": 2.1,
+                    "shape": 1.0,
+                    "horizon": "medium",
+                },
+                "Drawdown": {
+                    "mode": "lower_better",
+                    "hard_min": 0.0,
+                    "optimal_min": 0.0,
+                    "optimal_max": 0.20,
+                    "hard_max": 0.40,
+                    "weight": 2.3,
+                    "shape": 1.1,
+                    "horizon": "medium",
+                    "style_tags": ["risk", "tail"],
+                },
+                "TailRisk": {
+                    "mode": "lower_better",
+                    "hard_min": 0.0,
+                    "optimal_min": 0.0,
+                    "optimal_max": 0.22,
+                    "hard_max": 0.55,
+                    "weight": 2.0,
+                    "shape": 1.1,
+                    "horizon": "medium",
+                    "style_tags": ["tail"],
+                },
+                "WinRate": {
+                    "mode": "higher_better",
+                    "hard_min": 0.40,
+                    "optimal_min": 0.48,
+                    "optimal_max": 0.68,
+                    "hard_max": 0.90,
+                    "weight": 1.6,
+                    "shape": 1.0,
+                    "horizon": "medium",
+                },
+                "DSR": {
+                    "mode": "higher_better",
+                    "hard_min": -1.0,
+                    "optimal_min": 0.0,
+                    "optimal_max": 2.5,
+                    "hard_max": 4.0,
+                    "weight": 2.0,
+                    "shape": 1.0,
+                    "horizon": "long",
+                    "style_tags": ["quality"],
+                },
+                "Trades": {
+                    "mode": "higher_better",
+                    "hard_min": 8,
+                    "optimal_min": 20,
+                    "optimal_max": 300,
+                    "hard_max": 1200,
+                    "weight": 1.4,
+                    "shape": 1.0,
+                    "horizon": "long",
+                },
+                "MaxConsecLosses": {
+                    "mode": "lower_better",
+                    "hard_min": 0,
+                    "optimal_min": 0,
+                    "optimal_max": 6,
+                    "hard_max": 18,
+                    "weight": 1.6,
+                    "shape": 1.15,
+                    "horizon": "medium",
+                    "style_tags": ["path"],
+                },
+                "UlcerIndex": {
+                    "mode": "lower_better",
+                    "hard_min": 0.0,
+                    "optimal_min": 0.0,
+                    "optimal_max": 0.10,
+                    "hard_max": 0.28,
+                    "weight": 1.8,
+                    "shape": 1.1,
+                    "horizon": "long",
+                    "style_tags": ["path", "risk"],
+                },
+                "ExposurePct": {
+                    "mode": "range",
+                    "hard_min": 0.0,
+                    "optimal_min": 0.20,
+                    "optimal_max": 0.70,
+                    "hard_max": 1.0,
+                    "weight": 1.1,
+                    "shape": 1.0,
+                    "horizon": "medium",
+                    "style_tags": ["capacity"],
+                },
+                "Profit": {
+                    "mode": "higher_better",
+                    "hard_min": -1e6,
+                    "optimal_min": 1e4,
+                    "optimal_max": 1.5e5,
+                    "hard_max": 8e5,
+                    "weight": 1.7,
+                    "shape": 1.0,
+                    "horizon": "long",
+                    "style_tags": ["pnl"],
+                },
+            }
+
+        cfg = cls.from_simple_dict(raw, profile=p, source="default_profile")
+        logger.info("MetricsOptimismConfig default_for_profile=%s created.", p)
+        return cfg
+
+    def score_vector(
+        self,
+        row: pd.Series,
+        factor_cols_map: Optional[Dict[str, str]] = None,
+    ) -> Tuple[float, Dict[str, float]]:
+        """
+        מחשב ציון metrics משוקלל (0–1) + ציונים per-factor.
+
+        row:
+            שורה אחת של df שמכילה עמודות Sharpe/Drawdown/WinRate/DSR/Trades וכו'.
+        factor_cols_map:
+            מיפוי בין שם הפקטור בקונפיג לבין שם העמודה ב-df, לדוגמה:
+            {"Sharpe": "Sharpe", "Drawdown": "Drawdown_pct"}.
+        """
+        if not self.factors:
+            return 0.0, {}
+
+        if factor_cols_map is None:
+            factor_cols_map = {name: name for name in self.factors.keys()}
+
+        details: Dict[str, float] = {}
+        ws = 0.0
+        ssum = 0.0
+
+        for name, spec in self.factors.items():
+            col = factor_cols_map.get(name, name)
+            v = row.get(col)
+            s = spec.score(v)
+            details[name] = s
+            w = float(spec.weight)
+            ssum += s * w
+            ws += abs(w)
+
+        if ws <= 0:
+            total = 0.0
+        else:
+            total = ssum / ws
+
+        total = float(max(0.0, min(1.0, total)))
+        return total, details
+
+
+def apply_metrics_optimism_scan(
+    df: pd.DataFrame,
+    cfg: MetricsOptimismConfig,
+    *,
+    factor_cols_map: Optional[Dict[str, str]] = None,
+) -> pd.DataFrame:
+    """
+    מוסיף לכל שורה:
+        - metrics_score_total
+        - metrics_score_details
+
+    df צפוי להכיל:
+        Sharpe, Drawdown, TailRisk, WinRate, DSR, Trades, MaxConsecLosses,
+        UlcerIndex, ExposurePct, Profit (לפי config).
+    """
+    if df is None or df.empty:
+        return df
+
+    df = df.copy()
+    scores: List[float] = []
+    details_list: List[Dict[str, float]] = []
+
+    for _, row in df.iterrows():
+        total, det = cfg.score_vector(row, factor_cols_map=factor_cols_map)
+        scores.append(total)
+        details_list.append(det)
+
+    df["metrics_score_total"] = scores
+    df["metrics_score_details"] = details_list
+    return df
+
+
+def adapt_metrics_from_history(
+    cfg: MetricsOptimismConfig,
+    df_history: pd.DataFrame,
+    *,
+    score_col: str = "Score",
+    top_quantile: float = 0.2,
+) -> MetricsOptimismConfig:
+    """
+    Hook ל-ML/Meta-Optimization לחלק metrics:
+
+    df_history:
+        DataFrame של opt_df / backtests עם Score
+        ועמודות metrics (Sharpe, Drawdown, TailRisk, WinRate, DSR, Trades וכו').
+
+    לוגיקה:
+        - לוקחים Top-X% לפי Score.
+        - עבור כל factor מספרי שקיים ב-df_history:
+            * mode="range","higher_better","lower_better" → מעדכנים optimal_min/max לפי q25/q75.
+    """
+    if df_history is None or df_history.empty or score_col not in df_history.columns:
+        return cfg
+
+    try:
+        df_sorted = df_history.sort_values(score_col, ascending=False)
+    except Exception:
+        df_sorted = df_history.copy()
+
+    k = max(10, int(len(df_sorted) * float(top_quantile)))
+    df_top = df_sorted.head(k)
+
+    new_factors: Dict[str, MetricsFactorSpec] = {}
+
+    for name, spec in cfg.factors.items():
+        col = name
+        if col not in df_top.columns:
+            new_factors[name] = spec
+            continue
+
+        vals = pd.to_numeric(df_top[col], errors="coerce").dropna()
+        if vals.empty:
+            new_factors[name] = spec
+            continue
+
+        q25 = float(vals.quantile(0.25))
+        q75 = float(vals.quantile(0.75))
+
+        new_factors[name] = MetricsFactorSpec(
+            name=name,
+            mode=spec.mode,
+            hard_min=spec.hard_min,
+            optimal_min=q25,
+            optimal_max=q75,
+            hard_max=spec.hard_max,
+            weight=spec.weight,
+            shape=spec.shape,
+            horizon=spec.horizon,
+            style_tags=spec.style_tags,
+        )
+
+    logger.info("MetricsOptimismConfig adapted from history (top %.0f%%).", top_quantile * 100)
+    return MetricsOptimismConfig(
+        factors=new_factors,
+        profile=cfg.profile,
+        source="ml_adapted",
+    )
+ 
+ # =============================================
+# Part 5/5 — Composite Smart Score + Smart Scan UI (HF-grade)
+# =============================================
+from datetime import datetime  # לוודא שיש
+
+def compute_composite_smart_score(
+    df: pd.DataFrame,
+    *,
+    profile: str = "default",
+    w_param: float = 0.30,
+    w_fund: float = 0.25,
+    w_macro: float = 0.15,
+    w_metrics: float = 0.30,
+) -> pd.DataFrame:
+    """
+    Composite Smart Score — מחבר 4 שכבות לציון אחד:
+
+        - param_optimism_score_total
+        - fundamental_score_total
+        - macro_score_total
+        - metrics_score_total
+
+    המשקולות יכולות להגיע מה-UI או מברירת מחדל לפי profile.
+
+    השכבות הן תמיד 0–1, ולכן composite גם 0–1.
+    """
+    if df is None or df.empty:
+        return df
+
+    df = df.copy()
+    p = profile.lower().strip()
+    if p not in {"default", "defensive", "aggressive"}:
+        p = "default"
+
+    # אם המשתמש לא שינה משקולות, נדרוס לפי פרופיל
+    default_tuple = (0.30, 0.25, 0.15, 0.30)
+    if (w_param, w_fund, w_macro, w_metrics) == default_tuple:
+        if p == "defensive":
+            w_param, w_fund, w_macro, w_metrics = 0.20, 0.30, 0.20, 0.30
+        elif p == "aggressive":
+            w_param, w_fund, w_macro, w_metrics = 0.35, 0.20, 0.10, 0.35
+
+    def _get(name: str) -> np.ndarray:
+        if name not in df.columns:
+            return np.zeros(len(df))
+        arr = pd.to_numeric(df[name], errors="coerce").fillna(0.0).to_numpy()
+        return np.clip(arr, 0.0, 1.0)
+
+    par = _get("param_optimism_score_total")
+    fun = _get("fundamental_score_total")
+    mac = _get("macro_score_total")
+    met = _get("metrics_score_total")
+
+    w_param = max(0.0, float(w_param))
+    w_fund = max(0.0, float(w_fund))
+    w_macro = max(0.0, float(w_macro))
+    w_metrics = max(0.0, float(w_metrics))
+    total_w = w_param + w_fund + w_macro + w_metrics
+    if total_w <= 0:
+        w_param = 1.0
+        total_w = 1.0
+
+    comp = (w_param * par + w_fund * fun + w_macro * mac + w_metrics * met) / total_w
+    df["smart_score_total"] = np.clip(comp, 0.0, 1.0)
+
+    # נשמור גם את המשקולות לצורך דוחות/אודיט
+    df.attrs["smart_layer_weights"] = {
+        "param": w_param,
+        "fundamental": w_fund,
+        "macro": w_macro,
+        "metrics": w_metrics,
+        "profile": p,
+    }
+    return df
+
+
+def render_smart_scan_tab(
+    app_ctx: Any,
+    feature_flags: Any,
+    nav_payload: Optional[Dict[str, Any]] = None,
+) -> None:
+    """
+    🔍 Smart Scan Tab — Orchestrator מלא.
+
+    מה הטאב הזה עושה:
+    -------------------
+    1. טוען Universe של זוגות:
+       - אם יש DashboardService.get_smart_scan_universe(ctx) → משתמש בו.
+       - אחרת נותן Demo universe.
+
+    2. מנסה לטעון:
+       - Fair Value data:
+           * אוטומטי (service.get_fair_value_snapshot / macro_engine וכו') אם קיים.
+           * או CSV ידני.
+       - Fundamentals:
+           * service.get_fundamentals_universe / SQL אם קיים.
+           * או CSV ידני.
+       - Metrics:
+           * service.get_pair_metrics / backtest אם קיים.
+           * או CSV ידני.
+       - Param score file (אופציונלי).
+
+    3. בונה קונפיגורציה לכל שכבה:
+       - ParamOptimismConfig.default_for_profile(profile)
+       - FundamentalOptimismConfig.default_for_profile(profile)
+       - MacroOptimismConfig.default_for_profile(profile)
+       - MetricsOptimismConfig.default_for_profile(profile)
+
+    4. מריץ 4 שכבות:
+       - apply_param_optimism_scan
+       - apply_fundamental_optimism_scan
+       - apply_macro_optimism_scan
+       - apply_metrics_optimism_scan
+
+    5. מחבר הכל ל-smart_score_total:
+       - compute_composite_smart_score
+
+    6. מציג:
+       - טבלה מדורגת לפי מטריקה נבחרת (smart_score_total / שכבה אחרת).
+       - דיאגנוסטיקה מהירה לכל שכבה.
+       - כפתורי פעולה:
+         * עדכון selected_pair
+         * יצירת opt_batch_pairs
+         * opt_pair_status עם hints לטאב האופטימיזציה.
+
+    7. שומר ל-session_state:
+       - smart_scan_results
+       - smart_scan_last_meta
+       - selected_pair
+       - opt_batch_pairs
+       - opt_pair_status
+    """
+    st.markdown("### 🔍 Smart Scan — Composite HF-grade Scanner")
+
+    # 1) Service + Context
+    try:
+        service: DashboardService = create_dashboard_service()
+        ctx: DashboardContext = build_default_dashboard_context()
+    except Exception:
+        service = None
+        ctx = None
+
+    profile = str(st.session_state.get("opt_profile", "default"))
+    env = getattr(ctx, "env", "dev") if ctx is not None else "dev"
+    start_date = getattr(ctx, "start_date", None)
+    end_date = getattr(ctx, "end_date", None)
+
+    col_hdr1, col_hdr2, col_hdr3 = st.columns(3)
+    with col_hdr1:
+        st.caption(
+            f"Env=`{env}` | Profile=`{profile}` | "
+            f"Dates=`{start_date}` → `{end_date}`"
+        )
+    with col_hdr2:
+        auto_link = bool(st.session_state.get("smart_scan_auto_link", True))
+        st.checkbox(
+            "Auto-select top pair",
+            value=auto_link,
+            key="smart_scan_auto_link",
+            help="כשפעיל, סורק יבחר את הזוג המוביל וישלח אותו לטאבים אחרים.",
+        )
+    with col_hdr3:
+        st.caption("Smart Scan מחבר Param / Fundamental / Macro / Metrics → ציון אחד [0–1].")
+
+    st.markdown("---")
+
+    # 2) Universe מקור — בחירת מקור
+    st.markdown("#### 1️⃣ Universe מקור (pairs + parameters)")
+
+    universe_source = st.selectbox(
+        "Universe source",
+        ["Service (if available)", "Upload CSV", "Demo"],
+        index=0,
+        key="smart_scan_universe_source",
+    )
+
+    df_universe: Optional[pd.DataFrame] = None
+
+    if universe_source.startswith("Service") and service is not None and hasattr(service, "get_smart_scan_universe"):
+        try:
+            df_universe = service.get_smart_scan_universe(ctx)
+        except Exception as e:
+            st.warning(f"get_smart_scan_universe failed: {e}")
+            df_universe = None
+
+    if df_universe is None and universe_source.startswith("Upload"):
+        uni_file = st.file_uploader(
+            "Upload Universe CSV (must contain 'pair' + param columns)",
+            type=["csv"],
+            key="smart_scan_universe_csv",
+        )
+        if uni_file is not None:
+            try:
+                df_universe = pd.read_csv(uni_file)
+            except Exception as e:
+                st.error(f"Error reading universe CSV: {e}")
+                df_universe = None
+
+    if df_universe is None or df_universe.empty:
+        # fallback Demo universe
+        n = 30
+        df_universe = pd.DataFrame(
+            {
+                "pair": [f"PAIR_{i}" for i in range(n)],
+                "z_entry": np.linspace(1.0, 3.5, n),
+                "z_exit": np.linspace(0.1, 1.0, n),
+                "lookback": np.linspace(20, 120, n),
+                "hl_bars": np.linspace(10, 120, n),
+                "corr_min": np.linspace(0.4, 0.9, n),
+            }
+        )
+        st.info("Universe Demo – חיבור ל-Service או CSV יבטל את הדמו.")
+
+    st.dataframe(df_universe.head(30), use_container_width=True)
+
+    # 3) טעינת קבצי עזר + נסיון למשוך אוטומטי מה-Service
+    st.markdown("#### 2️⃣ Data layers (Fair Value / Fundamentals / Metrics / Param Scores)")
+
+    col_files1, col_files2 = st.columns(2)
+
+    df_fv = None
+    df_fund = None
+    df_metrics = None
+    df_param_scores = None
+
+    # ----- אפשרות לטעינה אוטומטית מה-Service -----
+    auto_load = st.checkbox(
+        "נסה לטעון FV/Fundamentals/Metrics אוטומטית מה-Service (אם קיים)",
+        value=True,
+        key="smart_scan_auto_load_service",
+    )
+
+    if auto_load and service is not None:
+        # Fair Value
+        if hasattr(service, "get_fair_value_universe"):
+            try:
+                df_fv = service.get_fair_value_universe(ctx)
+            except Exception as e:
+                logger.warning("get_fair_value_universe failed: %s", e)
+        # Fundamentals
+        if hasattr(service, "get_fundamentals_universe"):
+            try:
+                df_fund = service.get_fundamentals_universe(ctx)
+            except Exception as e:
+                logger.warning("get_fundamentals_universe failed: %s", e)
+        # Metrics
+        if hasattr(service, "get_pair_metrics_universe"):
+            try:
+                df_metrics = service.get_pair_metrics_universe(ctx)
+            except Exception as e:
+                logger.warning("get_pair_metrics_universe failed: %s", e)
+
+    # ----- העלאה ידנית -----
+    with col_files1:
+        st.caption("Fair Value (ניסוח ידני / override):")
+        fv_file = st.file_uploader(
+            "Fair Value CSV (pair + fv_pct_diff / fair_value_pct_diff)",
+            type=["csv"],
+            key="smart_scan_fv_file",
+        )
+        if fv_file is not None:
+            try:
+                df_fv = pd.read_csv(fv_file)
+                st.caption("✅ FV CSV loaded (override service).")
+            except Exception as e:
+                st.error(f"Error reading FV file: {e}")
+
+        st.caption("Fundamentals (override / merge עם service):")
+        fund_file = st.file_uploader(
+            "Fundamentals CSV (pair + pe, roe, debt_to_equity, eps_growth_5y, ...)",
+            type=["csv"],
+            key="smart_scan_fund_file",
+        )
+        if fund_file is not None:
+            try:
+                df_fund = pd.read_csv(fund_file)
+                st.caption("✅ Fundamental CSV loaded.")
+            except Exception as e:
+                st.error(f"Error reading fundamental file: {e}")
+
+    with col_files2:
+        st.caption("Metrics (override / merge עם service):")
+        metrics_file = st.file_uploader(
+            "Metrics CSV (pair + Sharpe, Drawdown, TailRisk, WinRate, DSR, Trades, ...)",
+            type=["csv"],
+            key="smart_scan_metrics_file",
+        )
+        if metrics_file is not None:
+            try:
+                df_metrics = pd.read_csv(metrics_file)
+                st.caption("✅ Metrics CSV loaded.")
+            except Exception as e:
+                st.error(f"Error reading metrics file: {e}")
+
+        st.caption("Param Score file (למשל מתוצאות אופטימיזציה):")
+        param_score_file = st.file_uploader(
+            "Param Score CSV (pair + score)",
+            type=["csv"],
+            key="smart_scan_param_score_file",
+        )
+        if param_score_file is not None:
+            try:
+                df_param_scores = pd.read_csv(param_score_file)
+                st.caption("✅ Param Score CSV loaded.")
+            except Exception as e:
+                st.error(f"Error reading Param score file: {e}")
+
+    # 4) קונפיגורציות פרופיל לשכבות + אפשרות לשמור/להעמיס
+    st.markdown("#### 3️⃣ Layer configs (Param / Fundamental / Macro / Metrics)")
+
+    cfg_param = ParamOptimismConfig.default_for_profile(profile)
+    cfg_fund = FundamentalOptimismConfig.default_for_profile(profile)
+    cfg_macro = MacroOptimismConfig.default_for_profile(profile)
+    cfg_metrics = MetricsOptimismConfig.default_for_profile(profile)
+
+    with st.expander("Configs (summary)", expanded=False):
+        st.caption("ParamOptimismConfig:")
+        st.json({k: cfg_param.ranges[k].__dict__ for k in cfg_param.ranges.keys()})
+
+        st.caption("FundamentalOptimismConfig:")
+        st.json({k: cfg_fund.factors[k].__dict__ for k in cfg_fund.factors.keys()})
+
+        st.caption("MacroOptimismConfig:")
+        st.json({k: cfg_macro.factors[k].__dict__ for k in cfg_macro.factors.keys()})
+
+        st.caption("MetricsOptimismConfig:")
+        st.json({k: cfg_metrics.factors[k].__dict__ for k in cfg_metrics.factors.keys()})
+
+    # 5) משקולות + ON/OFF לשכבות הקומפוזיט
+    st.markdown("#### 4️⃣ Composite weights & layer toggles")
+
+    col_layer1, col_layer2 = st.columns(2)
+
+    with col_layer1:
+        use_param = st.checkbox("Use Param layer", value=True, key="smart_scan_use_param")
+        use_fund = st.checkbox("Use Fundamental layer", value=True, key="smart_scan_use_fund")
+    with col_layer2:
+        use_macro = st.checkbox("Use Macro layer", value=True, key="smart_scan_use_macro")
+        use_metrics = st.checkbox("Use Metrics layer", value=True, key="smart_scan_use_metrics")
+
+    col_w = st.columns(4)
+    with col_w[0]:
+        w_param = st.number_input(
+            "w_param", 0.0, 1.0, 0.30, 0.05, key="smart_scan_w_param"
+        )
+    with col_w[1]:
+        w_fund = st.number_input(
+            "w_fund", 0.0, 1.0, 0.25, 0.05, key="smart_scan_w_fund"
+        )
+    with col_w[2]:
+        w_macro = st.number_input(
+            "w_macro", 0.0, 1.0, 0.15, 0.05, key="smart_scan_w_macro"
+        )
+    with col_w[3]:
+        w_metrics = st.number_input(
+            "w_metrics", 0.0, 1.0, 0.30, 0.05, key="smart_scan_w_metrics"
+        )
+
+    # מכבים שכבות שלא בשימוש
+    if not use_param:
+        w_param = 0.0
+    if not use_fund:
+        w_fund = 0.0
+    if not use_macro:
+        w_macro = 0.0
+    if not use_metrics:
+        w_metrics = 0.0
+
+    run_btn = st.button("🚀 Run Smart Scan (all layers)", key="smart_scan_run_btn")
+
+    if not run_btn:
+        st.stop()
+
+    # 6) הרצת כל השכבות (על df_universe)
+    df_scan = df_universe.copy()
+
+    # Param + FV + Param score file
+    df_scan = apply_param_optimism_scan(
+        df_scan,
+        cfg_param,
+        param_cols=[c for c in ["z_entry", "z_exit", "lookback", "hl_bars", "corr_min"] if c in df_scan.columns],
+        df_score_file=df_param_scores,
+        df_fair_value=df_fv,
+        w_base=0.6 if use_param else 0.0,
+        w_file=0.2 if use_param else 0.0,
+        w_fv=0.2 if use_param else 0.0,
+    )
+
+    # Fundamentals
+    if df_fund is not None and not df_fund.empty and use_fund:
+        try:
+            df_scan = df_scan.merge(df_fund, how="left", on="pair")
+        except Exception:
+            pass
+        df_scan = apply_fundamental_optimism_scan(df_scan, cfg_fund)
+    else:
+        df_scan["fundamental_score_total"] = 0.5
+        df_scan["fundamental_score_details"] = [{} for _ in range(len(df_scan))]
+
+    # Macro
+    if use_macro:
+        df_scan = apply_macro_optimism_scan(df_scan, cfg_macro)
+    else:
+        df_scan["macro_score_total"] = 0.5
+        df_scan["macro_score_details"] = [{} for _ in range(len(df_scan))]
+
+    # Metrics
+    if df_metrics is not None and not df_metrics.empty and use_metrics:
+        try:
+            df_scan = df_scan.merge(df_metrics, how="left", on="pair")
+        except Exception:
+            pass
+        df_scan = apply_metrics_optimism_scan(df_scan, cfg_metrics)
+    else:
+        df_scan["metrics_score_total"] = 0.5
+        df_scan["metrics_score_details"] = [{} for _ in range(len(df_scan))]
+
+    # Composite
+    df_scan = compute_composite_smart_score(
+        df_scan,
+        profile=profile,
+        w_param=w_param,
+        w_fund=w_fund,
+        w_macro=w_macro,
+        w_metrics=w_metrics,
+    )
+
+    # 7) בחירת מטריקת Ranking ו־Diagnostics
+    st.markdown("#### 5️⃣ Results & Diagnostics")
+
+    # בחירת מטריקת sorting
+    ranking_metric = st.selectbox(
+        "Ranking metric",
+        [m for m in [
+            "smart_score_total",
+            "param_optimism_score_total",
+            "fundamental_score_total",
+            "macro_score_total",
+            "metrics_score_total",
+        ] if m in df_scan.columns],
+        index=0,
+        key="smart_scan_ranking_metric",
+    )
+
+    df_view = df_scan.sort_values(ranking_metric, ascending=False)
+
+    st.markdown(f"**Top 50 by `{ranking_metric}`**")
+    st.dataframe(df_view.head(50), use_container_width=True)
+
+    # שכבות — תצוגת חיווי
+    with st.expander("Layer Diagnostics (averages)", expanded=False):
+        diag_rows = []
+        for col_name, layer_name in [
+            ("param_optimism_score_total", "Param"),
+            ("fundamental_score_total", "Fundamental"),
+            ("macro_score_total", "Macro"),
+            ("metrics_score_total", "Metrics"),
+            ("smart_score_total", "Composite"),
+        ]:
+            if col_name in df_scan.columns:
+                vals = pd.to_numeric(df_scan[col_name], errors="coerce")
+                diag_rows.append(
+                    {
+                        "layer": layer_name,
+                        "mean": float(vals.mean()),
+                        "min": float(vals.min()),
+                        "max": float(vals.max()),
+                    }
+                )
+        if diag_rows:
+            st.dataframe(pd.DataFrame(diag_rows), use_container_width=True)
+
+    # שמירה ל-session
+    st.session_state["smart_scan_results"] = df_scan
+
+    # 8) Meta ל-dashboard / טאבים אחרים
+    try:
+        best_score = float(pd.to_numeric(df_view["smart_score_total"], errors="coerce").max())
+    except Exception:
+        best_score = None
+    try:
+        avg_sharpe = float(
+            pd.to_numeric(df_view.get("Sharpe", pd.Series([0.0] * len(df_view))), errors="coerce").mean()
+        )
+    except Exception:
+        avg_sharpe = None
+
+    smart_meta = {
+        "env": env,
+        "profile": profile,
+        "n_rows": int(df_view.shape[0]),
+        "best_smart_score": best_score,
+        "avg_sharpe": avg_sharpe,
+        "ranking_metric": ranking_metric,
+        "layer_weights": {
+            "param": w_param,
+            "fundamental": w_fund,
+            "macro": w_macro,
+            "metrics": w_metrics,
+        },
+        "timestamp_utc": datetime.utcnow().isoformat() + "Z",
+    }
+    st.session_state["smart_scan_last_meta"] = smart_meta
+
+    # 9) Auto-select top pair
+    top_pair = None
+    try:
+        top_pair = str(df_view["pair"].iloc[0])
+    except Exception:
+        top_pair = None
+
+    if top_pair and bool(st.session_state.get("smart_scan_auto_link", True)):
+        st.session_state["selected_pair"] = top_pair
+        st.caption(f"📌 selected_pair from Smart Scan: `{top_pair}`")
+
+    # 10) הכנת Top-K ל-batch optimisation
+    st.markdown("#### 6️⃣ Actions — Batch optimisation / optimisation hints")
+
+    top_k_batch = st.slider(
+        "Top-K pairs for optimisation batch",
+        min_value=5,
+        max_value=min(50, len(df_view)),
+        value=min(10, len(df_view)),
+        step=5,
+        key="smart_scan_topk_batch",
+    )
+    top_pairs_for_batch = df_view.head(int(top_k_batch))["pair"].astype(str).tolist()
+
+    if st.button("📤 Send Top-K pairs to Optimisation batch", key="smart_scan_send_to_opt"):
+        st.session_state["opt_batch_pairs"] = top_pairs_for_batch
+        st.success(f"Sent {len(top_pairs_for_batch)} pairs to optimisation batch (opt_batch_pairs).")
+
+    # 11) opt_pair_status hint לטאב האופטימיזציה
+    if top_pair:
+        if avg_sharpe is not None and avg_sharpe < 0.5:
+            opt_profile_hint = "defensive"
+            scenario_profile = "Risk-Off"
+            tail_weight = 0.5
+        elif avg_sharpe is not None and avg_sharpe > 1.5:
+            opt_profile_hint = "aggressive"
+            scenario_profile = "Risk-On"
+            tail_weight = 0.2
+        else:
+            opt_profile_hint = "default"
+            scenario_profile = "Neutral"
+            tail_weight = 0.3
+
+        opt_hint = {
+            "primary_objective": "Sharpe",
+            "profile": opt_profile_hint,
+            "scenario_profile": scenario_profile,
+            "scenario_tail_weight": tail_weight,
+            "wf_use": True,
+        }
+        st.session_state["opt_pair_status"] = {
+            "pair": top_pair,
+            "opt_hint": opt_hint,
+            "scan_meta": smart_meta,
+        }
+
+    st.caption("✅ Smart Scan finished — all results + hints stored in session_state.")
