@@ -1,9 +1,15 @@
 # Agent, Orchestration, and Governance Architecture — Pairs Trading System
 
 **Version:** 1.0
-**Last updated:** 2026-03-30
+**Last updated:** 2026-03-31
 **Scope:** Agent platform, orchestration engine, governance policy layer, approval
 system, incident management, and audit trail
+
+> **Integration Status: SCAFFOLD**
+> Agents are registered and individually tested (91 tests pass). As of 2026-03-31,
+> **no operational workflow dispatches agent tasks.** Zero agents are called from
+> backtesting, signal generation, or portfolio allocation paths.
+> See: `docs/INTEGRATION_STATUS.md`, `docs/remediation/remediation_ledger.md:P1-AGENTS`
 
 ---
 

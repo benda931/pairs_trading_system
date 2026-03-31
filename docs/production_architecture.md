@@ -1,5 +1,13 @@
 # Production Architecture
 
+> **Integration Status: SCAFFOLD**
+> Runtime infrastructure (RuntimeStateManager, ControlPlaneEngine, AlertEngine,
+> ReconciliationEngine, DeploymentEngine) is implemented and tested (113 tests pass).
+> As of 2026-03-31, **no live or paper trading system exists.** `is_safe_to_trade()`
+> is never called from any execution path. Two independent kill-switch systems
+> are not yet synchronized (P0-KS).
+> See: `docs/INTEGRATION_STATUS.md`, `docs/remediation/remediation_ledger.md:P1-SAFE`
+
 ## 1. Production Architecture Overview
 
 The pairs trading system is designed for institutional-grade operation: it can be run in research mode, backtested at high fidelity, shadow-traded, and eventually activated in a live-capital environment. The production layer is the set of subsystems that govern how the system behaves once code leaves development and enters an environment where real capital or regulatory consequences exist.

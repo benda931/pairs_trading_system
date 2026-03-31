@@ -248,7 +248,7 @@ def _now_utc_str() -> str:
     מחזיר מחרוזת זמן נוכחי ב-UTC, לצורך 'Last updated' וכו'.
     """
     try:
-        return datetime.now(timezone.utc)().strftime("%Y-%m-%d %H:%M:%S UTC")
+        return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
     except Exception:
         return "N/A"
 
@@ -2806,7 +2806,7 @@ def render_performance_and_equity_panel(
         df_show = df_perf.copy()
         for col in ["Fund", "Benchmark", "Excess"]:
             df_show[col] = df_show[col].apply(lambda v: _format_pct(v) if v is not None else "—")
-        st.dataframe(df_show, width="stretch", height=200)
+        st.dataframe(df_show, use_container_width=True, height=200)
 
 
 # ============================================================
@@ -2837,7 +2837,7 @@ def render_pnl_attribution_panel(snapshot: DashboardSnapshot) -> None:
     col_table, col_chart = st.columns([2, 1])
 
     with col_table:
-        st.dataframe(df_dim, width="stretch", height=260)
+        st.dataframe(df_dim, use_container_width=True, height=260)
 
     with col_chart:
         df_plot = df_dim.sort_values("PnL_Today", ascending=False).head(10)
@@ -2878,11 +2878,11 @@ def render_exposure_and_concentration_panels(snapshot: DashboardSnapshot) -> Non
         if exp_df.empty:
             st.info("אין נתוני חשיפה מפורטים (by_asset_class/by_sector/by_country).")
         else:
-            st.dataframe(exp_df, width="stretch", height=220)
+            st.dataframe(exp_df, use_container_width=True, height=220)
 
         if not drift_df.empty:
             st.markdown("**Exposure drift vs targets**")
-            st.dataframe(drift_df, width="stretch", height=220)
+            st.dataframe(drift_df, use_container_width=True, height=220)
         else:
             st.caption("אין יעד חשיפות מוגדרים ב-ctx.extra['target_exposures'].")
 
@@ -2894,7 +2894,7 @@ def render_exposure_and_concentration_panels(snapshot: DashboardSnapshot) -> Non
         liq_df = build_liquidity_snapshot_df(p)
         if not liq_df.empty:
             st.caption("Top illiquid / large positions (Liquidity snapshot)")
-            st.dataframe(liq_df.head(10), width="stretch", height=150)
+            st.dataframe(liq_df.head(10), use_container_width=True, height=150)
         else:
             st.caption("אין Metadata נזילות בפוזיציות (avg_daily_volume/spread).")
 
@@ -2902,7 +2902,7 @@ def render_exposure_and_concentration_panels(snapshot: DashboardSnapshot) -> Non
         conc_df = build_concentration_df(p)
         if not conc_df.empty:
             st.caption("Top 10 by weight (Concentration)")
-            st.dataframe(conc_df, width="stretch", height=160)
+            st.dataframe(conc_df, use_container_width=True, height=160)
 
         # Turnover
         to = build_turnover_summary(p)
@@ -3017,7 +3017,7 @@ def _render_runtime_overview_strip_from_session() -> None:
                 )
             if rows:
                 df = pd.DataFrame(rows)
-                st.dataframe(df, width="stretch", height=220)
+                st.dataframe(df, use_container_width=True, height=220)
             else:
                 st.caption("No structured agent actions to display.")
 
@@ -3192,7 +3192,7 @@ def render_risk_panels(snapshot: DashboardSnapshot) -> None:
             df_sc = df_sc.sort_values("abs_impact", ascending=False).drop(
                 columns=["abs_impact"]
             )
-            st.dataframe(df_sc, width="stretch", height=180)
+            st.dataframe(df_sc, use_container_width=True, height=180)
         else:
             st.caption(
                 "No stress scenarios provided in PortfolioRiskMetrics.stress_test_scenarios."
@@ -3224,6 +3224,63 @@ def render_risk_panels(snapshot: DashboardSnapshot) -> None:
         elif ctx.stress_mode:
             narrative += " ⚠️ Stress mode is ON — portfolio should be in defensive posture."
         st.caption(narrative)
+
+    # ---- Row 3: Risk history sparklines (VaR / Vol / Drawdown) ----
+    st.markdown("#### 📉 Risk history sparklines")
+    try:
+        _risk_ts = (getattr(snapshot.risk, "history", None) or {})
+        _var_series = _risk_ts.get("var_95") or []
+        _vol_series = _risk_ts.get("vol") or []
+        _dd_series = _risk_ts.get("drawdown") or []
+
+        _spark_col1, _spark_col2, _spark_col3 = st.columns(3)
+
+        with _spark_col1:
+            st.markdown("**VaR 95% (history)**")
+            if _var_series:
+                st.line_chart(_var_series)
+            else:
+                st.caption("No VaR history in snapshot.risk.history['var_95'].")
+
+        with _spark_col2:
+            st.markdown("**Realised Vol (history)**")
+            if _vol_series:
+                st.line_chart(_vol_series)
+            else:
+                st.caption("No vol history in snapshot.risk.history['vol'].")
+
+        with _spark_col3:
+            st.markdown("**Drawdown (history)**")
+            if _dd_series:
+                st.line_chart(_dd_series)
+            else:
+                st.caption("No drawdown history in snapshot.risk.history['drawdown'].")
+    except Exception as _rs_err:
+        st.caption(f"Risk sparklines unavailable: {_rs_err}")
+
+    # ---- Row 4: Kill-switch & limits summary ----
+    st.markdown("#### 🔴 Kill-switch & limits summary")
+    try:
+        _ks_state = getattr(snapshot.risk, "kill_switch_state", None)
+        _ks_mode = getattr(snapshot.risk, "kill_switch_mode", None)
+        _throttle = getattr(snapshot.risk, "throttle_level", None)
+
+        _ks_col1, _ks_col2, _ks_col3 = st.columns(3)
+        with _ks_col1:
+            _ks_label = str(_ks_state or "UNKNOWN")
+            _ks_icon = "🔴" if _ks_label not in ("NONE", "OK", "UNKNOWN") else "🟢"
+            st.metric(f"{_ks_icon} Kill-switch", _ks_label)
+        with _ks_col2:
+            st.metric("Kill-switch mode", str(_ks_mode or "N/A"))
+        with _ks_col3:
+            st.metric("Throttle level", str(_throttle or "N/A"))
+
+        _heat = getattr(snapshot.risk, "heat_level", None)
+        if _heat is not None:
+            _heat_colors = {0: "🟢 NORMAL", 1: "🟡 ELEVATED", 2: "🟠 HIGH", 3: "🔴 CRITICAL"}
+            st.caption(f"Heat level: **{_heat_colors.get(int(_heat), str(_heat))}**")
+    except Exception as _ks_err:
+        st.caption(f"Kill-switch panel unavailable: {_ks_err}")
 
 # ============================================================
 # UI Panels — Signals: Funnel, Filters, Ladder, Conflicts, Aging, Watchlist, Heatmap
@@ -3348,7 +3405,7 @@ def render_signals_panels(snapshot: DashboardSnapshot) -> None:
             xaxis_title="Age bucket",
             yaxis_title="# signals",
         )
-        st.plotly_chart(fig_age, width="stretch")
+        st.plotly_chart(fig_age, use_container_width=True)
 
     # ---- טאבונים פנימיים ----
     tab_ladder, tab_conflicts, tab_watchlist, tab_heatmap = st.tabs(
@@ -3367,6 +3424,73 @@ def render_signals_panels(snapshot: DashboardSnapshot) -> None:
     with tab_heatmap:
         render_pairs_heatmap_panel_filtered(snapshot, df_core)
 
+    # ---- Signal conviction distribution chart ----
+    st.markdown("#### 🎯 Signal conviction distribution")
+    try:
+        if not df_core_raw.empty and "Conviction" in df_core_raw.columns:
+            _conv_vals = df_core_raw["Conviction"].dropna()
+            if len(_conv_vals) > 0:
+                _bins = [0.0, 0.2, 0.4, 0.6, 0.8, 1.01]
+                _labels = ["0-0.2", "0.2-0.4", "0.4-0.6", "0.6-0.8", "0.8-1.0"]
+                _conv_counts = [0] * 5
+                for _v in _conv_vals:
+                    for _i, (_lo, _hi) in enumerate(zip(_bins[:-1], _bins[1:])):
+                        if _lo <= _v < _hi:
+                            _conv_counts[_i] += 1
+                            break
+                _fig_conv = go.Figure(go.Bar(
+                    x=_labels,
+                    y=_conv_counts,
+                    marker_color=["#78909C", "#42A5F5", "#FFA726", "#66BB6A", "#EF5350"],
+                    text=_conv_counts,
+                    textposition="outside",
+                ))
+                _fig_conv.update_layout(
+                    title="Signal conviction buckets",
+                    height=240,
+                    margin=dict(l=10, r=10, t=40, b=10),
+                    xaxis_title="Conviction range",
+                    yaxis_title="# signals",
+                    plot_bgcolor="rgba(0,0,0,0)",
+                    paper_bgcolor="rgba(0,0,0,0)",
+                    font=dict(color="#ECEFF1"),
+                )
+                st.plotly_chart(_fig_conv, use_container_width=True)
+            else:
+                st.caption("No numeric Conviction values in signals_core_df.")
+        else:
+            st.caption("Conviction column not available in signals_core_df.")
+    except Exception as _conv_err:
+        st.caption(f"Conviction distribution chart unavailable: {_conv_err}")
+
+    # ---- Signal strategy breakdown ----
+    st.markdown("#### 🏷 Signals by strategy")
+    try:
+        if not df_core_raw.empty and "Strategy" in df_core_raw.columns:
+            _strat_counts = df_core_raw["Strategy"].value_counts().head(10)
+            _fig_strat = go.Figure(go.Bar(
+                x=list(_strat_counts.index),
+                y=list(_strat_counts.values),
+                text=list(_strat_counts.values),
+                textposition="outside",
+                marker_color="#42A5F5",
+            ))
+            _fig_strat.update_layout(
+                title="Signal count by strategy",
+                height=240,
+                margin=dict(l=10, r=10, t=40, b=10),
+                xaxis_title="Strategy",
+                yaxis_title="# signals",
+                plot_bgcolor="rgba(0,0,0,0)",
+                paper_bgcolor="rgba(0,0,0,0)",
+                font=dict(color="#ECEFF1"),
+            )
+            st.plotly_chart(_fig_strat, use_container_width=True)
+        else:
+            st.caption("Strategy column not available in signals_core_df.")
+    except Exception as _strat_err:
+        st.caption(f"Strategy breakdown chart unavailable: {_strat_err}")
+
     # ---- Drill-down לטאב comparison_matrices (אופציונלי) ----
     st.markdown("---")
     col_drill1, col_drill2 = st.columns([3, 1])
@@ -3376,7 +3500,7 @@ def render_signals_panels(snapshot: DashboardSnapshot) -> None:
             "אפשר לעבור לטאב **Comparison Matrices**."
         )
     with col_drill2:
-        if st.button("🔬 פתח Tab Comparison Matrices", width="stretch"):
+        if st.button("🔬 פתח Tab Comparison Matrices", use_container_width=True):
             # כאן אנחנו רק מסמנים intent ב-session_state.
             # בקובץ dashboard.py אפשר לקרוא לזה ולנווט לטאב הרלוונטי.
             st.session_state["nav_target"] = "comparison_matrices"
@@ -3412,7 +3536,7 @@ def render_signal_ladder_panel_filtered(
         ascending = [asc for _, asc in sort_cols]
         df = df.sort_values(by=by, ascending=ascending)
 
-    st.dataframe(df.head(top_n), width="stretch", height=340)
+    st.dataframe(df.head(top_n), use_container_width=True, height=340)
 
 
 def render_signal_conflicts_panel_filtered(
@@ -3451,7 +3575,7 @@ def render_signal_conflicts_panel_filtered(
 
     df_conf = pd.DataFrame(rows)
     df_conf = df_conf.sort_values("MaxQuality", ascending=False)
-    st.dataframe(df_conf, width="stretch", height=260)
+    st.dataframe(df_conf, use_container_width=True, height=260)
     st.caption(
         "קונפליקט מוגדר כאן כמצב שבו יש על אותו Pair גם סיגנל LONG וגם SHORT "
         "ממקורות/מודלים שונים."
@@ -3471,7 +3595,7 @@ def render_watchlist_panel(snapshot: DashboardSnapshot) -> None:
         st.info("אין עדיין פריטים ב-Watchlist (לא extra['watchlist'] ולא tags על signals).")
         return
 
-    st.dataframe(df_watch, width="stretch", height=260)
+    st.dataframe(df_watch, use_container_width=True, height=260)
 
 
 def render_pairs_heatmap_panel_filtered(
@@ -3598,7 +3722,7 @@ def render_macro_panels(snapshot: DashboardSnapshot) -> None:
             df_show = cross_df.copy()
             if group_sel:
                 df_show = df_show[df_show["Group"].isin(group_sel)]
-            st.dataframe(df_show, width="stretch", height=260)
+            st.dataframe(df_show, use_container_width=True, height=260)
 
     with col_right:
         st.markdown("#### 📊 Top moves (1D)")
@@ -3635,7 +3759,79 @@ def render_macro_panels(snapshot: DashboardSnapshot) -> None:
         vol_df_show["Hot"] = vol_df_show["Z_Vol"].apply(
             lambda z: "🔥" if z is not None and abs(z) >= 2.0 else ""
         )
-        st.dataframe(vol_df_show, width="stretch", height=220)
+        st.dataframe(vol_df_show, use_container_width=True, height=220)
+
+    # ---- Regime history sparkline ----
+    st.markdown("#### 🌊 Regime history (confidence trend)")
+    try:
+        _macro_extra = getattr(snapshot.market, "extra", {}) or {}
+        _regime_history = _macro_extra.get("regime_history") or []
+        _conf_history = _macro_extra.get("regime_confidence_history") or []
+
+        _reg_col1, _reg_col2 = st.columns(2)
+
+        with _reg_col1:
+            st.markdown("**Regime confidence over time**")
+            if _conf_history:
+                st.line_chart(_conf_history)
+            else:
+                st.caption("No regime confidence history in market.extra['regime_confidence_history'].")
+
+        with _reg_col2:
+            st.markdown("**Regime transition log**")
+            if _regime_history:
+                for _rh in _regime_history[-8:]:
+                    _rts = _rh.get("ts", "")
+                    _rlbl = _rh.get("regime", "?")
+                    _rconf = _rh.get("confidence", None)
+                    _rconf_str = f" ({_format_pct(_rconf)})" if _rconf is not None else ""
+                    st.write(f"- `{_rts}` → **{_rlbl}**{_rconf_str}")
+            else:
+                st.caption("No regime history entries in market.extra['regime_history'].")
+    except Exception as _rh_err:
+        st.caption(f"Regime history panel unavailable: {_rh_err}")
+
+    # ---- Upcoming macro events calendar ----
+    st.markdown("#### 📅 Upcoming macro events")
+    try:
+        _macro_events = (getattr(snapshot.market, "extra", {}) or {}).get("macro_events") or []
+        if _macro_events:
+            _ev_rows = []
+            for _ev in _macro_events[:15]:
+                _ev_rows.append({
+                    "Date": _ev.get("date", ""),
+                    "Event": _ev.get("name", ""),
+                    "Country": _ev.get("country", ""),
+                    "Impact": _ev.get("impact", ""),
+                    "Forecast": _ev.get("forecast", ""),
+                    "Previous": _ev.get("previous", ""),
+                })
+            _df_ev = pd.DataFrame(_ev_rows)
+            st.dataframe(_df_ev, use_container_width=True, height=300)
+        else:
+            st.caption("No upcoming macro events in market.extra['macro_events']. "
+                       "Connect FMP macro calendar to populate.")
+    except Exception as _ev_err:
+        st.caption(f"Macro events panel unavailable: {_ev_err}")
+
+    # ---- Risk-on / Risk-off composite indicator ----
+    st.markdown("#### 🔄 Risk-on / Risk-off composite")
+    try:
+        _roro = (getattr(snapshot.market, "extra", {}) or {}).get("risk_on_off_score")
+        if _roro is not None:
+            _roro_val = float(_roro)  # -1 (full risk-off) .. +1 (full risk-on)
+            _roro_label = "Risk-ON 📈" if _roro_val >= 0.2 else ("Risk-OFF 📉" if _roro_val <= -0.2 else "Neutral ↔️")
+            _roro_col1, _roro_col2 = st.columns([1, 2])
+            with _roro_col1:
+                st.metric("Risk-on/off score", f"{_roro_val:+.2f}", help=_roro_label)
+                st.caption(f"Interpretation: **{_roro_label}**")
+            with _roro_col2:
+                _roro_pct = int((_roro_val + 1.0) / 2.0 * 100)
+                st.progress(_roro_pct, text=f"Risk appetite: {_roro_pct}%")
+        else:
+            st.caption("Risk-on/off composite score not available in market.extra['risk_on_off_score'].")
+    except Exception as _roro_err:
+        st.caption(f"Risk-on/off panel unavailable: {_roro_err}")
 
 # ============================================================
 # UI Panels — System Health (Broker / Data / SQL / Agents / Resources)
@@ -3698,7 +3894,7 @@ def render_system_panels(snapshot: DashboardSnapshot) -> None:
             st.caption("No detailed latency metrics in ctx.extra['latency_breakdown'].")
         else:
             df_lb = pd.DataFrame(lb_rows)
-            st.dataframe(df_lb, width="stretch", height=220)
+            st.dataframe(df_lb, use_container_width=True, height=220)
 
             fig = go.Figure(
                 data=[go.Bar(x=df_lb["Component"], y=df_lb["Latency_ms"])]
@@ -3718,7 +3914,7 @@ def render_system_panels(snapshot: DashboardSnapshot) -> None:
         if df_agents.empty:
             st.caption("No agents status recorded (system.agents_status is empty).")
         else:
-            st.dataframe(df_agents, width="stretch", height=220)
+            st.dataframe(df_agents, use_container_width=True, height=220)
 
         if system.running_strategies:
             st.markdown("**Running strategies:**")
@@ -3730,7 +3926,108 @@ def render_system_panels(snapshot: DashboardSnapshot) -> None:
     if df_err.empty:
         st.success("No recent errors reported by the system.")
     else:
-        st.dataframe(df_err, width="stretch", height=220)
+        st.dataframe(df_err, use_container_width=True, height=220)
+
+    # ---- Row 4: Resource utilization progress bars + chart ----
+    st.markdown("#### 💻 Resource utilization")
+    try:
+        _cpu = resources.get("cpu_pct")
+        _ram = resources.get("ram_pct")
+        _disk = resources.get("disk_pct")
+        _net_in = resources.get("net_in_mbps")
+        _net_out = resources.get("net_out_mbps")
+
+        _res_col1, _res_col2 = st.columns([1, 2])
+
+        with _res_col1:
+            if _cpu is not None:
+                _cpu_icon = "🔴" if _cpu > 85 else ("🟡" if _cpu > 60 else "🟢")
+                st.metric(f"{_cpu_icon} CPU", f"{_cpu:.0f}%")
+                st.progress(min(int(_cpu), 100), text=f"CPU: {_cpu:.0f}%")
+            if _ram is not None:
+                _ram_icon = "🔴" if _ram > 85 else ("🟡" if _ram > 70 else "🟢")
+                st.metric(f"{_ram_icon} RAM", f"{_ram:.0f}%")
+                st.progress(min(int(_ram), 100), text=f"RAM: {_ram:.0f}%")
+            if _disk is not None:
+                _disk_icon = "🔴" if _disk > 90 else ("🟡" if _disk > 75 else "🟢")
+                st.metric(f"{_disk_icon} Disk", f"{_disk:.0f}%")
+                st.progress(min(int(_disk), 100), text=f"Disk: {_disk:.0f}%")
+            if _net_in is not None or _net_out is not None:
+                st.caption(f"Net I/O: ↓{_net_in or 0:.1f} / ↑{_net_out or 0:.1f} Mbps")
+
+        with _res_col2:
+            _res_items = [
+                ("CPU %", _cpu),
+                ("RAM %", _ram),
+                ("Disk %", _disk),
+            ]
+            _res_items = [(lbl, val) for lbl, val in _res_items if val is not None]
+            if _res_items:
+                _fig_res = go.Figure(go.Bar(
+                    x=[lbl for lbl, _ in _res_items],
+                    y=[val for _, val in _res_items],
+                    marker_color=[
+                        "#EF5350" if val > 85 else ("#FFA726" if val > 60 else "#66BB6A")
+                        for _, val in _res_items
+                    ],
+                    text=[f"{val:.0f}%" for _, val in _res_items],
+                    textposition="outside",
+                ))
+                _fig_res.update_layout(
+                    title="Resource usage",
+                    height=220,
+                    margin=dict(l=10, r=10, t=40, b=10),
+                    yaxis=dict(range=[0, 110]),
+                    plot_bgcolor="rgba(0,0,0,0)",
+                    paper_bgcolor="rgba(0,0,0,0)",
+                    font=dict(color="#ECEFF1"),
+                )
+                st.plotly_chart(_fig_res, use_container_width=True)
+            else:
+                st.caption("No resource utilization metrics in build_resource_utilization_dict.")
+    except Exception as _res_err:
+        st.caption(f"Resource utilization panel unavailable: {_res_err}")
+
+    # ---- Row 5: System health composite score ----
+    st.markdown("#### 🩺 System health composite score")
+    try:
+        _sys_score_components = {
+            "Broker": 100 if system.broker_connected else 0,
+            "Data fresh": 100 if system.data_fresh else 0,
+            "SQL OK": 100 if system.sql_ok else 0,
+            "Low latency": max(0, 100 - int(system.data_latency_ms / 10)) if system.data_latency_ms < 1000 else 0,
+            "No errors": max(0, 100 - len(df_err) * 20) if not df_err.empty else 100,
+        }
+        _sys_composite = sum(_sys_score_components.values()) / max(len(_sys_score_components), 1)
+
+        _sc_col1, _sc_col2 = st.columns([1, 2])
+        with _sc_col1:
+            _sc_icon = "🟢" if _sys_composite >= 80 else ("🟡" if _sys_composite >= 50 else "🔴")
+            st.metric(f"{_sc_icon} Health score", f"{_sys_composite:.0f}/100")
+            st.progress(int(_sys_composite), text=f"{_sys_composite:.0f}%")
+        with _sc_col2:
+            _fig_sc = go.Figure(go.Bar(
+                x=list(_sys_score_components.keys()),
+                y=list(_sys_score_components.values()),
+                marker_color=[
+                    "#66BB6A" if v >= 80 else ("#FFA726" if v >= 50 else "#EF5350")
+                    for v in _sys_score_components.values()
+                ],
+                text=[f"{v}" for v in _sys_score_components.values()],
+                textposition="outside",
+            ))
+            _fig_sc.update_layout(
+                title="Health by component",
+                height=220,
+                margin=dict(l=10, r=10, t=40, b=10),
+                yaxis=dict(range=[0, 120]),
+                plot_bgcolor="rgba(0,0,0,0)",
+                paper_bgcolor="rgba(0,0,0,0)",
+                font=dict(color="#ECEFF1"),
+            )
+            st.plotly_chart(_fig_sc, use_container_width=True)
+    except Exception as _sc_err:
+        st.caption(f"System health composite panel unavailable: {_sc_err}")
 
 
 # ============================================================
@@ -4425,11 +4722,53 @@ def render_dashboard_home_v2(
                         "Reason": d.get("reason", ""),
                     }
                 )
-            import pandas as pd  # לוודא שקיים למעלה, ואם לא – להוסיף ב-imports
             df_dims = pd.DataFrame(dim_rows)
-            st.dataframe(df_dims, width="stretch", hide_index=True)
+            st.dataframe(df_dims, use_container_width=True, hide_index=True)
+
+            # Dimension progress bars
+            st.markdown("**Dimension scores (visual):**")
+            try:
+                for _d in dims:
+                    _d_label = _d.get("label", _d.get("key", "?"))
+                    _d_score = _d.get("score")
+                    if _d_score is not None:
+                        _d_pct = min(max(int(float(_d_score)), 0), 100)
+                        st.progress(_d_pct, text=f"{_d_label}: {_d_pct}")
+            except Exception as _pb_err:
+                st.caption(f"Progress bars unavailable: {_pb_err}")
         else:
             st.caption("No dimension-level readiness data yet.")
+
+    # Readiness radar / gauge chart
+    if dims and overall_score is not None:
+        st.markdown("#### 📊 Readiness dimension radar")
+        try:
+            _dim_labels = [d.get("label", d.get("key", "?")) for d in dims]
+            _dim_scores = [float(d.get("score") or 0.0) for d in dims]
+            if len(_dim_labels) >= 3:
+                # Close the radar loop
+                _dim_labels_c = _dim_labels + [_dim_labels[0]]
+                _dim_scores_c = _dim_scores + [_dim_scores[0]]
+                _fig_radar = go.Figure(go.Scatterpolar(
+                    r=_dim_scores_c,
+                    theta=_dim_labels_c,
+                    fill="toself",
+                    line_color="#42A5F5",
+                    fillcolor="rgba(66,165,245,0.20)",
+                    name="Readiness",
+                ))
+                _fig_radar.update_layout(
+                    polar=dict(radialaxis=dict(visible=True, range=[0, 100])),
+                    showlegend=False,
+                    height=340,
+                    margin=dict(l=40, r=40, t=40, b=40),
+                    plot_bgcolor="rgba(0,0,0,0)",
+                    paper_bgcolor="rgba(0,0,0,0)",
+                    font=dict(color="#ECEFF1"),
+                )
+                st.plotly_chart(_fig_radar, use_container_width=True)
+        except Exception as _radar_err:
+            st.caption(f"Readiness radar chart unavailable: {_radar_err}")
 
     # Top issues + Daily runbook על בסיס readiness + alerts + health_light
     st.markdown("---")

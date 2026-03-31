@@ -6052,7 +6052,7 @@ def render_optimization_tab(
         top = df.head(20)
 
     table_height = int(st.session_state.get("_opt_table_height", 420))
-    st.dataframe(top, width="stretch", height=table_height)
+    st.dataframe(top, use_container_width=True, height=table_height)
 
     try:
         ts_str = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -6073,18 +6073,7 @@ def render_optimization_tab(
     except Exception:
         pass
 
-        # ==== 9.1 Validation Snapshot (using validate_opt_df) ====
-    try:
-        report = validate_opt_df(df)
-        if not report.get("ok", False):
-            with st.expander("⚠️ Validation issues (opt_df)", expanded=False):
-                st.write("Issues detected in optimisation results:")
-                for msg in report.get("issues", []):
-                    st.write(f"- {msg}")
-                st.json(report.get("summary", {}))
-    except Exception:
-        # לא מפיל את הטאב בגלל ולידציה
-        pass
+    # ==== 9.1 duplicate validate_opt_df removed (already shown at 8.1 above) ====
 
     # ==== 10) Advanced Analytics & Ops Hub ====
     st.subheader("🔬 Analytics & Ops Hub — HF-grade view")
@@ -6139,6 +6128,24 @@ def render_optimization_tab(
         _render_optimization_audit_pack_section(TABLE_HEIGHT, df, sym1, sym2)
     except Exception as e:
         st.caption(f"Audit pack section failed: {e}")
+
+    # 10.9 Alpha Decay & Selection Bias Analysis
+    try:
+        _render_optimization_alpha_decay_section(TABLE_HEIGHT, df, sym1, sym2)
+    except Exception as e:
+        st.caption(f"Alpha decay section failed: {e}")
+
+    # 10.10 Regime-Conditioned Performance Breakdown
+    try:
+        _render_optimization_regime_performance_section(TABLE_HEIGHT, df, sym1, sym2)
+    except Exception as e:
+        st.caption(f"Regime performance section failed: {e}")
+
+    # 10.11 Parameter Stability Across Studies
+    try:
+        _render_optimization_parameter_stability_section(TABLE_HEIGHT, df, sym1, sym2)
+    except Exception as e:
+        st.caption(f"Parameter stability section failed: {e}")
 
     # 10.8 Finalize (Dev tools, Error console, i18n, snapshot)
     try:
@@ -6618,6 +6625,14 @@ def _run_walkforward_for_params(
     weights: Optional[Dict[str, float]] = None,
 ) -> pd.DataFrame:
     """
+    Calendar stability validation / calendar_validation (NOT true walk-forward optimisation).
+
+    This function splits the date range into n_splits calendar segments and
+    runs a backtest on each segment independently.  It does NOT perform true
+    expanding-window walk-forward (train on [0,T₁], test on [T₁,T₂], …).
+    Use research.walk_forward.WalkForwardHarness for genuine walk-forward
+    evaluation.  See ADR-007 and docs/remediation/remediation_ledger.md:P0-WF.
+
     מריץ Walk-Forward על פרמטרים נתונים לאורך n_splits חלונות זמן רציפים.
 
     החזרה: DataFrame עם שורות לכל חלון:
@@ -6655,8 +6670,8 @@ def _run_walkforward_for_params(
         return pd.DataFrame()
 
     # אפשר להגדיר מינימום ימים per segment מה-session
-    min_seg_days = int(st.session_state.get("opt_wf_min_days", 10))
-    min_seg_days = max(5, min_seg_days)
+    min_seg_days = int(st.session_state.get("opt_wf_min_days", 63))
+    min_seg_days = max(63, min_seg_days)
 
     # מתאימים את מספר החלונות כך שיהיו לפחות min_seg_days לכל חלון
     max_splits_reasonable = max(1, len(idx) // min_seg_days)
@@ -6870,7 +6885,7 @@ def _render_optimization_analytics_section(TABLE_HEIGHT: int, df: pd.DataFrame, 
                     )
                     st.dataframe(
                         pareto_df.head(50),
-                        width="stretch",
+                        use_container_width=True,
                         height=min(TABLE_HEIGHT, 420),
                     )
 
@@ -7044,7 +7059,7 @@ def _render_optimization_analytics_section(TABLE_HEIGHT: int, df: pd.DataFrame, 
                 else:
                     st.dataframe(
                         dsr_df,
-                        width="stretch",
+                        use_container_width=True,
                         height=min(TABLE_HEIGHT, 420),
                     )
 
@@ -7195,7 +7210,7 @@ def _render_optimization_analytics_section(TABLE_HEIGHT: int, df: pd.DataFrame, 
                             wf_all = pd.concat(wf_results, ignore_index=True)
                             st.dataframe(
                                 wf_all,
-                                width="stretch",
+                                use_container_width=True,
                                 height=min(TABLE_HEIGHT, 420),
                             )
 
@@ -7212,7 +7227,7 @@ def _render_optimization_analytics_section(TABLE_HEIGHT: int, df: pd.DataFrame, 
                                 st.caption("Walk-Forward Score/DSR stats per strategy rank:")
                                 st.dataframe(
                                     grp,
-                                    width="stretch",
+                                    use_container_width=True,
                                     height=min(TABLE_HEIGHT, 300),
                                 )
                             except Exception:
@@ -7709,7 +7724,7 @@ def _render_optimization_extra_sections(TABLE_HEIGHT: int, df: pd.DataFrame, sym
                             st.subheader("📊 Meta Top Candidates")
                             st.dataframe(
                                 top_candidates,
-                                width="stretch",
+                                use_container_width=True,
                                 height=min(TABLE_HEIGHT, 320),
                             )
 
@@ -7717,7 +7732,7 @@ def _render_optimization_extra_sections(TABLE_HEIGHT: int, df: pd.DataFrame, sym
                                 st.subheader("🧬 Meta Feature Importance (|corr(param, meta_score)|)")
                                 st.dataframe(
                                     feature_importance,
-                                    width="stretch",
+                                    use_container_width=True,
                                     height=min(TABLE_HEIGHT, 260),
                                 )
                                 try:
@@ -7728,7 +7743,7 @@ def _render_optimization_extra_sections(TABLE_HEIGHT: int, df: pd.DataFrame, sym
                                             y="importance",
                                             title="Meta Feature Importance",
                                         )
-                                        st.plotly_chart(fig_fi, width="stretch")
+                                        st.plotly_chart(fig_fi, use_container_width=True)
                                 except Exception:
                                     pass
 
@@ -7806,7 +7821,7 @@ def _render_optimization_extra_sections(TABLE_HEIGHT: int, df: pd.DataFrame, sym
                             imp_sorted = imp_series.sort_values(ascending=False)
                             st.dataframe(
                                 imp_sorted.to_frame("importance"),
-                                width="stretch",
+                                use_container_width=True,
                                 height=min(TABLE_HEIGHT, 420),
                             )
                             try:
@@ -7817,7 +7832,7 @@ def _render_optimization_extra_sections(TABLE_HEIGHT: int, df: pd.DataFrame, sym
                                         y="importance",
                                         title="Feature Importance (higher → more impact on Score)",
                                     )
-                                    st.plotly_chart(fig_imp, width="stretch")
+                                    st.plotly_chart(fig_imp, use_container_width=True)
                             except Exception:
                                 pass
 
@@ -7889,7 +7904,7 @@ def _render_optimization_extra_sections(TABLE_HEIGHT: int, df: pd.DataFrame, sym
                         )
                         st.dataframe(
                             dvis.head(50),
-                            width="stretch",
+                            use_container_width=True,
                             height=min(TABLE_HEIGHT, 360),
                         )
                         try:
@@ -7973,7 +7988,7 @@ def _render_optimization_extra_sections(TABLE_HEIGHT: int, df: pd.DataFrame, sym
 
                 st.dataframe(
                     dfx.head(50),
-                    width="stretch",
+                    use_container_width=True,
                     height=min(TABLE_HEIGHT, 420),
                 )
 
@@ -7998,7 +8013,7 @@ def _render_optimization_extra_sections(TABLE_HEIGHT: int, df: pd.DataFrame, sym
             st.caption("Missingness per column (top):")
             st.dataframe(
                 nan_counts.head(40).to_frame("missing"),
-                width="stretch",
+                use_container_width=True,
                 height=min(TABLE_HEIGHT, 300),
             )
 
@@ -8006,7 +8021,7 @@ def _render_optimization_extra_sections(TABLE_HEIGHT: int, df: pd.DataFrame, sym
             st.caption("Parameter coverage (fraction non-NaN):")
             st.dataframe(
                 param_cov.to_frame("coverage"),
-                width="stretch",
+                use_container_width=True,
                 height=min(TABLE_HEIGHT, 300),
             )
 
@@ -8018,7 +8033,7 @@ def _render_optimization_extra_sections(TABLE_HEIGHT: int, df: pd.DataFrame, sym
                 st.caption("Metric distributions (extended percentiles):")
                 st.dataframe(
                     desc,
-                    width="stretch",
+                    use_container_width=True,
                     height=min(TABLE_HEIGHT, 420),
                 )
         except Exception as e:
@@ -8077,7 +8092,7 @@ def _render_optimization_extra_sections(TABLE_HEIGHT: int, df: pd.DataFrame, sym
 
                 st.dataframe(
                     Z.head(30),
-                    width="stretch",
+                    use_container_width=True,
                     height=min(TABLE_HEIGHT, 380),
                 )
 
@@ -8187,7 +8202,7 @@ def _render_optimization_extra_sections(TABLE_HEIGHT: int, df: pd.DataFrame, sym
                     st.subheader("Permutation Importance")
                     st.dataframe(
                         imp_df,
-                        width="stretch",
+                        use_container_width=True,
                         height=min(TABLE_HEIGHT, 360),
                     )
                 except Exception:
@@ -8230,7 +8245,7 @@ def _render_optimization_extra_sections(TABLE_HEIGHT: int, df: pd.DataFrame, sym
                 st.write({"outliers": int(mask.sum())})
                 st.dataframe(
                     outl.head(50),
-                    width="stretch",
+                    use_container_width=True,
                     height=min(TABLE_HEIGHT, 300),
                 )
                 if mask.any():
@@ -8286,7 +8301,7 @@ def _render_optimization_extra_sections(TABLE_HEIGHT: int, df: pd.DataFrame, sym
             st.caption(f"Generated {len(dsw)} sweep points on {len(keys)} parameters.")
             st.dataframe(
                 dsw.head(30),
-                width="stretch",
+                use_container_width=True,
                 height=min(TABLE_HEIGHT, 280),
             )
 
@@ -8314,7 +8329,7 @@ def _render_optimization_extra_sections(TABLE_HEIGHT: int, df: pd.DataFrame, sym
                         top_sugg = dsw_scored.sort_values("score_pred", ascending=False).head(int(topk))
                         st.dataframe(
                             top_sugg,
-                            width="stretch",
+                            use_container_width=True,
                             height=min(TABLE_HEIGHT, 320),
                         )
                         if st.button("Use Top-K suggestions to tighten ranges", key=sk("sw_use_topk")):
@@ -8469,7 +8484,7 @@ def _render_optimization_operations_sections(TABLE_HEIGHT: int, df: pd.DataFrame
             st.caption("Edit ranges below. Use Apply to persist into active_ranges.")
             df_edit = st.data_editor(
                 df_rng,
-                width="stretch",
+                use_container_width=True,
                 height=TABLE_HEIGHT,
                 num_rows="dynamic",
                 key=sk("rng_editor"),
@@ -8494,7 +8509,7 @@ def _render_optimization_operations_sections(TABLE_HEIGHT: int, df: pd.DataFrame
                     st.session_state["_rng_scaled_preview"] = df_scaled
                     st.dataframe(
                         df_scaled.head(30),
-                        width="stretch",
+                        use_container_width=True,
                         height=min(TABLE_HEIGHT, 260),
                     )
                     st.caption("Scaled preview — click 'Apply to active_ranges' to persist.")
@@ -8509,7 +8524,7 @@ def _render_optimization_operations_sections(TABLE_HEIGHT: int, df: pd.DataFrame
                     st.session_state["active_ranges"] = base
                     st.success("active_ranges reset to get_default_param_ranges().")
                     df_rng = _ranges_to_df(base)
-                    st.dataframe(df_rng, width="stretch", height=min(TABLE_HEIGHT, 260))
+                    st.dataframe(df_rng, use_container_width=True, height=min(TABLE_HEIGHT, 260))
                 except Exception as e:
                     st.warning(f"Reset failed: {e}")
 
@@ -8657,7 +8672,7 @@ def _render_optimization_operations_sections(TABLE_HEIGHT: int, df: pd.DataFrame
             if keys:
                 ds_sel = st.selectbox("Available datasets", keys, key=sk("ds_sel"))
                 dfx = store.get(ds_sel, pd.DataFrame())
-                st.dataframe(dfx.head(50), width="stretch", height=TABLE_HEIGHT)
+                st.dataframe(dfx.head(50), use_container_width=True, height=TABLE_HEIGHT)
 
                 # derive ranges from dataset
                 d1, d2, d3 = st.columns(3)
@@ -8722,7 +8737,7 @@ def _render_optimization_operations_sections(TABLE_HEIGHT: int, df: pd.DataFrame
                 if up_sw is not None:
                     try:
                         dsw = pd.read_csv(up_sw)
-                        st.dataframe(dsw.head(30), width="stretch", height=min(TABLE_HEIGHT, 260))
+                        st.dataframe(dsw.head(30), use_container_width=True, height=min(TABLE_HEIGHT, 260))
                         if st.button("Use sweep.csv to set active_ranges (min/max per param)", key=sk("ws_use_sw")):
                             rngs: Dict[str, ParamRange] = {}
                             for c in dsw.columns:
@@ -8757,7 +8772,7 @@ def _render_optimization_operations_sections(TABLE_HEIGHT: int, df: pd.DataFrame
                 if df_st.empty:
                     st.caption("No studies found in DuckDB for this pair yet.")
                 else:
-                    st.dataframe(df_st, width="stretch", height=min(TABLE_HEIGHT, 260))
+                    st.dataframe(df_st, use_container_width=True, height=min(TABLE_HEIGHT, 260))
                     st.caption("Select a study to load its trials into opt_df or merge multiple studies.")
 
                     study_ids = df_st["study_id"].astype(int).tolist()
@@ -8796,7 +8811,7 @@ def _render_optimization_operations_sections(TABLE_HEIGHT: int, df: pd.DataFrame
                                 df_all = pd.concat(all_parts, ignore_index=True)
                                 st.session_state["opt_df"] = df_all.copy()
                                 st.success(f"Merged {len(sel_ids_multi)} studies → {len(df_all)} rows in opt_df.")
-                                st.dataframe(df_all.head(100), width="stretch", height=min(TABLE_HEIGHT, 260))
+                                st.dataframe(df_all.head(100), use_container_width=True, height=min(TABLE_HEIGHT, 260))
                                 st.download_button(
                                     "Download merged_studies.csv",
                                     data=df_all.to_csv(index=False).encode("utf-8"),
@@ -8997,7 +9012,7 @@ def _render_optimization_monitoring_sections(TABLE_HEIGHT: int, df: pd.DataFrame
                     df_hist = df_hist.sort_values("created_at", ascending=True)
                     st.dataframe(
                         df_hist,
-                        width="stretch",
+                        use_container_width=True,
                         height=min(TABLE_HEIGHT, 260),
                     )
 
@@ -9054,11 +9069,11 @@ def _render_optimization_monitoring_sections(TABLE_HEIGHT: int, df: pd.DataFrame
                                 title=f"Best Score over studies — {pair_label}",
                                 hover_data=["study_id", "best_sharpe"],
                             )
-                            st.plotly_chart(fig_hist, width="stretch")
+                            st.plotly_chart(fig_hist, use_container_width=True)
                         except Exception:
                             st.dataframe(
                                 hist_df,
-                                width="stretch",
+                                use_container_width=True,
                                 height=min(TABLE_HEIGHT, 260),
                             )
 
@@ -9155,7 +9170,7 @@ def _render_optimization_monitoring_sections(TABLE_HEIGHT: int, df: pd.DataFrame
                                 if not df_art.empty:
                                     st.dataframe(
                                         df_art.head(50),
-                                        width="stretch",
+                                        use_container_width=True,
                                         height=min(TABLE_HEIGHT, 260),
                                     )
                             st.download_button(
@@ -9193,7 +9208,7 @@ def _render_optimization_monitoring_sections(TABLE_HEIGHT: int, df: pd.DataFrame
                                     if diff_rows:
                                         st.dataframe(
                                             pd.DataFrame(diff_rows),
-                                            width="stretch",
+                                            use_container_width=True,
                                             height=min(TABLE_HEIGHT, 260),
                                         )
                                     else:
@@ -9223,7 +9238,7 @@ def _render_optimization_monitoring_sections(TABLE_HEIGHT: int, df: pd.DataFrame
                     agg.columns = ["Pair"] + [f"{c}_{m}" for c, m in itertools.product(stats_cols, ("mean", "max", "min"))]
                     st.dataframe(
                         agg,
-                        width="stretch",
+                        use_container_width=True,
                         height=min(TABLE_HEIGHT, 260),
                     )
 
@@ -9272,7 +9287,7 @@ def _render_optimization_monitoring_sections(TABLE_HEIGHT: int, df: pd.DataFrame
                         st.caption("Representative portfolio of selected pairs (one strategy per pair):")
                         st.dataframe(
                             rep_df[["Pair"] + [c for c in ("Score", "Sharpe", "Drawdown") if c in rep_df.columns] + ["weight"]],
-                            width="stretch",
+                            use_container_width=True,
                             height=min(TABLE_HEIGHT, 280),
                         )
 
@@ -9365,9 +9380,9 @@ def _render_optimization_monitoring_sections(TABLE_HEIGHT: int, df: pd.DataFrame
                     mon_df = pd.DataFrame({"idx": mon.index, "Score_roll": mon.values})
                     if px is not None:
                         fig_mon = px.line(mon_df, x="idx", y="Score_roll", title="Rolling mean Score (monitoring)")
-                        st.plotly_chart(fig_mon, width="stretch")
+                        st.plotly_chart(fig_mon, use_container_width=True)
                     else:
-                        st.dataframe(mon_df.tail(50), width="stretch", height=min(TABLE_HEIGHT, 260))
+                        st.dataframe(mon_df.tail(50), use_container_width=True, height=min(TABLE_HEIGHT, 260))
                 except Exception:
                     pass
         except Exception as e:
@@ -9452,7 +9467,7 @@ def _render_optimization_portfolio_section(
             agg.columns = ["Pair"] + [f"{c}_{m}" for c, m in itertools.product(stats_cols, ("mean", "max", "min"))]
             st.dataframe(
                 agg,
-                width="stretch",
+                use_container_width=True,
                 height=min(TABLE_HEIGHT, 260),
             )
 
@@ -9485,7 +9500,7 @@ def _render_optimization_portfolio_section(
             cols_show = ["Pair"] + [c for c in ("Score", "Sharpe", "Drawdown", "Profit") if c in rep_df.columns]
             st.dataframe(
                 rep_df[cols_show],
-                width="stretch",
+                use_container_width=True,
                 height=min(TABLE_HEIGHT, 260),
             )
 
@@ -9563,7 +9578,7 @@ def _render_optimization_portfolio_section(
             cols_port = ["Pair", "weight", "dollars"] + [c for c in ("Score", "Sharpe", "Drawdown", "Profit") if c in rep_df.columns]
             st.dataframe(
                 rep_df[cols_port],
-                width="stretch",
+                use_container_width=True,
                 height=min(TABLE_HEIGHT, 280),
             )
 
@@ -10059,7 +10074,7 @@ def _render_optimization_macro_factor_section(
                         df_factors["Date"] = pd.to_datetime(df_factors["Date"], errors="coerce")
                     st.dataframe(
                         df_factors.head(20),
-                        width="stretch",
+                        use_container_width=True,
                         height=min(TABLE_HEIGHT, 260),
                     )
                 except Exception as e:
@@ -10188,7 +10203,7 @@ def _render_optimization_macro_factor_section(
                 df_join = df_join.sort_values("ScenarioImpact", ascending=False)
                 st.dataframe(
                     df_join,
-                    width="stretch",
+                    use_container_width=True,
                     height=min(TABLE_HEIGHT, 360),
                 )
 
@@ -10201,7 +10216,7 @@ def _render_optimization_macro_factor_section(
                             y="ScenarioImpact",
                             title="Scenario Impact per pair (factor shock · exposure)",
                         )
-                        st.plotly_chart(fig_imp, width="stretch")
+                        st.plotly_chart(fig_imp, use_container_width=True)
                 except Exception:
                     pass
 
@@ -10213,6 +10228,150 @@ def _render_optimization_macro_factor_section(
                     mime="text/csv",
                     key=sk("fac_imp_dl"),
                 )
+
+            # =====================
+            # Factor Correlation Matrix
+            # =====================
+            st.markdown("#### 6. Factor Correlation Matrix")
+            if not df_factors.empty and len(factor_cols) >= 2:
+                try:
+                    df_fac_num = df_factors[factor_cols].apply(pd.to_numeric, errors="coerce").dropna()
+                    if len(df_fac_num) >= 5:
+                        corr_mat = df_fac_num.corr().round(3)
+                        if px is not None:
+                            import plotly.graph_objects as go_fac  # type: ignore
+                            fig_corr = go_fac.Figure(data=go_fac.Heatmap(
+                                z=corr_mat.values,
+                                x=corr_mat.columns.tolist(),
+                                y=corr_mat.index.tolist(),
+                                colorscale="RdBu",
+                                zmid=0,
+                                text=corr_mat.values.tolist(),
+                                texttemplate="%{text}",
+                                colorbar=dict(title="ρ"),
+                            ))
+                            fig_corr.update_layout(
+                                title="Factor Correlation Matrix",
+                                height=max(300, 60 * len(factor_cols)),
+                            )
+                            st.plotly_chart(fig_corr, use_container_width=True)
+                        else:
+                            st.dataframe(corr_mat, use_container_width=True,
+                                         height=min(TABLE_HEIGHT, 260))
+                    else:
+                        st.caption("Need ≥5 non-null rows in factor time-series.")
+                except Exception as e:
+                    st.caption(f"Factor correlation matrix failed: {e}")
+            else:
+                st.caption("Upload factor time-series with ≥2 factor columns to see correlation matrix.")
+
+            # =====================
+            # Factor Time-Series Chart
+            # =====================
+            st.markdown("#### 7. Factor Time-Series Chart")
+            if not df_factors.empty and "Date" in df_factors.columns and factor_cols:
+                try:
+                    df_ts = df_factors[["Date"] + factor_cols].copy()
+                    df_ts["Date"] = pd.to_datetime(df_ts["Date"], errors="coerce")
+                    df_ts = df_ts.dropna(subset=["Date"]).sort_values("Date")
+                    for fc in factor_cols:
+                        df_ts[fc] = pd.to_numeric(df_ts[fc], errors="coerce")
+
+                    sel_facs = st.multiselect(
+                        "Select factors to plot",
+                        factor_cols,
+                        default=factor_cols[:min(4, len(factor_cols))],
+                        key=sk("fac_ts_sel"),
+                    )
+                    if sel_facs and px is not None:
+                        fig_ts = px.line(
+                            df_ts, x="Date", y=sel_facs,
+                            title="Factor Returns Time-Series",
+                        )
+                        st.plotly_chart(fig_ts, use_container_width=True)
+                except Exception as e:
+                    st.caption(f"Factor time-series chart failed: {e}")
+            else:
+                st.caption("Upload factor CSV with 'Date' column to see time-series chart.")
+
+            # =====================
+            # OLS Attribution (Score ~ factors)
+            # =====================
+            st.markdown("#### 8. OLS Attribution — Portfolio Score vs Factors")
+            st.caption(
+                "Regresses opt_df Score against user-defined factor exposures. "
+                "Requires exposures CSV with 'Pair' and factor columns."
+            )
+            if sm is not None and not df_exposures.empty and "Pair" in df_exposures.columns and factor_cols:
+                try:
+                    df_score_src = st.session_state.get("opt_df_batch", pd.DataFrame())
+                    if df_score_src is None or df_score_src.empty:
+                        df_score_src = df.copy()
+                        df_score_src["Pair"] = f"{sym1}-{sym2}"
+
+                    if "Pair" in df_score_src.columns and "Score" in df_score_src.columns:
+                        # aggregate score per pair
+                        sc_per_pair = (
+                            df_score_src
+                            .groupby("Pair")["Score"]
+                            .apply(lambda x: pd.to_numeric(x, errors="coerce").max())
+                            .reset_index()
+                        )
+                        df_ols = sc_per_pair.merge(df_exposures, on="Pair", how="inner")
+                        y_ols = pd.to_numeric(df_ols["Score"], errors="coerce")
+                        X_ols_raw = df_ols[[c for c in factor_cols if c in df_ols.columns]].apply(
+                            pd.to_numeric, errors="coerce"
+                        )
+                        mask = y_ols.notna() & X_ols_raw.notna().all(axis=1)
+                        y_ols = y_ols[mask]
+                        X_ols = X_ols_raw[mask]
+
+                        if len(y_ols) >= max(len(X_ols.columns) + 2, 4):
+                            X_ols_c = sm.add_constant(X_ols)
+                            ols_res = sm.OLS(y_ols, X_ols_c).fit()
+                            ols_summary = {
+                                "R²": round(float(ols_res.rsquared), 4),
+                                "Adj R²": round(float(ols_res.rsquared_adj), 4),
+                                "F-stat": round(float(ols_res.fvalue), 4),
+                                "p(F-stat)": round(float(ols_res.f_pvalue), 6),
+                                "n_obs": int(ols_res.nobs),
+                            }
+                            st.json(ols_summary)
+                            coef_df = pd.DataFrame({
+                                "factor": ols_res.params.index,
+                                "coef": ols_res.params.values.round(6),
+                                "std_err": ols_res.bse.values.round(6),
+                                "t_stat": ols_res.tvalues.values.round(4),
+                                "p_value": ols_res.pvalues.values.round(6),
+                                "significant": (ols_res.pvalues < 0.10),
+                            })
+                            st.dataframe(coef_df, use_container_width=True,
+                                         height=min(TABLE_HEIGHT, 280))
+
+                            if px is not None:
+                                fig_coef = px.bar(
+                                    coef_df[coef_df["factor"] != "const"],
+                                    x="factor", y="coef",
+                                    error_y="std_err",
+                                    color="significant",
+                                    color_discrete_map={True: "#2ECC71", False: "#BDC3C7"},
+                                    title="OLS Coefficients: Score ~ Factor Exposures",
+                                )
+                                st.plotly_chart(fig_coef, use_container_width=True)
+                        else:
+                            st.caption(
+                                f"Not enough observations ({len(y_ols)}) for OLS "
+                                f"with {len(X_ols.columns)} factors."
+                            )
+                    else:
+                        st.caption("Need 'Pair' and 'Score' in batch results.")
+                except Exception as e:
+                    st.caption(f"OLS attribution failed: {e}")
+            else:
+                st.caption(
+                    "Upload exposures CSV and ensure statsmodels is installed for OLS attribution."
+                )
+
         except Exception as e:
             st.caption(f"Macro & factor overlay panel failed: {e}")
 
@@ -10310,6 +10469,776 @@ def _render_optimization_audit_pack_section(
 
         except Exception as e:
             st.caption(f"Audit & Profiles pack panel failed: {e}")
+
+
+# =========================
+# SECTION 14.3: Alpha Decay Analysis
+# =========================
+
+def _render_optimization_alpha_decay_section(
+    TABLE_HEIGHT: int,
+    df: pd.DataFrame,
+    sym1: str,
+    sym2: str,
+) -> None:
+    """
+    Alpha Decay Analysis (Pro):
+    ---------------------------
+    מציג כיצד ה-alpha (Score / Sharpe) נשחק ככל שמרחיקים מנקודת האימון.
+
+    מה מוצג:
+    1. Deflated Sharpe Ratio עבור top-N trials (תוך שקלול selection bias).
+    2. עקומת "decay" לפי מספר trials שנבדקו — p_overfit vs n_trials.
+    3. ניתוח Multiple Testing Burden: כמה trials נדרשים לאשש Sharpe של X?
+    4. Sharpe distribution per trial bucket (early / mid / late בסדר ה-run).
+    5. הורדת alpha_decay_report.csv.
+    """
+    FOCUS = bool(st.session_state.get("opt_focus_mode", False))
+    pair_label = f"{sym1}-{sym2}"
+
+    with st.expander("📉 Alpha Decay & Selection Bias Analysis (Pro)", expanded=not FOCUS):
+        try:
+            if df is None or df.empty:
+                st.caption("No optimisation results available.")
+                return
+
+            # -------- Sharpe & Score columns --------
+            sh_col = "Sharpe" if "Sharpe" in df.columns else None
+            sc_col = "Score"  if "Score"  in df.columns else None
+
+            if sh_col is None and sc_col is None:
+                st.caption("Need at least one of: Sharpe, Score.")
+                return
+
+            st.markdown(
+                "**Deflated Sharpe Ratio** measures how much selection bias inflates the observed Sharpe "
+                "given the number of trials explored."
+            )
+
+            # -------- Controls --------
+            c1, c2, c3 = st.columns(3)
+            top_n = int(c1.number_input(
+                "Top-N trials to analyse",
+                min_value=5, max_value=min(500, len(df)),
+                value=min(50, len(df)), step=5,
+                key=sk("adec_topn"),
+            ))
+            t_obs = int(c2.number_input(
+                "Observations (trading days)",
+                min_value=20, max_value=5000,
+                value=int(st.session_state.get("opt_wf_n_days", 252)), step=20,
+                key=sk("adec_tobs"),
+            ))
+            target_sharpe = float(c3.number_input(
+                "Target Sharpe (annual)",
+                min_value=0.1, max_value=5.0,
+                value=1.0, step=0.1,
+                key=sk("adec_tgt"),
+            ))
+
+            # -------- Compute DSR for each trial --------
+            work_col = sh_col or sc_col
+            s_series = pd.to_numeric(df[work_col], errors="coerce").dropna().sort_values(ascending=False)
+            top_vals = s_series.head(top_n).values
+
+            rows_dsr: List[Dict[str, Any]] = []
+            for i, sh_val in enumerate(top_vals, start=1):
+                try:
+                    dsr, p_over = deflated_sharpe_ratio(
+                        float(sh_val),
+                        t_eff=t_obs,
+                        n_strategies=i,
+                        skew=0.0,
+                        kurt=3.0,
+                        two_sided=False,
+                        use_student_t=True,
+                        max_strategies=top_n + 1,
+                    )
+                except Exception:
+                    dsr, p_over = float(sh_val), 1.0
+                rows_dsr.append({
+                    "trial_rank": i,
+                    f"observed_{work_col}": round(float(sh_val), 4),
+                    "DSR": round(float(dsr), 4),
+                    "p_overfit": round(float(p_over), 4),
+                    "is_significant": bool(p_over < 0.10),
+                })
+
+            df_dsr = pd.DataFrame(rows_dsr)
+
+            # -------- KPI summary --------
+            n_sig = int(df_dsr["is_significant"].sum())
+            best_dsr = float(df_dsr["DSR"].max()) if not df_dsr.empty else float("nan")
+            median_p = float(df_dsr["p_overfit"].median()) if not df_dsr.empty else float("nan")
+
+            kc1, kc2, kc3, kc4 = st.columns(4)
+            kc1.metric("Trials analysed", f"{len(df_dsr):,}")
+            kc2.metric("Significant (p<0.10)", f"{n_sig:,}")
+            kc3.metric("Best DSR", f"{best_dsr:.3f}")
+            kc4.metric("Median p_overfit", f"{median_p:.3f}")
+
+            # -------- Table --------
+            st.dataframe(df_dsr, use_container_width=True, height=min(TABLE_HEIGHT, 300))
+
+            # -------- DSR decay chart --------
+            if px is not None and not df_dsr.empty:
+                try:
+                    fig_dsr = px.line(
+                        df_dsr,
+                        x="trial_rank",
+                        y=["DSR", f"observed_{work_col}"],
+                        markers=False,
+                        title=f"DSR vs Observed {work_col} — {pair_label}",
+                        labels={"trial_rank": "Trials explored (rank)", "value": "Score"},
+                    )
+                    fig_dsr.add_hline(y=0, line_dash="dash", line_color="red", annotation_text="DSR=0")
+                    st.plotly_chart(fig_dsr, use_container_width=True)
+                except Exception:
+                    pass
+
+            # -------- p_overfit decay chart --------
+            if px is not None and not df_dsr.empty:
+                try:
+                    fig_p = px.area(
+                        df_dsr,
+                        x="trial_rank",
+                        y="p_overfit",
+                        title="Selection-Bias p_overfit as more trials are explored",
+                        color_discrete_sequence=["#FF6B6B"],
+                    )
+                    fig_p.add_hline(y=0.10, line_dash="dot", line_color="green", annotation_text="p=0.10 threshold")
+                    st.plotly_chart(fig_p, use_container_width=True)
+                except Exception:
+                    pass
+
+            # -------- Multiple testing burden: min trials to confirm target_sharpe --------
+            st.markdown(f"#### Multiple Testing Burden — Sharpe target = {target_sharpe:.2f}")
+            st.caption(
+                "How many independent trials must you run before a Sharpe of the target level "
+                "remains significant (DSR > target · 0.5) despite selection bias?"
+            )
+            try:
+                burden_rows: List[Dict[str, Any]] = []
+                for n_tr in [1, 5, 10, 25, 50, 100, 200, 500, 1000]:
+                    try:
+                        dsr_b, p_b = deflated_sharpe_ratio(
+                            target_sharpe, t_eff=t_obs, n_strategies=n_tr,
+                            skew=0.0, kurt=3.0, two_sided=False,
+                            use_student_t=True, max_strategies=n_tr + 1,
+                        )
+                    except Exception:
+                        dsr_b, p_b = target_sharpe, 1.0
+                    burden_rows.append({
+                        "n_trials": n_tr,
+                        "target_Sharpe": target_sharpe,
+                        "DSR": round(float(dsr_b), 4),
+                        "p_overfit": round(float(p_b), 4),
+                        "survives_bias": bool(dsr_b > 0 and p_b < 0.10),
+                    })
+                df_burden = pd.DataFrame(burden_rows)
+                st.dataframe(df_burden, use_container_width=True, height=min(280, TABLE_HEIGHT))
+
+                if px is not None:
+                    fig_burd = px.bar(
+                        df_burden, x="n_trials", y="DSR",
+                        color="survives_bias",
+                        color_discrete_map={True: "#2ECC71", False: "#E74C3C"},
+                        title=f"DSR vs n_trials for target Sharpe={target_sharpe:.2f} (t={t_obs} days)",
+                    )
+                    st.plotly_chart(fig_burd, use_container_width=True)
+            except Exception as e:
+                st.caption(f"Burden analysis failed: {e}")
+
+            # -------- Sharpe distribution by trial bucket --------
+            st.markdown("#### Sharpe Distribution by Trial Bucket (early / mid / late)")
+            if sh_col is not None and len(df) >= 10:
+                try:
+                    df_buck = df[[sh_col]].copy()
+                    df_buck["trial_idx"] = range(len(df_buck))
+                    n = len(df_buck)
+                    df_buck["bucket"] = pd.cut(
+                        df_buck["trial_idx"],
+                        bins=[0, n // 3, 2 * n // 3, n],
+                        labels=["early", "mid", "late"],
+                        include_lowest=True,
+                    )
+                    df_buck[sh_col] = pd.to_numeric(df_buck[sh_col], errors="coerce")
+                    grp = df_buck.groupby("bucket")[sh_col].agg(["mean", "median", "std", "max"]).reset_index()
+                    grp.columns = ["bucket", "mean_sharpe", "median_sharpe", "std_sharpe", "max_sharpe"]
+                    st.dataframe(grp, use_container_width=True, height=min(180, TABLE_HEIGHT))
+                    if px is not None:
+                        fig_buck = px.violin(
+                            df_buck.dropna(subset=[sh_col]),
+                            x="bucket", y=sh_col,
+                            box=True, points="outliers",
+                            title=f"Sharpe Distribution — early vs mid vs late trials ({pair_label})",
+                        )
+                        st.plotly_chart(fig_buck, use_container_width=True)
+                except Exception as e:
+                    st.caption(f"Bucket analysis failed: {e}")
+            else:
+                st.caption("Need Sharpe column and ≥10 trials for bucket analysis.")
+
+            # -------- Download --------
+            if not df_dsr.empty:
+                st.download_button(
+                    "Download alpha_decay_report.csv",
+                    data=df_dsr.to_csv(index=False).encode("utf-8"),
+                    file_name=f"alpha_decay_{pair_label}.csv",
+                    mime="text/csv",
+                    key=sk("adec_dl"),
+                )
+
+        except Exception as e:
+            st.caption(f"Alpha decay section failed: {e}")
+
+
+# =========================
+# SECTION 14.4: Regime-Conditioned Performance Breakdown
+# =========================
+
+def _render_optimization_regime_performance_section(
+    TABLE_HEIGHT: int,
+    df: pd.DataFrame,
+    sym1: str,
+    sym2: str,
+) -> None:
+    """
+    Regime-Conditioned Performance Breakdown (Pro):
+    -----------------------------------------------
+    מפרק את תוצאות האופטימיזציה לפי רג'ים משוערים.
+
+    שיטת proxy לרג'ים (אין גישה לנתוני מחיר אמיתיים ב-UI זה):
+    - SCORE BUCKET: מפריד trials לפי רמת Score → top / mid / bottom שלישים.
+    - SHARPE BUCKET: מפריד לפי Sharpe אם קיים.
+    - PARAM CLUSTER: k=3 clustering על מרחב הפרמטרים → כל קלאסטר מייצג "רג'ים פרמטרי".
+
+    מה מוצג:
+    1. Score/Sharpe/DD distribution per Score-regime (top/mid/bottom).
+    2. Parameter heatmap — which parameter values dominate each regime bucket?
+    3. Cluster analysis (k-means on param space) — cluster stats.
+    4. Download regime_breakdown.csv.
+    """
+    FOCUS = bool(st.session_state.get("opt_focus_mode", False))
+    pair_label = f"{sym1}-{sym2}"
+
+    with st.expander("🌡️ Regime-Conditioned Performance Breakdown (Pro)", expanded=not FOCUS):
+        try:
+            if df is None or df.empty:
+                st.caption("No optimisation results available.")
+                return
+
+            sc_col = "Score"   if "Score"   in df.columns else None
+            sh_col = "Sharpe"  if "Sharpe"  in df.columns else None
+            dd_col = "Drawdown" if "Drawdown" in df.columns else None
+
+            if sc_col is None:
+                st.caption("Need 'Score' column.")
+                return
+
+            metric_cols = [c for c in (sc_col, sh_col, dd_col) if c is not None]
+
+            # -------- 1. Score-Bucket breakdown --------
+            st.markdown("#### 1. Performance by Score Regime (top / mid / bottom third)")
+            try:
+                df_reg = df[metric_cols].copy()
+                for c in metric_cols:
+                    df_reg[c] = pd.to_numeric(df_reg[c], errors="coerce")
+                df_reg = df_reg.dropna(subset=[sc_col])
+
+                n = len(df_reg)
+                if n < 6:
+                    st.caption("Need ≥6 trials for regime breakdown.")
+                else:
+                    df_reg["score_regime"] = pd.cut(
+                        df_reg[sc_col],
+                        bins=[df_reg[sc_col].min() - 1e-9, df_reg[sc_col].quantile(0.33),
+                              df_reg[sc_col].quantile(0.67), df_reg[sc_col].max() + 1e-9],
+                        labels=["bottom", "mid", "top"],
+                    )
+                    grp_stats = df_reg.groupby("score_regime")[metric_cols].agg(
+                        ["mean", "median", "std", "count"]
+                    ).round(4).reset_index()
+                    st.dataframe(grp_stats, use_container_width=True, height=min(220, TABLE_HEIGHT))
+
+                    # Violin per regime
+                    if px is not None and sh_col is not None:
+                        try:
+                            fig_reg = px.violin(
+                                df_reg.dropna(subset=[sh_col]),
+                                x="score_regime", y=sh_col,
+                                box=True, points="outliers",
+                                color="score_regime",
+                                title=f"Sharpe by Score Regime — {pair_label}",
+                                category_orders={"score_regime": ["bottom", "mid", "top"]},
+                            )
+                            st.plotly_chart(fig_reg, use_container_width=True)
+                        except Exception:
+                            pass
+
+                    # DD vs Score scatter coloured by regime
+                    if px is not None and dd_col is not None:
+                        try:
+                            fig_sc = px.scatter(
+                                df_reg.dropna(subset=[dd_col]),
+                                x=sc_col, y=dd_col,
+                                color="score_regime",
+                                title=f"Score vs Drawdown by Regime — {pair_label}",
+                                color_discrete_map={"top": "#2ECC71", "mid": "#F39C12", "bottom": "#E74C3C"},
+                                opacity=0.6,
+                            )
+                            st.plotly_chart(fig_sc, use_container_width=True)
+                        except Exception:
+                            pass
+            except Exception as e:
+                st.caption(f"Score-regime breakdown failed: {e}")
+
+            # -------- 2. Parameter heatmap per regime --------
+            st.markdown("#### 2. Parameter Dominance per Score Regime")
+            st.caption(
+                "Shows the median value of each parameter in top-third vs bottom-third trials. "
+                "Large gaps suggest which parameters drive performance."
+            )
+            try:
+                # Infer numeric parameter columns (exclude standard metric cols)
+                exclude = {"Score", "Sharpe", "Drawdown", "Profit", "ParamScore",
+                           "trial_no", "trial_id", "study_id", "rank", "DSR",
+                           "p_overfit", "tag", "sampler", "score_regime"}
+                param_candidates = [
+                    c for c in df.columns
+                    if c not in exclude
+                    and pd.api.types.is_numeric_dtype(df[c])
+                ][:20]  # cap at 20 for readability
+
+                if param_candidates and sc_col in df.columns:
+                    df_pm = df[param_candidates + [sc_col]].copy()
+                    for c in param_candidates + [sc_col]:
+                        df_pm[c] = pd.to_numeric(df_pm[c], errors="coerce")
+                    df_pm = df_pm.dropna(subset=[sc_col])
+
+                    if len(df_pm) >= 6:
+                        thresh_top = df_pm[sc_col].quantile(0.67)
+                        thresh_bot = df_pm[sc_col].quantile(0.33)
+                        top_med = df_pm.loc[df_pm[sc_col] >= thresh_top, param_candidates].median()
+                        bot_med = df_pm.loc[df_pm[sc_col] <= thresh_bot, param_candidates].median()
+                        diff_med = ((top_med - bot_med) / (bot_med.abs() + 1e-12)).rename("relative_diff")
+
+                        heatmap_df = pd.DataFrame({
+                            "param": param_candidates,
+                            "top_median": top_med.values,
+                            "bot_median": bot_med.values,
+                            "relative_diff": diff_med.values,
+                        }).sort_values("relative_diff", ascending=False)
+
+                        st.dataframe(heatmap_df, use_container_width=True, height=min(320, TABLE_HEIGHT))
+
+                        if px is not None:
+                            fig_bar = px.bar(
+                                heatmap_df,
+                                x="param", y="relative_diff",
+                                color=heatmap_df["relative_diff"].apply(lambda v: "positive" if v >= 0 else "negative"),
+                                color_discrete_map={"positive": "#2ECC71", "negative": "#E74C3C"},
+                                title="Parameter relative diff: top vs bottom regime (positive = top uses higher value)",
+                            )
+                            st.plotly_chart(fig_bar, use_container_width=True)
+                    else:
+                        st.caption("Need ≥6 trials with numeric parameter columns.")
+                else:
+                    st.caption("No numeric parameter columns detected in opt_df.")
+            except Exception as e:
+                st.caption(f"Parameter heatmap failed: {e}")
+
+            # -------- 3. K-Means clustering on parameter space --------
+            st.markdown("#### 3. Cluster Analysis (k-means on parameter space)")
+            if KMeans is not None:
+                try:
+                    n_clusters = int(st.slider(
+                        "Number of clusters (k)",
+                        min_value=2, max_value=8,
+                        value=3, step=1,
+                        key=sk("reg_kmeans_k"),
+                    ))
+                    exclude2 = {"Score", "Sharpe", "Drawdown", "Profit", "ParamScore",
+                                "trial_no", "trial_id", "study_id", "rank",
+                                "DSR", "p_overfit", "tag", "sampler", "score_regime"}
+                    param_cols2 = [
+                        c for c in df.columns
+                        if c not in exclude2 and pd.api.types.is_numeric_dtype(df[c])
+                    ][:15]
+
+                    if param_cols2 and len(df) >= n_clusters * 3:
+                        Xraw = df[param_cols2].apply(pd.to_numeric, errors="coerce")
+                        Xraw = Xraw.fillna(Xraw.median())
+                        # normalise each column to [0,1]
+                        col_min = Xraw.min()
+                        col_max = Xraw.max()
+                        Xnorm = (Xraw - col_min) / (col_max - col_min + 1e-12)
+
+                        km = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
+                        labels = km.fit_predict(Xnorm.values)
+
+                        df_clust = df[metric_cols + param_cols2[:5]].copy()
+                        df_clust["cluster"] = labels
+                        for c in metric_cols:
+                            df_clust[c] = pd.to_numeric(df_clust[c], errors="coerce")
+
+                        clust_stats = df_clust.groupby("cluster")[metric_cols].agg(
+                            ["mean", "count"]
+                        ).round(4).reset_index()
+                        st.dataframe(clust_stats, use_container_width=True, height=min(220, TABLE_HEIGHT))
+
+                        # Scatter: param0 vs param1, coloured by cluster
+                        if px is not None and len(param_cols2) >= 2:
+                            try:
+                                fig_clust = px.scatter(
+                                    df_clust,
+                                    x=param_cols2[0], y=param_cols2[1],
+                                    color=df_clust["cluster"].astype(str),
+                                    symbol=df_clust["cluster"].astype(str),
+                                    hover_data=metric_cols,
+                                    title=f"K-Means Clusters (k={n_clusters}) — {pair_label}",
+                                    opacity=0.7,
+                                )
+                                st.plotly_chart(fig_clust, use_container_width=True)
+                            except Exception:
+                                pass
+
+                        # PCA 2D view if PCA available
+                        if PCA is not None and len(param_cols2) >= 3:
+                            try:
+                                pca = PCA(n_components=2)
+                                coords = pca.fit_transform(Xnorm.values)
+                                df_pca = pd.DataFrame({
+                                    "PC1": coords[:, 0], "PC2": coords[:, 1],
+                                    "cluster": labels.astype(str),
+                                })
+                                for c in metric_cols:
+                                    df_pca[c] = pd.to_numeric(df[c], errors="coerce").values
+                                fig_pca = px.scatter(
+                                    df_pca, x="PC1", y="PC2",
+                                    color="cluster",
+                                    hover_data=metric_cols,
+                                    title=f"PCA 2D — Cluster View ({pair_label})",
+                                    opacity=0.7,
+                                )
+                                var_exp = pca.explained_variance_ratio_
+                                fig_pca.update_layout(
+                                    xaxis_title=f"PC1 ({var_exp[0]*100:.1f}% var)",
+                                    yaxis_title=f"PC2 ({var_exp[1]*100:.1f}% var)",
+                                )
+                                st.plotly_chart(fig_pca, use_container_width=True)
+                                st.caption(
+                                    f"PCA explains {sum(var_exp)*100:.1f}% of variance. "
+                                    f"PC1={var_exp[0]*100:.1f}%, PC2={var_exp[1]*100:.1f}%."
+                                )
+                            except Exception:
+                                pass
+                    else:
+                        st.caption(f"Need ≥{n_clusters * 3} trials and numeric params for clustering.")
+                except Exception as e:
+                    st.caption(f"Cluster analysis failed: {e}")
+            else:
+                st.caption("sklearn not available — clustering disabled.")
+
+            # -------- Download --------
+            try:
+                dl_df = df[metric_cols].copy()
+                for c in metric_cols:
+                    dl_df[c] = pd.to_numeric(dl_df[c], errors="coerce")
+                if sc_col in dl_df.columns and len(dl_df) >= 6:
+                    dl_df["score_regime"] = pd.cut(
+                        dl_df[sc_col],
+                        bins=[dl_df[sc_col].min() - 1e-9, dl_df[sc_col].quantile(0.33),
+                              dl_df[sc_col].quantile(0.67), dl_df[sc_col].max() + 1e-9],
+                        labels=["bottom", "mid", "top"],
+                    )
+                st.download_button(
+                    "Download regime_breakdown.csv",
+                    data=dl_df.to_csv(index=False).encode("utf-8"),
+                    file_name=f"regime_breakdown_{pair_label}.csv",
+                    mime="text/csv",
+                    key=sk("reg_dl"),
+                )
+            except Exception:
+                pass
+
+        except Exception as e:
+            st.caption(f"Regime performance section failed: {e}")
+
+
+# =========================
+# SECTION 14.5: Parameter Stability Across Studies
+# =========================
+
+def _render_optimization_parameter_stability_section(
+    TABLE_HEIGHT: int,
+    df: pd.DataFrame,
+    sym1: str,
+    sym2: str,
+) -> None:
+    """
+    Parameter Stability Analysis (Pro):
+    ------------------------------------
+    שואל: האם הפרמטרים האופטימליים יציבים לאורך זמן ובין ריצות שונות?
+
+    מנגנון:
+    - טוען את כל ה-studies עבור הזוג הנוכחי מ-DuckDB.
+    - לכל study, טוען את ה-trials ומחלץ את הפרמטרים של ה-top-K% הטובים.
+    - בונה DataFrame של (study_id, param, top_value).
+    - מציג:
+        * טבלת consensus — לכל פרמטר: median / IQR / CV של הערכים בין studies.
+        * גרף drift לאורך זמן — rolling median per parameter.
+        * Heatmap: study_id × parameter → top_median_value.
+        * Download param_stability.csv.
+
+    אם אין multi-study data: עובד על opt_df הנוכחי בלבד (split ל-5 folds).
+    """
+    FOCUS = bool(st.session_state.get("opt_focus_mode", False))
+    pair_label = f"{sym1}-{sym2}"
+
+    with st.expander("📐 Parameter Stability Across Studies (Pro)", expanded=not FOCUS):
+        try:
+            if df is None or df.empty:
+                st.caption("No optimisation results available.")
+                return
+
+            exclude = {"Score", "Sharpe", "Drawdown", "Profit", "ParamScore",
+                       "trial_no", "trial_id", "study_id", "rank", "DSR",
+                       "p_overfit", "tag", "sampler", "bucket", "score_regime",
+                       "cluster", "weight", "dollars"}
+            param_cols = [
+                c for c in df.columns
+                if c not in exclude and pd.api.types.is_numeric_dtype(df[c])
+            ][:18]
+
+            if not param_cols:
+                st.caption("No numeric parameter columns found in opt_df.")
+                return
+
+            top_pct = float(st.slider(
+                "Top-% of trials to include as 'good' (per study)",
+                min_value=5, max_value=50,
+                value=20, step=5,
+                key=sk("stab_topk"),
+            )) / 100.0
+
+            # -------- Attempt to load multi-study data from DuckDB --------
+            studies_df_list: List[pd.DataFrame] = []  # each entry: (study_id, trial_rows_top_k)
+
+            if duckdb is not None:
+                try:
+                    df_studies = list_studies_for_pair(pair_label, limit=50)
+                    if df_studies is not None and not df_studies.empty and "study_id" in df_studies.columns:
+                        sids = df_studies["study_id"].astype(int).tolist()
+                        max_studies = int(st.number_input(
+                            "Max studies to load (cap for performance)",
+                            min_value=2, max_value=50,
+                            value=min(15, len(sids)), step=1,
+                            key=sk("stab_maxst"),
+                        ))
+                        sids = sids[-max_studies:]  # most recent
+
+                        with st.spinner(f"Loading {len(sids)} studies…"):
+                            for sid in sids:
+                                try:
+                                    dft = load_trials_from_duck(int(sid))
+                                    if dft is None or dft.empty:
+                                        continue
+                                    # filter cols available in this df
+                                    available_p = [c for c in param_cols if c in dft.columns]
+                                    score_here = "Score" if "Score" in dft.columns else None
+                                    if score_here is None or not available_p:
+                                        continue
+                                    dft[score_here] = pd.to_numeric(dft[score_here], errors="coerce")
+                                    thresh = dft[score_here].quantile(1.0 - top_pct)
+                                    top_rows = dft[dft[score_here] >= thresh][available_p].copy()
+                                    top_rows["study_id"] = int(sid)
+                                    studies_df_list.append(top_rows)
+                                except Exception:
+                                    continue
+                except Exception:
+                    pass
+
+            # -------- If no DuckDB data, split current opt_df into folds --------
+            if not studies_df_list:
+                st.info(
+                    "No DuckDB multi-study data loaded — falling back to 5-fold split of current opt_df."
+                )
+                n_folds = 5
+                fold_size = max(1, len(df) // n_folds)
+                sc_col = "Score" if "Score" in df.columns else None
+                for i in range(n_folds):
+                    fold = df.iloc[i * fold_size: (i + 1) * fold_size].copy()
+                    available_p = [c for c in param_cols if c in fold.columns]
+                    if not available_p:
+                        continue
+                    if sc_col is not None:
+                        fold[sc_col] = pd.to_numeric(fold[sc_col], errors="coerce")
+                        thresh = fold[sc_col].quantile(1.0 - top_pct)
+                        top_rows = fold[fold[sc_col] >= thresh][available_p].copy()
+                    else:
+                        top_rows = fold[available_p].copy()
+                    top_rows["study_id"] = i
+                    studies_df_list.append(top_rows)
+
+            if not studies_df_list:
+                st.caption("Could not build any study slices for stability analysis.")
+                return
+
+            df_all_studies = pd.concat(studies_df_list, ignore_index=True)
+            n_studies_loaded = int(df_all_studies["study_id"].nunique()) if "study_id" in df_all_studies.columns else 0
+            st.caption(f"Loaded data from {n_studies_loaded} studies / folds, {len(df_all_studies)} rows total.")
+
+            # -------- Consensus table --------
+            st.markdown("#### Consensus Statistics Across Studies")
+            st.caption(
+                "Low CV (Coefficient of Variation) = stable parameter. "
+                "High CV = parameter varies across studies → potential instability."
+            )
+            available_for_stats = [c for c in param_cols if c in df_all_studies.columns]
+            if available_for_stats:
+                try:
+                    consensus_rows: List[Dict[str, Any]] = []
+                    for c in available_for_stats:
+                        vals = pd.to_numeric(df_all_studies[c], errors="coerce").dropna()
+                        if len(vals) < 2:
+                            continue
+                        mean_v = float(vals.mean())
+                        med_v  = float(vals.median())
+                        std_v  = float(vals.std())
+                        iqr_v  = float(vals.quantile(0.75) - vals.quantile(0.25))
+                        cv_v   = std_v / (abs(mean_v) + 1e-12)
+                        consensus_rows.append({
+                            "parameter": c,
+                            "mean": round(mean_v, 6),
+                            "median": round(med_v, 6),
+                            "std": round(std_v, 6),
+                            "IQR": round(iqr_v, 6),
+                            "CV": round(cv_v, 4),
+                            "stability": "✅ stable" if cv_v < 0.25 else ("⚠️ moderate" if cv_v < 0.60 else "❌ unstable"),
+                        })
+                    df_consensus = pd.DataFrame(consensus_rows).sort_values("CV")
+                    st.dataframe(df_consensus, use_container_width=True, height=min(TABLE_HEIGHT, 380))
+
+                    # Bar chart: CV per param
+                    if px is not None:
+                        try:
+                            fig_cv = px.bar(
+                                df_consensus,
+                                x="parameter", y="CV",
+                                color="stability",
+                                color_discrete_map={
+                                    "✅ stable": "#2ECC71",
+                                    "⚠️ moderate": "#F39C12",
+                                    "❌ unstable": "#E74C3C",
+                                },
+                                title=f"Parameter CV (Coefficient of Variation) — {pair_label}",
+                            )
+                            fig_cv.add_hline(y=0.25, line_dash="dot", line_color="orange",
+                                             annotation_text="CV=0.25 (stability boundary)")
+                            fig_cv.add_hline(y=0.60, line_dash="dash", line_color="red",
+                                             annotation_text="CV=0.60 (instability)")
+                            st.plotly_chart(fig_cv, use_container_width=True)
+                        except Exception:
+                            pass
+                except Exception as e:
+                    st.caption(f"Consensus table failed: {e}")
+
+            # -------- Drift chart per parameter (rolling median over study_id) --------
+            st.markdown("#### Parameter Drift Over Studies")
+            if "study_id" in df_all_studies.columns and available_for_stats:
+                try:
+                    drift_sel = st.multiselect(
+                        "Select parameters to show drift",
+                        available_for_stats,
+                        default=available_for_stats[:min(4, len(available_for_stats))],
+                        key=sk("stab_drift_sel"),
+                    )
+                    if drift_sel:
+                        grp_sid = df_all_studies.groupby("study_id")[drift_sel].median().reset_index()
+                        grp_sid = grp_sid.sort_values("study_id")
+
+                        if px is not None:
+                            try:
+                                import plotly.graph_objects as go_inner  # type: ignore
+                                fig_drift = go_inner.Figure()
+                                for pc in drift_sel:
+                                    fig_drift.add_trace(go_inner.Scatter(
+                                        x=grp_sid["study_id"].astype(str),
+                                        y=grp_sid[pc],
+                                        mode="lines+markers",
+                                        name=pc,
+                                    ))
+                                fig_drift.update_layout(
+                                    title=f"Median Parameter Value per Study — {pair_label}",
+                                    xaxis_title="study_id",
+                                    yaxis_title="Median value (top trials)",
+                                    height=420,
+                                )
+                                st.plotly_chart(fig_drift, use_container_width=True)
+                            except Exception:
+                                st.dataframe(grp_sid, use_container_width=True,
+                                             height=min(TABLE_HEIGHT, 260))
+                except Exception as e:
+                    st.caption(f"Drift chart failed: {e}")
+
+            # -------- Study × Parameter heatmap --------
+            st.markdown("#### Study × Parameter Heatmap (median top-% values)")
+            if "study_id" in df_all_studies.columns and available_for_stats and px is not None:
+                try:
+                    hm_params = available_for_stats[:12]  # cap for readability
+                    grp_hm = df_all_studies.groupby("study_id")[hm_params].median().reset_index()
+                    grp_hm = grp_hm.sort_values("study_id")
+
+                    # Normalise rows 0-1 for colour consistency
+                    hm_mat = grp_hm[hm_params].copy()
+                    for col in hm_params:
+                        col_min = hm_mat[col].min()
+                        col_max = hm_mat[col].max()
+                        hm_mat[col] = (hm_mat[col] - col_min) / (col_max - col_min + 1e-12)
+
+                    import plotly.graph_objects as go_hm  # type: ignore
+                    fig_hm = go_hm.Figure(data=go_hm.Heatmap(
+                        z=hm_mat.values,
+                        x=hm_params,
+                        y=grp_hm["study_id"].astype(str).tolist(),
+                        colorscale="RdYlGn",
+                        text=grp_hm[hm_params].round(4).values.tolist(),
+                        texttemplate="%{text}",
+                        colorbar=dict(title="Normalised"),
+                    ))
+                    fig_hm.update_layout(
+                        title=f"Study × Parameter Heatmap (normalised median) — {pair_label}",
+                        height=max(300, min(60 * n_studies_loaded, 700)),
+                    )
+                    st.plotly_chart(fig_hm, use_container_width=True)
+                except Exception as e:
+                    st.caption(f"Heatmap failed: {e}")
+
+            # -------- Download --------
+            try:
+                st.download_button(
+                    "Download param_stability.csv",
+                    data=df_all_studies.to_csv(index=False).encode("utf-8"),
+                    file_name=f"param_stability_{pair_label}.csv",
+                    mime="text/csv",
+                    key=sk("stab_dl"),
+                )
+                if "df_consensus" in dir() and not df_consensus.empty:  # type: ignore[name-defined]
+                    st.download_button(
+                        "Download param_consensus.csv",
+                        data=df_consensus.to_csv(index=False).encode("utf-8"),  # type: ignore[name-defined]
+                        file_name=f"param_consensus_{pair_label}.csv",
+                        mime="text/csv",
+                        key=sk("stab_cons_dl"),
+                    )
+            except Exception:
+                pass
+
+        except Exception as e:
+            st.caption(f"Parameter stability section failed: {e}")
+
+
 """
 חלק 15/15 — Validation & Public API Hooks
 =========================================

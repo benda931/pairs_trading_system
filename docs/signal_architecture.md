@@ -1,8 +1,17 @@
 # Signal Architecture — Pairs Trading System
 
 **Version:** 1.0
-**Last updated:** 2026-03-28
+**Last updated:** 2026-03-31
 **Scope:** Signal engine, regime engine, trade lifecycle, threshold engine, signal quality, analytics, and agent layer
+
+> **Integration Status: PARTIALLY INTEGRATED**
+> The signal components (ThresholdEngine, RegimeEngine, SignalQualityEngine,
+> TradeLifecycleStateMachine) are individually implemented and tested (86 tests pass).
+> The canonical `SignalPipeline` (`core/signal_pipeline.py`, ADR-006) chains them
+> together but is **not yet called from the backtester or any operational path** (P1-PIPE).
+> The operational backtester uses raw z-score thresholds from `common/signal_generator.py`
+> without regime/quality gating.
+> See: `docs/INTEGRATION_STATUS.md`, `docs/remediation/remediation_ledger.md:P1-PIPE`
 
 ---
 

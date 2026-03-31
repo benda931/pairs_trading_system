@@ -11,7 +11,7 @@ Callers must handle None returns from SecretLoader.load() appropriately.
 Public re-exports for convenient top-level imports.
 """
 
-from secrets.contracts import SecretLoader, SecretReference
+from secrets_mgmt.contracts import SecretLoader, SecretReference
 
 __all__ = [
     "SecretLoader",

@@ -162,6 +162,8 @@ from common.macro_sensitivity import (
     build_regime_performance_table, # ביצועים לפי משטרים לזוג
 )
 
+import numpy as np  # noqa: E402
+
 
 LOGGER = logging.getLogger("root.macro_tab")
 
@@ -2782,9 +2784,10 @@ def _build_spread_series(
     pa = prices_wide[a].astype(float)
     pb = prices_wide[b].astype(float)
     if method == "log_spread":
-        spread = (pa.apply(lambda x: float("nan") if x <= 0 else x)).pipe(lambda s: s.apply(pd.np.log)) - (
-            pb.apply(lambda x: float("nan") if x <= 0 else x)
-        ).pipe(lambda s: s.apply(pd.np.log))
+        spread = (
+            pa.where(pa > 0).apply(lambda x: np.log(x) if x > 0 else float("nan"))
+            - pb.where(pb > 0).apply(lambda x: np.log(x) if x > 0 else float("nan"))
+        )
     elif method == "ratio":
         spread = pa / pb
     else:  # diff
@@ -3048,6 +3051,938 @@ def _sync_cfg_with_ui(
         LOGGER.debug("cfg sync skipped", exc_info=True)
 
     return cfg
+
+
+# ===========================================================================
+# NEW SECTION A: Yield Curve Analysis
+# ===========================================================================
+
+def _render_yield_curve_analysis_section(state: "MacroTabState") -> None:
+    """
+    Yield Curve Analysis — ניתוח עקומת התשואה:
+    - זיהוי היפוך (2Y-10Y spread).
+    - גרף היסטורי של המרווח.
+    - אינדיקטור הסתברות מיתון (כלל אצבע פשוט).
+    - השוואת שיפוע (Steepener / Flattener).
+    """
+    with st.expander("📈 Yield Curve Analysis — עקומת תשואה", expanded=False):
+        try:
+            macro_df: Optional[pd.DataFrame] = (
+                getattr(state, "macro_df", None)
+                or state_get(MacroStateKeys.MACRO_DF, None)
+            )
+            if macro_df is None or macro_df.empty:
+                st.info("אין נתוני macro_df זמינים לניתוח עקומת תשואה.")
+                return
+
+            df = macro_df.copy()
+            if not isinstance(df.index, pd.DatetimeIndex):
+                df.index = pd.to_datetime(df.index, errors="coerce")
+            df = df.sort_index().dropna(how="all")
+
+            # זיהוי עמודות שיעורי ריבית
+            rate_candidates = {
+                "2Y": ["rate_2y", "us_2y", "yield_2y", "rate_short", "t2y", "2y"],
+                "10Y": ["rate_10y", "us_10y", "yield_10y", "rate_long", "t10y", "10y"],
+                "30Y": ["rate_30y", "us_30y", "yield_30y", "t30y", "30y"],
+                "3M": ["rate_3m", "rate_short_3m", "t3m", "3m", "tbill_3m"],
+            }
+
+            def _find_col(candidates: List[str], df_cols: List[str]) -> Optional[str]:
+                lower_cols = {c.lower(): c for c in df_cols}
+                for cand in candidates:
+                    if cand.lower() in lower_cols:
+                        return lower_cols[cand.lower()]
+                return None
+
+            col_2y  = _find_col(rate_candidates["2Y"],  list(df.columns))
+            col_10y = _find_col(rate_candidates["10Y"], list(df.columns))
+            col_30y = _find_col(rate_candidates["30Y"], list(df.columns))
+            col_3m  = _find_col(rate_candidates["3M"],  list(df.columns))
+
+            found_cols = {k: v for k, v in {
+                "2Y": col_2y, "10Y": col_10y, "30Y": col_30y, "3M": col_3m
+            }.items() if v is not None}
+
+            if not found_cols:
+                st.warning(
+                    "לא זוהו עמודות שיעורי ריבית (2Y/10Y/30Y/3M) ב-macro_df. "
+                    "ודא שהפקטורים כוללים שמות כגון: rate_2y, rate_10y, rate_short וכו'."
+                )
+                st.caption(f"עמודות זמינות: {', '.join(df.columns.tolist()[:20])}")
+                return
+
+            st.markdown(f"**עמודות שזוהו:** {', '.join(f'{k}={v}' for k, v in found_cols.items())}")
+
+            # --- ציר זמן שיעורי ריבית ---
+            st.markdown("#### ציר זמן שיעורי ריבית")
+            rate_df = pd.DataFrame({k: pd.to_numeric(df[v], errors="coerce")
+                                     for k, v in found_cols.items()})
+            if _HAS_PX:
+                try:
+                    fig_rates = px.line(
+                        rate_df.reset_index(),
+                        x=rate_df.index.name or "index",
+                        y=list(found_cols.keys()),
+                        title="שיעורי ריבית לאורך זמן",
+                        labels={"value": "Rate (%)", "variable": "Tenor"},
+                    )
+                    st.plotly_chart(fig_rates, use_container_width=True)
+                except Exception:
+                    st.dataframe(rate_df.tail(60), use_container_width=True)
+            else:
+                st.dataframe(rate_df.tail(60), use_container_width=True)
+
+            # --- Spread עקומה (2Y-10Y) ---
+            if col_2y and col_10y:
+                st.markdown("#### 2Y–10Y Spread (עקומת תשואה)")
+                r2 = pd.to_numeric(df[col_2y], errors="coerce")
+                r10 = pd.to_numeric(df[col_10y], errors="coerce")
+                spread_curve = r10 - r2
+                spread_curve.name = "10Y-2Y_spread"
+
+                is_inverted = bool(spread_curve.iloc[-1] < 0) if not spread_curve.empty else False
+                last_spread = float(spread_curve.iloc[-1]) if not spread_curve.empty else float("nan")
+
+                c1, c2, c3 = st.columns(3)
+                c1.metric("2Y-10Y Spread (נוכחי)", f"{last_spread:.2f}%")
+                c2.metric(
+                    "מצב עקומה",
+                    "🔴 הפוכה" if is_inverted else "🟢 נורמלית",
+                    delta=f"{'היפוך!' if is_inverted else 'תקין'}",
+                )
+                # אחוז הזמן ב-inversion ב-12 חודשים אחרונים
+                last_252 = spread_curve.dropna().tail(252)
+                pct_inverted = float((last_252 < 0).mean() * 100) if len(last_252) > 0 else 0.0
+                c3.metric("% זמן הפוך (252 יום)", f"{pct_inverted:.1f}%")
+
+                if _HAS_PX:
+                    try:
+                        sdf = spread_curve.reset_index()
+                        sdf.columns = ["date", "spread"]
+                        sdf["color"] = sdf["spread"].apply(lambda x: "inverted" if x < 0 else "normal")
+                        fig_sp = px.bar(
+                            sdf.tail(756),  # ~3 שנים
+                            x="date", y="spread",
+                            color="color",
+                            color_discrete_map={"inverted": "#E74C3C", "normal": "#2ECC71"},
+                            title="2Y-10Y Spread — אדום = היפוך (אינדיקטור מיתון)",
+                        )
+                        fig_sp.add_hline(y=0, line_color="black", line_width=1)
+                        st.plotly_chart(fig_sp, use_container_width=True)
+                    except Exception:
+                        st.dataframe(spread_curve.tail(60).reset_index(), use_container_width=True)
+
+                # --- הסתברות מיתון (כלל אצבע: Sahm + Inversion) ---
+                st.markdown("#### אינדיקטור הסתברות מיתון (קיצוני פשוט)")
+                rolling_avg_inverted = float(
+                    (spread_curve.dropna().tail(60) < 0).mean()
+                ) if len(spread_curve.dropna()) >= 60 else float(pct_inverted / 100)
+                recession_prob_est = min(100.0, rolling_avg_inverted * 100.0 * 2.0)
+                st.metric(
+                    "הסתברות מיתון מוערכת (גס)",
+                    f"{recession_prob_est:.1f}%",
+                    help="מבוסס על % זמן ב-inversion ב-60 ימים אחרונים × 2. אינדיקטור גס בלבד.",
+                )
+                if recession_prob_est > 60:
+                    st.warning("⚠️ אינדיקטור מיתון גבוה — שקול חשיפה מופחתת.")
+                elif recession_prob_est > 30:
+                    st.info("📊 סיכון מיתון מתון — מעקב מוגבר.")
+                else:
+                    st.success("✅ סיכון מיתון נמוך לפי מרווח עקומה.")
+
+            # --- Steepener / Flattener ---
+            if col_3m and col_10y:
+                st.markdown("#### 3M–10Y Steepener/Flattener")
+                r3m = pd.to_numeric(df[col_3m], errors="coerce")
+                r10x = pd.to_numeric(df[col_10y], errors="coerce")
+                steep = r10x - r3m
+                last_steep = float(steep.iloc[-1]) if not steep.empty else float("nan")
+                st.metric("3M-10Y Spread (נוכחי)", f"{last_steep:.2f}%")
+
+                # שינוי ב-30 ימים
+                if len(steep.dropna()) > 30:
+                    delta_30d = float(steep.dropna().iloc[-1] - steep.dropna().iloc[-30])
+                    direction = "Steepener 📈" if delta_30d > 0 else "Flattener 📉"
+                    st.metric("שינוי 30 יום", f"{delta_30d:+.2f}%", delta=direction)
+
+            # --- הורדה ---
+            rate_dl = rate_df.copy()
+            if col_2y and col_10y:
+                r2x = pd.to_numeric(df[col_2y], errors="coerce")
+                r10x_dl = pd.to_numeric(df[col_10y], errors="coerce")
+                rate_dl["2Y10Y_spread"] = r10x_dl - r2x
+            st.download_button(
+                "⬇️ הורד yield_curve_data.csv",
+                data=rate_dl.to_csv(index=True).encode("utf-8"),
+                file_name="yield_curve_data.csv",
+                mime="text/csv",
+                key=keygen(TAB_KEY, "yc", "dl"),
+            )
+        except Exception as e:  # noqa: BLE001
+            LOGGER.exception("_render_yield_curve_analysis_section failed: %s", e)
+            st.caption(f"Yield Curve panel failed: {e}")
+
+
+# ===========================================================================
+# NEW SECTION B: Cross-Asset Momentum Dashboard
+# ===========================================================================
+
+def _render_cross_asset_momentum_section(state: "MacroTabState") -> None:
+    """
+    Cross-Asset Momentum Dashboard:
+    - מחשב momentum (תשואה מתגלגלת) לכל פקטורי מאקרו.
+    - מדרג פקטורים מ-Risk-On ל-Risk-Off לפי momentum.
+    - מציג Momentum Scorecard + גרף momentum.
+    - מחשב Risk-On/Risk-Off balance score.
+    """
+    with st.expander("🚀 Cross-Asset Momentum Dashboard", expanded=False):
+        try:
+            macro_df: Optional[pd.DataFrame] = (
+                getattr(state, "macro_df", None)
+                or state_get(MacroStateKeys.MACRO_DF, None)
+            )
+            if macro_df is None or macro_df.empty:
+                st.info("אין נתוני macro_df זמינים לניתוח momentum.")
+                return
+
+            df = macro_df.copy()
+            if not isinstance(df.index, pd.DatetimeIndex):
+                df.index = pd.to_datetime(df.index, errors="coerce")
+            df = df.sort_index().dropna(how="all")
+
+            num_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
+            if not num_cols:
+                st.info("אין עמודות נומריות ב-macro_df.")
+                return
+
+            c1, c2, c3 = st.columns(3)
+            mom_window = int(c1.selectbox(
+                "חלון Momentum (ימים)",
+                [5, 10, 21, 63, 126, 252],
+                index=2,
+                key=keygen(TAB_KEY, "mom", "win"),
+            ))
+            z_window = int(c2.selectbox(
+                "חלון נרמול Z-Score",
+                [63, 126, 252, 504],
+                index=2,
+                key=keygen(TAB_KEY, "mom", "zwin"),
+            ))
+            top_n = int(c3.number_input(
+                "Top-N פקטורים",
+                min_value=3, max_value=30,
+                value=min(12, len(num_cols)),
+                step=1,
+                key=keygen(TAB_KEY, "mom", "topn"),
+            ))
+
+            # חישוב momentum (pct_change rolling)
+            df_num = df[num_cols].apply(pd.to_numeric, errors="coerce")
+            mom = df_num.pct_change(mom_window).tail(252)
+
+            # נרמול z-score לכל פקטור
+            rolling_mean = df_num.rolling(z_window, min_periods=20).mean()
+            rolling_std = df_num.rolling(z_window, min_periods=20).std()
+            z_scores = ((df_num - rolling_mean) / (rolling_std + 1e-12)).tail(1)
+
+            if z_scores.empty:
+                st.info("אין מספיק נתונים לחישוב Z-Scores.")
+                return
+
+            last_z = z_scores.iloc[-1].sort_values(ascending=False)
+            last_mom = mom.iloc[-1].sort_values(ascending=False) if not mom.empty else pd.Series(dtype=float)
+
+            # Scorecard
+            st.markdown("#### Momentum Scorecard (נוכחי)")
+            scorecard_rows: List[Dict[str, Any]] = []
+            for col in last_z.index[:top_n]:
+                z = float(last_z.get(col, float("nan")))
+                m = float(last_mom.get(col, float("nan"))) if col in last_mom.index else float("nan")
+                signal = (
+                    "🔴 Strong Risk-Off" if z < -2.0
+                    else "🟠 Risk-Off" if z < -1.0
+                    else "🟡 Neutral" if abs(z) < 1.0
+                    else "🟢 Risk-On" if z < 2.0
+                    else "💚 Strong Risk-On"
+                )
+                scorecard_rows.append({
+                    "factor": col,
+                    f"z_score ({z_window}d)": round(z, 3),
+                    f"momentum_{mom_window}d": f"{m:.2%}" if not np.isnan(m) else "N/A",
+                    "signal": signal,
+                })
+            sc_df = pd.DataFrame(scorecard_rows)
+            st.dataframe(sc_df, use_container_width=True, height=min(400, 35 * len(sc_df) + 40))
+
+            # Risk-On/Off balance
+            valid_z = last_z.dropna()
+            if len(valid_z) > 0:
+                risk_on_score = float((valid_z > 0).mean() * 100)
+                avg_z = float(valid_z.mean())
+                k1, k2, k3 = st.columns(3)
+                k1.metric("Risk-On Score", f"{risk_on_score:.1f}%")
+                k2.metric("Mean Z-Score", f"{avg_z:.2f}")
+                k3.metric("Momentum Regime",
+                          "Risk-On" if risk_on_score > 60 else ("Neutral" if risk_on_score > 40 else "Risk-Off"))
+
+                state_set("macro_factor_risk_on_score_fresh", risk_on_score)
+
+            # גרף Momentum חלון זמן
+            if _HAS_PX and not mom.empty:
+                sel_factors = st.multiselect(
+                    "בחר פקטורים לגרף momentum",
+                    num_cols,
+                    default=num_cols[:min(5, len(num_cols))],
+                    key=keygen(TAB_KEY, "mom", "sel"),
+                )
+                if sel_factors:
+                    try:
+                        mom_plot = mom[sel_factors].reset_index()
+                        x_col = mom_plot.columns[0]
+                        fig_mom = px.line(
+                            mom_plot, x=x_col, y=sel_factors,
+                            title=f"Momentum ({mom_window}d) לפי פקטורי מאקרו",
+                        )
+                        fig_mom.add_hline(y=0, line_dash="dash", line_color="gray")
+                        st.plotly_chart(fig_mom, use_container_width=True)
+                    except Exception:
+                        pass
+
+            # Z-Score Bar Chart
+            if _HAS_PX:
+                try:
+                    z_plot = last_z.head(top_n).reset_index()
+                    z_plot.columns = ["factor", "z_score"]
+                    z_plot["color"] = z_plot["z_score"].apply(
+                        lambda v: "positive" if v >= 0 else "negative"
+                    )
+                    fig_z = px.bar(
+                        z_plot, x="factor", y="z_score",
+                        color="color",
+                        color_discrete_map={"positive": "#2ECC71", "negative": "#E74C3C"},
+                        title=f"Z-Score פקטורי מאקרו (top-{top_n})",
+                    )
+                    fig_z.add_hline(y=1, line_dash="dot", line_color="green")
+                    fig_z.add_hline(y=-1, line_dash="dot", line_color="red")
+                    fig_z.add_hline(y=2, line_dash="dash", line_color="darkgreen")
+                    fig_z.add_hline(y=-2, line_dash="dash", line_color="darkred")
+                    st.plotly_chart(fig_z, use_container_width=True)
+                except Exception:
+                    pass
+
+            st.download_button(
+                "⬇️ הורד momentum_scorecard.csv",
+                data=sc_df.to_csv(index=False).encode("utf-8"),
+                file_name="momentum_scorecard.csv",
+                mime="text/csv",
+                key=keygen(TAB_KEY, "mom", "dl"),
+            )
+        except Exception as e:  # noqa: BLE001
+            LOGGER.exception("_render_cross_asset_momentum_section failed: %s", e)
+            st.caption(f"Momentum panel failed: {e}")
+
+
+# ===========================================================================
+# NEW SECTION C: Regime Transition Matrix
+# ===========================================================================
+
+def _render_regime_transition_matrix_section(state: "MacroTabState") -> None:
+    """
+    Regime Transition Matrix — מטריצת מעברים בין משטרים:
+    - כמה פעמים עברנו מ-regime X ל-Y?
+    - משך ממוצע של כל משטר.
+    - ביצועים מותנים לפי מעבר (transition performance).
+    """
+    with st.expander("🔄 Regime Transition Matrix — מטריצת מעברים", expanded=False):
+        try:
+            rp: Optional[pd.DataFrame] = (
+                getattr(state, "macro_regimes_prob", None)
+                or state_get(MacroStateKeys.REGIMES_PROB, None)
+            )
+            if rp is None or rp.empty:
+                st.info(
+                    "אין נתוני regime probabilities זמינים. "
+                    "יש לחשב Macro Profile תחילה (לחץ 'חשב Macro Profile')."
+                )
+                return
+
+            df_r = rp.copy()
+            if not isinstance(df_r.index, pd.DatetimeIndex):
+                df_r.index = pd.to_datetime(df_r.index, errors="coerce")
+            df_r = df_r.sort_index()
+
+            # זיהוי משטר דומיננטי לכל תצפית
+            regime_col = df_r.idxmax(axis=1)
+            regime_col.name = "dominant_regime"
+            regimes = sorted(df_r.columns.tolist())
+
+            # --- מטריצת מעברים ---
+            st.markdown("#### מטריצת מעברים (Transition Matrix)")
+            trans_counts: Dict[str, Dict[str, int]] = {r: {r2: 0 for r2 in regimes} for r in regimes}
+            prev = None
+            for curr in regime_col:
+                if prev is not None and curr in trans_counts.get(prev, {}):
+                    trans_counts[prev][curr] = trans_counts[prev].get(curr, 0) + 1
+                prev = curr
+
+            trans_df = pd.DataFrame(trans_counts).T.reindex(index=regimes, columns=regimes, fill_value=0)
+            trans_pct = trans_df.div(trans_df.sum(axis=1).replace(0, 1), axis=0).round(3)
+
+            col_l, col_r = st.columns(2)
+            with col_l:
+                st.caption("ספירות מעברים (counts)")
+                st.dataframe(trans_df, use_container_width=True)
+            with col_r:
+                st.caption("הסתברות מעבר מותנית (%)")
+                st.dataframe((trans_pct * 100).round(1), use_container_width=True)
+
+            if _HAS_PX:
+                try:
+                    import plotly.graph_objects as _go  # type: ignore
+                    fig_trans = _go.Figure(data=_go.Heatmap(
+                        z=trans_pct.values * 100,
+                        x=regimes, y=regimes,
+                        colorscale="Blues",
+                        text=(trans_pct.values * 100).round(1).tolist(),
+                        texttemplate="%{text:.1f}%",
+                        colorbar=dict(title="P(from→to)"),
+                    ))
+                    fig_trans.update_layout(
+                        title="Regime Transition Matrix (%)",
+                        xaxis_title="To Regime",
+                        yaxis_title="From Regime",
+                    )
+                    st.plotly_chart(fig_trans, use_container_width=True)
+                except Exception:
+                    pass
+
+            # --- משך משטרים ---
+            st.markdown("#### משך ממוצע של כל משטר")
+            duration_rows: List[Dict[str, Any]] = []
+            curr_regime_dur = None
+            curr_start = 0
+            durations: Dict[str, List[int]] = {r: [] for r in regimes}
+
+            for i, reg in enumerate(regime_col):
+                if reg != curr_regime_dur:
+                    if curr_regime_dur is not None:
+                        dur = i - curr_start
+                        if curr_regime_dur in durations:
+                            durations[curr_regime_dur].append(dur)
+                    curr_regime_dur = reg
+                    curr_start = i
+            # last segment
+            if curr_regime_dur is not None:
+                durations[curr_regime_dur].append(len(regime_col) - curr_start)
+
+            for reg, durs in durations.items():
+                if durs:
+                    duration_rows.append({
+                        "regime": reg,
+                        "avg_duration_days": round(float(np.mean(durs)), 1),
+                        "median_duration_days": round(float(np.median(durs)), 1),
+                        "max_duration_days": int(max(durs)),
+                        "min_duration_days": int(min(durs)),
+                        "n_episodes": len(durs),
+                    })
+
+            dur_df = pd.DataFrame(duration_rows).sort_values("avg_duration_days", ascending=False)
+            st.dataframe(dur_df, use_container_width=True)
+
+            if _HAS_PX and not dur_df.empty:
+                try:
+                    fig_dur = px.bar(
+                        dur_df, x="regime", y="avg_duration_days",
+                        error_y=(dur_df["max_duration_days"] - dur_df["avg_duration_days"]).values,
+                        title="משך ממוצע לפי משטר (ימים)",
+                        color="regime",
+                    )
+                    st.plotly_chart(fig_dur, use_container_width=True)
+                except Exception:
+                    pass
+
+            # --- הורדות ---
+            st.download_button(
+                "⬇️ הורד transition_matrix.csv",
+                data=trans_pct.to_csv(index=True).encode("utf-8"),
+                file_name="regime_transition_matrix.csv",
+                mime="text/csv",
+                key=keygen(TAB_KEY, "trans", "dl"),
+            )
+        except Exception as e:  # noqa: BLE001
+            LOGGER.exception("_render_regime_transition_matrix_section failed: %s", e)
+            st.caption(f"Transition matrix panel failed: {e}")
+
+
+# ===========================================================================
+# NEW SECTION D: Macro Risk Scorecard (Traffic Light)
+# ===========================================================================
+
+def _render_macro_risk_scorecard_section(state: "MacroTabState") -> None:
+    """
+    Macro Risk Scorecard — לוח מחוונים ניתן-לסריקה מהירה:
+    - כל פקטור מאקרו מקבל תווית 🟢/🟡/🔴 לפי Z-Score.
+    - ציון סיכון מאקרו מורכב (0–100).
+    - טבלת Z-Scores עם צבעים.
+    - השוואה ל-Regime נוכחי.
+    - גרף Radar Chart (אם plotly זמין).
+    """
+    with st.expander("🚦 Macro Risk Scorecard — לוח מחוונים מהיר", expanded=False):
+        try:
+            macro_df: Optional[pd.DataFrame] = (
+                getattr(state, "macro_df", None)
+                or state_get(MacroStateKeys.MACRO_DF, None)
+            )
+            if macro_df is None or macro_df.empty:
+                st.info("אין נתוני macro_df זמינים ל-Scorecard.")
+                return
+
+            df = macro_df.copy()
+            if not isinstance(df.index, pd.DatetimeIndex):
+                df.index = pd.to_datetime(df.index, errors="coerce")
+            df = df.sort_index().dropna(how="all")
+
+            num_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
+            if not num_cols:
+                st.info("אין עמודות נומריות.")
+                return
+
+            c1, c2 = st.columns(2)
+            z_window_sc = int(c1.selectbox(
+                "חלון Z-Score (Scorecard)",
+                [63, 126, 252],
+                index=1,
+                key=keygen(TAB_KEY, "sc", "zwin"),
+            ))
+            warn_thresh = float(c2.number_input(
+                "סף Z-Score לאזהרה (|z| >)",
+                min_value=0.5, max_value=3.0,
+                value=1.5, step=0.25,
+                key=keygen(TAB_KEY, "sc", "thresh"),
+            ))
+
+            df_num = df[num_cols].apply(pd.to_numeric, errors="coerce")
+            roll_mean = df_num.rolling(z_window_sc, min_periods=20).mean()
+            roll_std = df_num.rolling(z_window_sc, min_periods=20).std()
+            z_now = ((df_num - roll_mean) / (roll_std + 1e-12)).iloc[-1]
+
+            st.markdown("#### Z-Score Scorecard (ערכים נוכחיים)")
+            sc_rows: List[Dict[str, Any]] = []
+            for col in num_cols:
+                z = float(z_now.get(col, float("nan")))
+                if np.isnan(z):
+                    status = "⚪ N/A"
+                elif abs(z) > 2.5:
+                    status = "🔴 Extreme" if z < 0 else "💚 Extreme High"
+                elif abs(z) > warn_thresh:
+                    status = "🔴 Risk" if z < 0 else "🟢 Strong"
+                elif abs(z) > 0.75:
+                    status = "🟡 Moderate" if z < 0 else "🟡 Moderate+"
+                else:
+                    status = "🟢 Normal"
+                sc_rows.append({
+                    "factor": col,
+                    "z_score": round(z, 3),
+                    "abs_z": round(abs(z), 3),
+                    "status": status,
+                    "alert": bool(abs(z) > warn_thresh and not np.isnan(z)),
+                })
+
+            sc_df = pd.DataFrame(sc_rows).sort_values("abs_z", ascending=False)
+            st.dataframe(sc_df.drop(columns=["abs_z"]), use_container_width=True,
+                         height=min(500, 35 * len(sc_df) + 40))
+
+            # KPIs
+            alerts = sc_df[sc_df["alert"]]
+            n_alert = len(alerts)
+            n_total = len(sc_df[sc_df["z_score"].notna()])
+            avg_abs_z = float(sc_df["abs_z"].dropna().mean()) if n_total > 0 else 0.0
+
+            # ציון סיכון: אחוז פקטורים באזהרה × avg |z| / 2.5
+            risk_score = min(100.0, (n_alert / max(n_total, 1)) * 100.0 * (avg_abs_z / 2.5))
+
+            k1, k2, k3, k4 = st.columns(4)
+            k1.metric("Macro Risk Score", f"{risk_score:.1f} / 100")
+            k2.metric("פקטורים באזהרה", f"{n_alert} / {n_total}")
+            k3.metric("Avg |Z-Score|", f"{avg_abs_z:.2f}")
+            k4.metric(
+                "מצב כולל",
+                "🔴 מוגבר" if risk_score > 60 else ("🟡 מתון" if risk_score > 30 else "🟢 נמוך"),
+            )
+
+            if risk_score > 60:
+                st.error(
+                    f"⚠️ Macro Risk Score = {risk_score:.1f}: "
+                    f"{n_alert} פקטורים מראים חריגה (|z| > {warn_thresh:.1f}). "
+                    "שקול הפחתת חשיפה."
+                )
+            elif risk_score > 30:
+                st.warning(f"📊 Macro Risk Score = {risk_score:.1f}: רמת סיכון מתונה. מעקב מוגבר.")
+            else:
+                st.success(f"✅ Macro Risk Score = {risk_score:.1f}: סביבה מאקרו יציבה.")
+
+            # ציר זמן Z-Scores
+            if _HAS_PX and not sc_df.empty:
+                top_alert = sc_df.head(min(6, len(sc_df)))["factor"].tolist()
+                if top_alert:
+                    z_hist = ((df_num - roll_mean) / (roll_std + 1e-12))[top_alert].tail(252)
+                    try:
+                        fig_zh = px.line(
+                            z_hist.reset_index(),
+                            x=z_hist.index.name or "index",
+                            y=top_alert,
+                            title=f"Z-Score לאורך זמן — Top-{len(top_alert)} פקטורים בסיכון",
+                        )
+                        fig_zh.add_hline(y=warn_thresh, line_dash="dot", line_color="orange",
+                                         annotation_text=f"אזהרה (+{warn_thresh:.1f})")
+                        fig_zh.add_hline(y=-warn_thresh, line_dash="dot", line_color="red",
+                                         annotation_text=f"אזהרה (-{warn_thresh:.1f})")
+                        fig_zh.add_hline(y=0, line_color="gray", line_width=0.5)
+                        st.plotly_chart(fig_zh, use_container_width=True)
+                    except Exception:
+                        pass
+
+            # Radar Chart
+            if _HAS_PX and len(sc_df) >= 3:
+                try:
+                    import plotly.graph_objects as _go_r  # type: ignore
+                    radar_df = sc_df[sc_df["z_score"].notna()].head(12)
+                    factors_r = radar_df["factor"].tolist()
+                    z_vals_r = [min(3.0, max(-3.0, float(v))) for v in radar_df["z_score"].tolist()]
+                    fig_radar = _go_r.Figure(data=_go_r.Scatterpolar(
+                        r=z_vals_r,
+                        theta=factors_r,
+                        fill="toself",
+                        name="Z-Score",
+                        line_color="#3498DB",
+                    ))
+                    fig_radar.update_layout(
+                        polar=dict(radialaxis=dict(visible=True, range=[-3, 3])),
+                        title="Macro Factor Radar (Z-Score, clipped ±3)",
+                        height=420,
+                    )
+                    st.plotly_chart(fig_radar, use_container_width=True)
+                except Exception:
+                    pass
+
+            # שמירה ב-session_state
+            state_set("macro_risk_scorecard", {
+                "risk_score": risk_score,
+                "n_alerts": n_alert,
+                "avg_abs_z": avg_abs_z,
+            })
+
+            st.download_button(
+                "⬇️ הורד macro_risk_scorecard.csv",
+                data=sc_df.drop(columns=["abs_z"]).to_csv(index=False).encode("utf-8"),
+                file_name="macro_risk_scorecard.csv",
+                mime="text/csv",
+                key=keygen(TAB_KEY, "sc", "dl"),
+            )
+        except Exception as e:  # noqa: BLE001
+            LOGGER.exception("_render_macro_risk_scorecard_section failed: %s", e)
+            st.caption(f"Risk Scorecard panel failed: {e}")
+
+
+# ===========================================================================
+# NEW SECTION E: Factor Correlation Monitor
+# ===========================================================================
+
+def _render_factor_correlation_monitor_section(state: "MacroTabState") -> None:
+    """
+    Factor Correlation Monitor — ניטור קורלציות בין פקטורי מאקרו:
+    - Rolling correlation matrix (חלון ניתן לבחירה).
+    - זיהוי שינויים בקורלציה (regime shift בקורלציות).
+    - Clustering של פקטורים לפי קורלציה.
+    - Heatmap + Download.
+    """
+    with st.expander("🔗 Factor Correlation Monitor — קורלציות מאקרו", expanded=False):
+        try:
+            macro_df: Optional[pd.DataFrame] = (
+                getattr(state, "macro_df", None)
+                or state_get(MacroStateKeys.MACRO_DF, None)
+            )
+            if macro_df is None or macro_df.empty:
+                st.info("אין נתוני macro_df זמינים לניטור קורלציות.")
+                return
+
+            df = macro_df.copy()
+            if not isinstance(df.index, pd.DatetimeIndex):
+                df.index = pd.to_datetime(df.index, errors="coerce")
+            df = df.sort_index().dropna(how="all")
+
+            num_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
+            if len(num_cols) < 2:
+                st.info("נדרשות לפחות 2 עמודות נומריות.")
+                return
+
+            c1, c2, c3 = st.columns(3)
+            corr_window = int(c1.selectbox(
+                "חלון Rolling Correlation",
+                [21, 63, 126, 252],
+                index=2,
+                key=keygen(TAB_KEY, "corr", "win"),
+            ))
+            corr_method = c2.selectbox(
+                "שיטת קורלציה",
+                ["pearson", "spearman", "kendall"],
+                index=0,
+                key=keygen(TAB_KEY, "corr", "method"),
+            )
+            max_cols_corr = int(c3.number_input(
+                "מקסימום פקטורים",
+                min_value=3, max_value=25,
+                value=min(15, len(num_cols)),
+                key=keygen(TAB_KEY, "corr", "maxcols"),
+            ))
+
+            sel_cols = num_cols[:max_cols_corr]
+            df_num = df[sel_cols].apply(pd.to_numeric, errors="coerce").dropna(how="all")
+
+            # Static full-period correlation
+            st.markdown("#### קורלציה סטטית (כל התקופה)")
+            try:
+                corr_static = df_num.corr(method=corr_method).round(3)
+                if _HAS_PX:
+                    import plotly.graph_objects as _go_c  # type: ignore
+                    fig_cs = _go_c.Figure(data=_go_c.Heatmap(
+                        z=corr_static.values,
+                        x=sel_cols, y=sel_cols,
+                        colorscale="RdBu", zmid=0,
+                        text=corr_static.values.round(2).tolist(),
+                        texttemplate="%{text}",
+                        colorbar=dict(title="ρ"),
+                    ))
+                    fig_cs.update_layout(
+                        title=f"Macro Factor Correlation ({corr_method}) — Full Period",
+                        height=max(300, 45 * len(sel_cols)),
+                    )
+                    st.plotly_chart(fig_cs, use_container_width=True)
+                else:
+                    st.dataframe(corr_static, use_container_width=True)
+            except Exception as e_c:
+                st.caption(f"Static correlation failed: {e_c}")
+
+            # Rolling correlation — בין שני פקטורים נבחרים
+            st.markdown(f"#### Rolling Correlation ({corr_window}d) — בין זוגות")
+            if len(sel_cols) >= 2:
+                cr1, cr2 = st.columns(2)
+                fac_a = cr1.selectbox("פקטור A", sel_cols, index=0, key=keygen(TAB_KEY, "corr", "fa"))
+                fac_b = cr2.selectbox("פקטור B", sel_cols,
+                                      index=min(1, len(sel_cols)-1),
+                                      key=keygen(TAB_KEY, "corr", "fb"))
+                if fac_a != fac_b and fac_a in df_num.columns and fac_b in df_num.columns:
+                    try:
+                        roll_corr = (
+                            df_num[fac_a]
+                            .rolling(corr_window, min_periods=max(10, corr_window // 3))
+                            .corr(df_num[fac_b])
+                        )
+                        last_corr = float(roll_corr.dropna().iloc[-1]) if not roll_corr.dropna().empty else float("nan")
+                        st.metric(f"Rolling Corr {fac_a}↔{fac_b} (עכשיו)", f"{last_corr:.3f}")
+
+                        if _HAS_PX:
+                            rc_plot = roll_corr.reset_index()
+                            rc_plot.columns = ["date", "rolling_corr"]
+                            fig_rc = px.line(
+                                rc_plot.dropna(), x="date", y="rolling_corr",
+                                title=f"Rolling Correlation ({corr_window}d): {fac_a} ↔ {fac_b}",
+                            )
+                            fig_rc.add_hline(y=0, line_color="gray")
+                            fig_rc.add_hline(y=0.7, line_dash="dot", line_color="green",
+                                             annotation_text="High +")
+                            fig_rc.add_hline(y=-0.7, line_dash="dot", line_color="red",
+                                             annotation_text="High -")
+                            st.plotly_chart(fig_rc, use_container_width=True)
+                    except Exception as e_rc:
+                        st.caption(f"Rolling correlation failed: {e_rc}")
+
+            # Regime shift detection: comparing recent vs long-term correlation
+            st.markdown("#### זיהוי שינוי משטר קורלציה (Recent vs Long-Term)")
+            try:
+                n_recent = min(corr_window, len(df_num) // 3)
+                n_long = min(corr_window * 4, len(df_num))
+                if n_recent >= 10 and n_long > n_recent:
+                    corr_recent = df_num.tail(n_recent).corr(method=corr_method)
+                    corr_long = df_num.tail(n_long).corr(method=corr_method)
+                    corr_diff = (corr_recent - corr_long).abs()
+                    # top pairs with largest change
+                    diff_pairs: List[Dict[str, Any]] = []
+                    for i, c1x in enumerate(sel_cols):
+                        for c2x in sel_cols[i+1:]:
+                            d = float(corr_diff.loc[c1x, c2x])
+                            r = float(corr_recent.loc[c1x, c2x])
+                            l = float(corr_long.loc[c1x, c2x])
+                            diff_pairs.append({
+                                "pair": f"{c1x} ↔ {c2x}",
+                                "recent_corr": round(r, 3),
+                                "long_corr": round(l, 3),
+                                "abs_change": round(d, 3),
+                                "regime_shift": bool(d > 0.30),
+                            })
+                    diff_df = pd.DataFrame(diff_pairs).sort_values("abs_change", ascending=False).head(15)
+                    st.dataframe(diff_df, use_container_width=True, height=min(350, 35 * len(diff_df) + 40))
+
+                    n_shifts = int(diff_df["regime_shift"].sum())
+                    if n_shifts > 0:
+                        st.warning(f"⚠️ {n_shifts} זוגות פקטורים מציגים שינוי משטר קורלציה (|Δρ| > 0.30).")
+            except Exception as e_shift:
+                st.caption(f"Regime shift detection failed: {e_shift}")
+
+            st.download_button(
+                "⬇️ הורד factor_correlation_matrix.csv",
+                data=corr_static.to_csv(index=True).encode("utf-8"),
+                file_name="macro_factor_correlation.csv",
+                mime="text/csv",
+                key=keygen(TAB_KEY, "corr", "dl"),
+            )
+        except Exception as e:  # noqa: BLE001
+            LOGGER.exception("_render_factor_correlation_monitor_section failed: %s", e)
+            st.caption(f"Correlation monitor panel failed: {e}")
+
+
+# ===========================================================================
+# NEW SECTION F: Macro Scenario Builder (Custom Stress Tests)
+# ===========================================================================
+
+def _render_macro_scenario_builder_section(
+    state: "MacroTabState",
+    pairs_df: pd.DataFrame,
+) -> None:
+    """
+    Macro Scenario Builder — בניית תרחישי לחץ מותאמים אישית:
+    - המשתמש מגדיר shocks לפקטורים (למשל: VIX +50%, Rate +200bp).
+    - המערכת מחשבת את ההשפעה על כל זוג דרך macro sensitivity.
+    - מציגה Impact Table ו-Ranking.
+    - מאפשרת הורדת תרחיש כ-JSON.
+    """
+    with st.expander("🧪 Macro Scenario Builder — תרחישי לחץ מותאמים", expanded=False):
+        try:
+            macro_df: Optional[pd.DataFrame] = (
+                getattr(state, "macro_df", None)
+                or state_get(MacroStateKeys.MACRO_DF, None)
+            )
+            if macro_df is None or macro_df.empty:
+                st.info("אין נתוני macro_df זמינים לבניית תרחישים.")
+                return
+
+            df_m = macro_df.copy()
+            num_cols_s = [c for c in df_m.columns if pd.api.types.is_numeric_dtype(df_m[c])]
+            if not num_cols_s:
+                st.info("אין פקטורים נומריים.")
+                return
+
+            st.markdown(
+                "הגדר shock לכל פקטור (בסטיות תקן — 0 = ללא שינוי, +2 = shock חיובי של 2σ)."
+            )
+
+            # בחירת פקטורים לשינוי
+            sel_shock_facs = st.multiselect(
+                "פקטורים לשינוי בתרחיש",
+                num_cols_s,
+                default=num_cols_s[:min(5, len(num_cols_s))],
+                key=keygen(TAB_KEY, "scen", "sel"),
+            )
+
+            shocks: Dict[str, float] = {}
+            if sel_shock_facs:
+                cols_shock = st.columns(min(4, len(sel_shock_facs)))
+                for i, fac in enumerate(sel_shock_facs):
+                    col_idx = i % len(cols_shock)
+                    v = cols_shock[col_idx].number_input(
+                        f"{fac} (σ)",
+                        min_value=-5.0, max_value=5.0,
+                        value=0.0, step=0.25,
+                        key=keygen(TAB_KEY, "scen", "sh", fac),
+                    )
+                    if v != 0.0:
+                        shocks[fac] = float(v)
+
+            scenario_name = st.text_input(
+                "שם תרחיש",
+                value="custom_stress_1",
+                key=keygen(TAB_KEY, "scen", "name"),
+            )
+
+            if not shocks:
+                st.caption("הגדר לפחות shock אחד שאינו 0 כדי לחשב תרחיש.")
+                return
+
+            # --- מחשב השפעה מוערכת ---
+            st.markdown("#### השפעה מוערכת על זוגות (Impact Score)")
+
+            # חישוב rolling std לכל פקטור
+            roll_std_s = df_m[num_cols_s].apply(pd.to_numeric, errors="coerce").rolling(252, min_periods=20).std().iloc[-1]
+
+            shock_in_native: Dict[str, float] = {}
+            for fac, z_shock in shocks.items():
+                std_fac = float(roll_std_s.get(fac, 1.0) or 1.0)
+                shock_in_native[fac] = z_shock * std_fac
+
+            # אם יש pairs_df עם עמודות macro_score / exposure
+            impact_rows: List[Dict[str, Any]] = []
+            if pairs_df is not None and not pairs_df.empty:
+                pair_id_col = next(
+                    (c for c in ["pair_id", "pair", "Pair"] if c in pairs_df.columns), None
+                )
+                for _, row in pairs_df.head(30).iterrows():
+                    pid = str(row.get(pair_id_col, row.name)) if pair_id_col else str(row.name)
+                    # בהעדר beta קיים, נשתמש ב-macro_score כ-proxy
+                    mac_score = float(row.get("macro_score", 0.5) or 0.5)
+                    # Impact = sum(shock_native * proxy_sensitivity_factor)
+                    total_impact = sum(
+                        shock_in_native[f] * mac_score * 0.01
+                        for f in shocks
+                    )
+                    impact_rows.append({
+                        "pair": pid,
+                        "macro_score_baseline": round(mac_score, 3),
+                        "scenario_impact_est": round(total_impact, 4),
+                        "direction": "⬆️ חיובי" if total_impact > 0 else "⬇️ שלילי",
+                    })
+
+                if impact_rows:
+                    imp_df = pd.DataFrame(impact_rows).sort_values(
+                        "scenario_impact_est", ascending=False
+                    )
+                    st.dataframe(imp_df, use_container_width=True,
+                                 height=min(400, 35 * len(imp_df) + 40))
+
+                    if _HAS_PX:
+                        try:
+                            fig_imp = px.bar(
+                                imp_df.head(20),
+                                x="pair", y="scenario_impact_est",
+                                color="direction",
+                                color_discrete_map={"⬆️ חיובי": "#2ECC71", "⬇️ שלילי": "#E74C3C"},
+                                title=f"תרחיש '{scenario_name}' — השפעה מוערכת לפי זוג",
+                            )
+                            st.plotly_chart(fig_imp, use_container_width=True)
+                        except Exception:
+                            pass
+            else:
+                st.caption("אין pairs_df — מציג סיכום תרחיש בלבד.")
+
+            # --- Scenario JSON ---
+            scenario_payload = {
+                "scenario_name": scenario_name,
+                "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                "shocks_sigma": shocks,
+                "shocks_native": shock_in_native,
+                "n_pairs_impacted": len(impact_rows),
+            }
+            st.json(scenario_payload)
+            st.download_button(
+                "⬇️ הורד תרחיש (JSON)",
+                data=json.dumps(scenario_payload, ensure_ascii=False, indent=2).encode("utf-8"),
+                file_name=f"macro_scenario_{scenario_name}.json",
+                mime="application/json",
+                key=keygen(TAB_KEY, "scen", "dl"),
+            )
+        except Exception as e:  # noqa: BLE001
+            LOGGER.exception("_render_macro_scenario_builder_section failed: %s", e)
+            st.caption(f"Scenario builder panel failed: {e}")
 
 
 def render(
@@ -3462,6 +4397,40 @@ def render(
     # DNA לזוג נבחר
     if show_dna_section:
         _render_pair_macro_dna_section(state, pairs_df)
+
+    # ----------------------------------------------------------------------
+    # NEW SECTIONS: Yield Curve, Momentum, Regime Transitions, Scorecard,
+    #               Factor Correlations, Scenario Builder
+    # ----------------------------------------------------------------------
+    try:
+        _render_yield_curve_analysis_section(state)
+    except Exception as e:  # noqa: BLE001
+        LOGGER.debug("yield_curve_section failed: %s", e)
+
+    try:
+        _render_cross_asset_momentum_section(state)
+    except Exception as e:  # noqa: BLE001
+        LOGGER.debug("cross_asset_momentum_section failed: %s", e)
+
+    try:
+        _render_regime_transition_matrix_section(state)
+    except Exception as e:  # noqa: BLE001
+        LOGGER.debug("regime_transition_matrix_section failed: %s", e)
+
+    try:
+        _render_macro_risk_scorecard_section(state)
+    except Exception as e:  # noqa: BLE001
+        LOGGER.debug("macro_risk_scorecard_section failed: %s", e)
+
+    try:
+        _render_factor_correlation_monitor_section(state)
+    except Exception as e:  # noqa: BLE001
+        LOGGER.debug("factor_correlation_monitor_section failed: %s", e)
+
+    try:
+        _render_macro_scenario_builder_section(state, pairs_df)
+    except Exception as e:  # noqa: BLE001
+        LOGGER.debug("macro_scenario_builder_section failed: %s", e)
 
     # ----------------------------------------------------------------------
     # הורדות של AdjustmentResult (JSON/YAML) לפי Feature Flags
@@ -4256,13 +5225,22 @@ def push_risk_metrics_to_ctx(
     # ננסה למשוך גם risk_profile מהמאקרו (אם הגיע מה-dashboard)
     risk_profile = state_get("risk_profile_from_macro", None)
     if risk_profile is not None:
-        metrics["risk_profile"] = float("nan")  # רק placeholder מספרי
-        # נשמור גם את הטקסט במפתח נפרד
-        try:
-            # st.session_state מאפשר גם non-float values, אז נשים dict מורכב
-            pass
-        except Exception:
-            pass
+        metrics["risk_profile"] = float("nan")  # numeric placeholder לתאימות ctx
+        # ממפה טקסט ל-float לצורך ניתוח כמותי
+        _profile_score_map = {
+            "defensive": 0.25,
+            "conservative": 0.4,
+            "balanced": 0.5,
+            "moderate": 0.6,
+            "aggressive": 0.75,
+            "stress": 0.15,
+            "risk_on": 0.8,
+        }
+        rp_lower = str(risk_profile).lower()
+        for key_rp, val_rp in _profile_score_map.items():
+            if key_rp in rp_lower:
+                metrics["risk_profile"] = val_rp
+                break
 
     st.session_state[ctx_key] = metrics
     # בנוסף, נשמור טקסטואלי נפרד אם רוצים:

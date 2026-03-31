@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """
 root/dashboard.py — Full Pairs Trading Dashboard (HF-grade, v4)
 ===============================================================
@@ -3400,6 +3400,61 @@ def render_home_tab(
         nav_payload=nav_payload,
     )
 
+    # ---------- 3.5) Inline quick-status KPI bar (always visible) ----------
+    try:
+        _h_home = compute_dashboard_health(runtime) if runtime is not None else None  # type: ignore[name-defined]
+        if _h_home is not None:
+            _sev_icon_home = {"ok": "✅", "warning": "⚠️", "error": "🚨"}.get(
+                _h_home.severity, "❓"
+            )
+            _kpi_c1, _kpi_c2, _kpi_c3, _kpi_c4, _kpi_c5 = st.columns(5)
+            _kpi_c1.metric(
+                f"{_sev_icon_home} System health",
+                f"{_h_home.score:.0f}/100",
+                help=_h_home.severity,
+            )
+            _alerts_home = get_dashboard_alerts(limit=100)  # type: ignore[name-defined]
+            _n_crit_home = sum(
+                1 for _a in _alerts_home if _a.level.lower() in ("error", "critical")
+            )
+            _kpi_c2.metric(
+                "🔔 Alerts",
+                len(_alerts_home),
+                delta=f"{_n_crit_home} critical" if _n_crit_home else None,
+                delta_color="inverse",
+            )
+            _caps_home = getattr(runtime, "capabilities", {}) or {}
+            _n_caps_home = sum(1 for _v in _caps_home.values() if _v)
+            _kpi_c3.metric(
+                "⚙️ Capabilities",
+                f"{_n_caps_home}/{len(_caps_home)}",
+                help="Active / total service capabilities",
+            )
+            _can_flags = []
+            if _h_home.can_trade:
+                _can_flags.append("trade")
+            if _h_home.can_backtest:
+                _can_flags.append("backtest")
+            if _h_home.can_optimize:
+                _can_flags.append("optimize")
+            _kpi_c4.metric(
+                "🎯 Can do",
+                ", ".join(_can_flags) if _can_flags else "none",
+                help="trade / backtest / optimize availability",
+            )
+            _up_secs_home = (
+                datetime.now(timezone.utc) - STARTED_AT_UTC
+            ).total_seconds()
+            _up_min_home = int(_up_secs_home // 60)
+            _kpi_c5.metric(
+                "⏱ Session uptime",
+                f"{_up_min_home}m"
+                if _up_min_home < 60
+                else f"{_up_min_home // 60}h {_up_min_home % 60}m",
+            )
+    except Exception as _kpi_err:
+        logger.debug("Home tab: inline KPI bar failed: %s", _kpi_err)
+
     # ---------- 4) Optional debug snapshot (only if show_debug_info=True) ----------
     if feature_flags.get("show_debug_info"):
         try:
@@ -3768,7 +3823,7 @@ def render_smart_scan_tab(
                     df_tmp = df_tmp.sort_values(ranking_metric, ascending=False)
 
                 st.markdown(f"**Top 20 by `{ranking_metric}` (preview):**")
-                st.dataframe(df_tmp[[pair_col, ranking_metric]].head(20), width="stretch")
+                st.dataframe(df_tmp[[pair_col, ranking_metric]].head(20), use_container_width=True)
 
                 # לבחור Top-K pairs ל-batch
                 top_k = st.slider(
@@ -8546,7 +8601,41 @@ def _render_quick_actions(
         else:
             st.caption("Cache was not explicitly cleared in this session yet.")
 
-    # ניתן להוסיף בעתיד כפתורים כמו "Export current view" / "Send to agent" וכו'.
+    # --- Sidebar: Live session telemetry mini-panel ---
+    with st.sidebar.expander("📈 Session telemetry", expanded=False):
+        try:
+            _timings_sb = _collect_session_tab_timings()
+            _errors_sb = _collect_session_tab_errors()
+            _up_sb = (datetime.now(timezone.utc) - STARTED_AT_UTC).total_seconds()
+            _up_min_sb = int(_up_sb // 60)
+            st.caption(f"⏱ Session uptime: **{_up_min_sb}m**")
+            st.caption(f"📂 Tabs rendered: **{sum(v.get('count', 0) for v in _timings_sb.values())}**")
+            st.caption(f"🐛 Tabs with errors: **{len(_errors_sb)}**")
+            if _timings_sb:
+                _slowest_sb = max(_timings_sb.items(), key=lambda kv: kv[1].get("avg", 0.0))
+                st.caption(
+                    f"🐢 Slowest tab: **{_slowest_sb[0]}** "
+                    f"({_slowest_sb[1].get('avg', 0.0):.2f}s avg)"
+                )
+        except Exception as _tsb_e:
+            st.caption(f"Telemetry unavailable: {_tsb_e}")
+
+    # --- Sidebar: Active alerts summary ---
+    with st.sidebar.expander("🔔 Active alerts", expanded=False):
+        try:
+            _sidebar_alerts = get_dashboard_alerts(limit=5)
+            if not _sidebar_alerts:
+                st.caption("No active alerts.")
+            else:
+                for _sa in _sidebar_alerts:
+                    _sa_icon = {"error": "🚨", "warning": "⚠️", "info": "ℹ️"}.get(
+                        _sa.level.lower(), "🔔"
+                    )
+                    st.caption(f"{_sa_icon} **{_sa.level.upper()}** — {_sa.message[:80]}")
+                if len(_sidebar_alerts) == 5:
+                    st.caption("… (showing first 5 — see Agents tab for full list)")
+        except Exception as _alert_sb_e:
+            st.caption(f"Alerts unavailable: {_alert_sb_e}")
 
 
 # עדכון __all__ עבור חלק 11
@@ -12950,7 +13039,7 @@ def _render_logs_internal_fallback(
     if services_df is not None:
         st.dataframe(
             services_df,
-            width="stretch",
+            use_container_width=True,
         )
     else:
         st.write("אין נתוני שירותים מלאים; בדוק את SqlStore / Runtime.")
@@ -12978,7 +13067,7 @@ def _render_logs_internal_fallback(
                     }
                 )
             df_timings = pd.DataFrame(rows).set_index("tab")
-            st.dataframe(df_timings, width="stretch")
+            st.dataframe(df_timings, use_container_width=True)
 
     # Tab errors
     with col_mid:
@@ -12998,7 +13087,7 @@ def _render_logs_internal_fallback(
                     }
                 )
             df_errors = pd.DataFrame(err_rows).set_index("tab")
-            st.dataframe(df_errors, width="stretch")
+            st.dataframe(df_errors, use_container_width=True)
 
     # Nav history
     with col_right:
@@ -13008,7 +13097,7 @@ def _render_logs_internal_fallback(
             st.caption("אין עדיין היסטוריית ניווט.")
         else:
             df_nav = pd.DataFrame(nav_tail)
-            st.dataframe(df_nav, width="stretch")
+            st.dataframe(df_nav, use_container_width=True)
 
     # --- External full-system health check (optional hook) ---
     st.markdown("#### 🧬 Full system health check (external module, optional)")
@@ -13082,6 +13171,150 @@ def _render_logs_internal_fallback(
             agent_ctx = update_agent_context_in_session(runtime)
 
         st.json(agent_ctx or {})
+
+    # --- Log level distribution analysis ---
+    st.markdown("#### 📊 Log level & error distribution")
+    try:
+        _raw_log = _read_dashboard_log_tail(n_lines=500)
+        if _raw_log:
+            import re as _re_log
+            import plotly.graph_objects as _go_log
+            _level_counts = {"DEBUG": 0, "INFO": 0, "WARNING": 0, "ERROR": 0, "CRITICAL": 0}
+            for _line in _raw_log.splitlines():
+                for _lvl in _level_counts:
+                    if f" {_lvl} " in _line or f"[{_lvl}]" in _line:
+                        _level_counts[_lvl] += 1
+                        break
+            _total_log_lines = len(_raw_log.splitlines())
+            _col_lvl, _col_dl = st.columns([3, 1])
+            with _col_lvl:
+                _colors_log = {"DEBUG": "#78909C", "INFO": "#42A5F5", "WARNING": "#FFA726", "ERROR": "#EF5350", "CRITICAL": "#B71C1C"}
+                _fig_lvl = _go_log.Figure(
+                    _go_log.Bar(
+                        x=list(_level_counts.keys()),
+                        y=list(_level_counts.values()),
+                        marker_color=[_colors_log.get(k, "#90CAF9") for k in _level_counts],
+                        text=list(_level_counts.values()),
+                        textposition="outside",
+                    )
+                )
+                _fig_lvl.update_layout(
+                    title=f"Log levels in last {_total_log_lines} lines",
+                    height=260,
+                    margin=dict(l=10, r=10, t=40, b=10),
+                    plot_bgcolor="rgba(0,0,0,0)",
+                    paper_bgcolor="rgba(0,0,0,0)",
+                    font=dict(color="#ECEFF1"),
+                )
+                st.plotly_chart(_fig_lvl, use_container_width=True)
+            with _col_dl:
+                st.download_button(
+                    label="⬇ Download full log",
+                    data=_raw_log,
+                    file_name="dashboard_app.log",
+                    mime="text/plain",
+                    key="log_download_btn",
+                )
+                _err_pct = 100.0 * (_level_counts["ERROR"] + _level_counts["CRITICAL"]) / max(_total_log_lines, 1)
+                st.metric("Error rate", f"{_err_pct:.1f}%", help="(ERROR+CRITICAL) / total lines")
+                st.metric("Warnings", _level_counts["WARNING"])
+        else:
+            st.caption("Log file is empty or not yet written.")
+    except Exception as _le:
+        st.caption(f"Log level analysis failed: {_le}")
+
+    # --- Session performance profiler ---
+    st.markdown("#### 🏎 Session performance profiler")
+    try:
+        import plotly.graph_objects as _go_prof
+        _timings_prof = _collect_session_tab_timings()
+        _errors_prof = _collect_session_tab_errors()
+        if _timings_prof:
+            _t_rows_prof = sorted(
+                [
+                    {
+                        "tab": k,
+                        "last_s": v.get("last", 0.0),
+                        "avg_s": v.get("avg", 0.0),
+                        "runs": v.get("count", 0),
+                    }
+                    for k, v in _timings_prof.items()
+                ],
+                key=lambda x: x["avg_s"],
+                reverse=True,
+            )
+            _col_p1, _col_p2 = st.columns([3, 1])
+            with _col_p1:
+                _tabs_s = [r["tab"] for r in _t_rows_prof]
+                _avgs_s = [r["avg_s"] for r in _t_rows_prof]
+                _bar_c = [
+                    "#EF5350" if a > 3.0 else "#FFA726" if a > 1.0 else "#66BB6A"
+                    for a in _avgs_s
+                ]
+                _fig_prof = _go_prof.Figure(
+                    _go_prof.Bar(
+                        y=_tabs_s,
+                        x=_avgs_s,
+                        orientation="h",
+                        marker_color=_bar_c,
+                        text=[f"{a:.2f}s" for a in _avgs_s],
+                        textposition="outside",
+                    )
+                )
+                _fig_prof.update_layout(
+                    title="Avg render time per tab (🟢<1s  🟠<3s  🔴≥3s)",
+                    height=max(250, 48 * len(_tabs_s)),
+                    margin=dict(l=10, r=10, t=40, b=10),
+                    plot_bgcolor="rgba(0,0,0,0)",
+                    paper_bgcolor="rgba(0,0,0,0)",
+                    font=dict(color="#ECEFF1"),
+                    xaxis_title="seconds",
+                )
+                st.plotly_chart(_fig_prof, use_container_width=True)
+            with _col_p2:
+                _total_runs_p = sum(r["runs"] for r in _t_rows_prof)
+                st.metric("Total tab renders", _total_runs_p)
+                st.metric("Tabs with errors", len(_errors_prof))
+                _slowest = _t_rows_prof[0] if _t_rows_prof else None
+                if _slowest:
+                    st.metric(
+                        "Slowest (avg)",
+                        f"{_slowest['avg_s']:.2f}s",
+                        help=_slowest["tab"],
+                    )
+        else:
+            st.caption("No tab timing data yet — open a few tabs first.")
+    except Exception as _pe:
+        st.caption(f"Session profiler failed: {_pe}")
+
+    # --- Export diagnostics ---
+    st.markdown("#### 📤 Export diagnostics")
+    try:
+        import json as _json_diag
+        _session_keys_d = [k for k in st.session_state.keys() if not str(k).startswith("_")]
+        _session_types = {k: type(st.session_state[k]).__name__ for k in _session_keys_d[:60]}
+        _diag_data = _json_diag.dumps(
+            {
+                "session_key_types": _session_types,
+                "tab_timings": _collect_session_tab_timings(),
+                "tab_errors": {
+                    k: {kk: str(vv) for kk, vv in v.items()}
+                    for k, v in _collect_session_tab_errors().items()
+                },
+            },
+            indent=2,
+            default=str,
+        )
+        st.download_button(
+            label="⬇ Download session diagnostics JSON",
+            data=_diag_data,
+            file_name="dashboard_session_diagnostics.json",
+            mime="application/json",
+            key="session_diag_download_btn",
+        )
+        st.caption(f"Session holds {len(_session_keys_d)} state keys (first 60 exported)")
+    except Exception as _de:
+        st.caption(f"Diagnostics export failed: {_de}")
 
 
 def render_logs_tab(
@@ -14455,7 +14688,7 @@ def _render_developer_diagnostics_panel(
             st.markdown("**Core modules**")
             df_core = _df_from_bool_map(core_modules)
             if df_core is not None:
-                st.dataframe(df_core, width="stretch")
+                st.dataframe(df_core, use_container_width=True)
             else:
                 st.caption("No core module snapshot.")
 
@@ -14465,10 +14698,10 @@ def _render_developer_diagnostics_panel(
 
             if df_root is not None:
                 st.caption("Root modules:")
-                st.dataframe(df_root, width="stretch")
+                st.dataframe(df_root, use_container_width=True)
             if df_desktop is not None:
                 st.caption("Desktop modules:")
-                st.dataframe(df_desktop, width="stretch")
+                st.dataframe(df_desktop, use_container_width=True)
             if df_root is None and df_desktop is None:
                 st.caption("No root/desktop module snapshot.")
 
@@ -14478,7 +14711,7 @@ def _render_developer_diagnostics_panel(
             if envvars:
                 env_rows = [{"key": k, "value": v} for k, v in envvars.items()]
                 df_env = pd.DataFrame(env_rows).set_index("key")
-                st.dataframe(df_env, width="stretch", height=140)
+                st.dataframe(df_env, use_container_width=True, height=140)
             else:
                 st.caption("No envvars snapshot.")
 
@@ -14497,7 +14730,7 @@ def _render_developer_diagnostics_panel(
                     for ns, cnt in cache_namespaces.items()
                 ]
                 df_cache = pd.DataFrame(rows).set_index("namespace")
-                st.dataframe(df_cache, width="stretch", height=140)
+                st.dataframe(df_cache, use_container_width=True, height=140)
                 st.caption(f"Last cache clear: `{cache_last_clear_ts}`")
             else:
                 st.caption("Internal cache appears empty (or not yet used).")
@@ -15839,7 +16072,7 @@ def _render_agents_internal_fallback(
             df_caps = pd.DataFrame(cap_rows)
             df_caps["status"] = df_caps["enabled"].map(lambda x: "✅" if x else "⭕")
             df_caps.set_index("capability", inplace=True)
-            st.dataframe(df_caps, width="stretch", height=210)
+            st.dataframe(df_caps, use_container_width=True, height=210)
         else:
             st.caption("No capabilities detected.")
 
@@ -16113,7 +16346,90 @@ def _render_agents_internal_fallback(
             st.caption("No agent actions recorded yet.")
         else:
             df_hist = pd.DataFrame(history_tail)
-            st.dataframe(df_hist, width="stretch")
+            st.dataframe(df_hist, use_container_width=True)
+
+    st.markdown("---")
+
+    # ========= חלק 6 – System alert center =========
+    st.markdown("#### 6️⃣ System alert center")
+    try:
+        render_dashboard_alert_center(max_items=20)
+    except Exception as _ae:
+        st.caption(f"Alert center unavailable: {_ae}")
+
+    st.markdown("---")
+
+    # ========= חלק 7 – Data feed quality overview =========
+    st.markdown("#### 7️⃣ Data feed quality")
+    try:
+        _caps7 = getattr(runtime, "capabilities", {}) or {}
+        _feed_rows = []
+        for _src_name, _label in [
+            ("sql_store", "SQL store"),
+            ("backtester", "Backtester"),
+            ("optimizer", "Optimizer / Meta-optimizer"),
+            ("risk_engine", "Risk engine"),
+            ("macro_engine", "Macro engine"),
+            ("live_data", "Live data feed"),
+            ("broker", "Broker connectivity"),
+            ("ibkr", "IBKR"),
+            ("fmp", "FMP"),
+            ("yfinance", "Yahoo Finance"),
+        ]:
+            _on = bool(_caps7.get(_src_name, False))
+            _feed_rows.append({
+                "source": _label,
+                "status": "✅ Online" if _on else "⭕ Offline / N/A",
+                "capability_key": _src_name,
+            })
+        if _feed_rows:
+            _df_feed = pd.DataFrame(_feed_rows).set_index("source")
+            st.dataframe(_df_feed, use_container_width=True)
+            _n_online = sum(1 for r in _feed_rows if "Online" in r["status"])
+            st.caption(f"{_n_online}/{len(_feed_rows)} data sources online")
+        else:
+            st.caption("No capability information available.")
+    except Exception as _dfe:
+        st.caption(f"Data feed quality check failed: {_dfe}")
+
+    st.markdown("---")
+
+    # ========= חלק 8 – Batch action runner =========
+    st.markdown("#### 8️⃣ Batch action runner")
+    st.caption(
+        "Dispatch multiple agent actions in one shot — JSON array of action dicts. "
+        "Each item must have at minimum `{\"action\": \"...\", \"source\": \"batch\"}`."
+    )
+    try:
+        import json as _bjson
+        _default_batch = (
+            '[\n'
+            '  {"action": "snapshot", "source": "agents_batch"},\n'
+            '  {"action": "open_tab", "tab_key": "home", "source": "agents_batch"}\n'
+            ']'
+        )
+        _batch_json = st.text_area(
+            "Batch actions (JSON array)",
+            value=_default_batch,
+            height=130,
+            key="agents_batch_runner_json",
+        )
+        if st.button("▶ Run batch", key="agents_batch_run_btn"):
+            try:
+                _batch_actions = _bjson.loads(_batch_json)
+                if not isinstance(_batch_actions, list):
+                    st.error("Input must be a JSON **array** (list) of action objects.")
+                else:
+                    _batch_results = handle_agent_actions_batch(runtime, _batch_actions)
+                    _n_ok = sum(1 for r in _batch_results if isinstance(r, dict) and r.get("status") == "ok")
+                    st.success(
+                        f"Batch completed: {len(_batch_results)} actions · {_n_ok} succeeded."
+                    )
+                    st.json(_batch_results)
+            except Exception as _berr:
+                st.error(f"Batch failed: {_berr}")
+    except Exception as _brun_err:
+        st.caption(f"Batch runner unavailable: {_brun_err}")
 
 
 # -------------------------

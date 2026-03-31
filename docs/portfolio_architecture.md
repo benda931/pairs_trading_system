@@ -1,5 +1,12 @@
 # Portfolio Architecture
 
+> **Integration Status: SCAFFOLD**
+> The portfolio package (allocator, ranking, sizing, exposure, risk ops) is implemented
+> and tested (82 tests pass). As of 2026-03-31, **PortfolioAllocator.run_cycle() never
+> receives real signals from System A.** It is only called from `agents/portfolio_agents.py`
+> (which itself is never dispatched operationally).
+> See: `docs/INTEGRATION_STATUS.md`, `docs/remediation/remediation_ledger.md:P1-PORTINT`
+
 ## Overview
 
 The `portfolio/` package is the **capital allocation and risk operating model** — the

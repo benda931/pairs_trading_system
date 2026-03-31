@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """pair_tab.py — ניתוח זוג ברמת קרן גידור (Part 1/6)
 =======================================================
 
@@ -41,7 +41,6 @@ from common.utils import (
 )
 
 
-from dataclasses import asdict  # אם עדיין לא מיובא
 
 try:
     from core.pair_recommender import recommend_pair  # type: ignore
@@ -430,7 +429,7 @@ def _render_pair_fair_value_section(
     with st.expander("📋 שורת Fair-Value שנבחרה", expanded=False):
         try:
             df_row = row.to_frame().T
-            st.dataframe(df_row, width="stretch")
+            st.dataframe(df_row, use_container_width=True)
         except Exception:
             st.info("לא ניתן להציג טבלה לשורה הנוכחית (row→DataFrame).")
 
@@ -872,7 +871,18 @@ def _render_pair_tab_core(
     if not (np.isnan(z_last) or np.isnan(z_prev)):
         z_delta = f"{(z_last - z_prev):+.2f}"
 
-    # ---- 5. מבנה הטאב: תתי־טאבים ----
+    # ---- 5. אתחול משתנים קריטיים לדוח (מנע NameError בין טאבים) ----
+    hl_df_for_report: pd.DataFrame = pd.DataFrame()
+    hurst_val: Optional[float] = None
+    regime_label: Optional[str] = None
+    regime_df: pd.DataFrame = pd.DataFrame()
+    trade_stats_df: pd.DataFrame = pd.DataFrame()
+    mr_scenarios_df: Optional[pd.DataFrame] = None
+    shock_scenarios_df: Optional[pd.DataFrame] = None
+    diag_df: pd.DataFrame = pd.DataFrame()
+    legs_df: pd.DataFrame = pd.DataFrame()
+
+    # ---- 6. מבנה הטאב: תתי־טאבים ----
     tab_overview, tab_stats, tab_trades, tab_scenarios, tab_report = st.tabs(
         ["🔎 Overview", "📊 Stats & Regimes", "💼 Trades", "🧪 Scenarios", "🧾 Report"]
     )
@@ -948,7 +958,7 @@ def _render_pair_tab_core(
                     }
                 )
             dq_df = pd.DataFrame(cov_info, columns=dq_cols)
-            st.dataframe(dq_df, width = "stretch")
+            st.dataframe(dq_df, use_container_width=True)
         except Exception:
             st.caption("לא הצלחתי לחשב Data Quality (בעיה באינדקס/תאריכים).")
 
@@ -972,7 +982,7 @@ def _render_pair_tab_core(
                 yaxis_title="מחיר מנורמל",
                 legend=dict(orientation="h", y=-0.2),
             )
-            st.plotly_chart(fig_prices, width = "stretch")
+            st.plotly_chart(fig_prices, use_container_width=True)
         except Exception as exc:
             st.caption(f"גרף מחירים מנורמלים לא זמין כרגע: {exc}")
 
@@ -985,7 +995,7 @@ def _render_pair_tab_core(
                 xaxis_title="תאריך",
                 yaxis_title="Spread",
             )
-            st.plotly_chart(fig_spread, width = "stretch")
+            st.plotly_chart(fig_spread, use_container_width=True)
         except Exception as exc:
             st.caption(f"גרף Spread לא זמין כרגע: {exc}")
 
@@ -1027,7 +1037,7 @@ def _render_pair_tab_core(
                 xaxis_title="תאריך",
                 yaxis_title="Z-Score",
             )
-            st.plotly_chart(fig_z, width = "stretch")
+            st.plotly_chart(fig_z, use_container_width=True)
         except Exception as exc:
             st.caption(f"Z-Score chart unavailable: {exc}")
 
@@ -1047,7 +1057,7 @@ def _render_pair_tab_core(
 
                 diag_display = diag_df.copy()
                 diag_display["Spread / Z Diagnostics"] = diag_display["Spread / Z Diagnostics"].map(_fmt)
-                st.dataframe(diag_display, width = "stretch")
+                st.dataframe(diag_display, use_container_width=True)
 
         with col_right:
             st.markdown("**📈 Legs Summary**")
@@ -1055,7 +1065,7 @@ def _render_pair_tab_core(
             if legs_df.empty:
                 st.caption("לא ניתן לחשב סטטיסטיקות ל-legs.")
             else:
-                st.dataframe(legs_df, width = "stretch")
+                st.dataframe(legs_df, use_container_width=True)
 
         # 5.9 Compare mode – טבלת השוואה מול זוגות נוספים
         if compare_pairs:
@@ -1094,7 +1104,7 @@ def _render_pair_tab_core(
 
             if rows:
                 cmp_df = pd.DataFrame(rows)
-                st.dataframe(cmp_df.round(3), width = "stretch")
+                st.dataframe(cmp_df.round(3), use_container_width=True)
             else:
                 st.caption("לא הצלחתי לחשב השוואה לזוגות הנוספים (נתוני מחיר חסרים או בעייתיים).")
 
@@ -1115,6 +1125,135 @@ def _render_pair_tab_core(
                 st.caption("לא ניתן לחשב הצעת גודל פוזיציה (Vol/HL לא זמינים).")
         except Exception:
             st.caption("לא הצלחתי להפיק הצעת גודל פוזיציה (בעיה בחישוב).")
+
+        # 5.11 Rolling Correlation + Rolling Beta (hedge ratio) chart
+        st.markdown("#### 📐 Rolling Correlation & Rolling Beta (Hedge Ratio)")
+        try:
+            _roll_win_corr = st.select_slider(
+                "Rolling window (days)",
+                options=[20, 40, 60, 90, 120, 180, 252],
+                value=60,
+                key="ov_rolling_window",
+            )
+            s1a, s2a = s1.align(s2, join="inner")
+            s1a = s1a.dropna()
+            s2a = s2a.dropna()
+            s1a, s2a = s1a.align(s2a, join="inner")
+
+            if len(s1a) >= _roll_win_corr:
+                # Rolling correlation
+                _log1 = np.log(s1a).diff().fillna(0)
+                _log2 = np.log(s2a).diff().fillna(0)
+                _roll_corr = _log1.rolling(_roll_win_corr).corr(_log2)
+
+                # Rolling OLS beta (simple: cov/var)
+                _roll_cov = _log1.rolling(_roll_win_corr).cov(_log2)
+                _roll_var = _log2.rolling(_roll_win_corr).var()
+                _roll_beta = (_roll_cov / _roll_var.replace(0, np.nan)).clip(-5, 5)
+
+                _fig_rc = go.Figure()
+                _fig_rc.add_trace(go.Scatter(
+                    x=_roll_corr.index, y=_roll_corr.values,
+                    name=f"Rolling Corr ({_roll_win_corr}d)",
+                    line=dict(color="#42A5F5", width=1.5),
+                    yaxis="y1",
+                ))
+                _fig_rc.add_trace(go.Scatter(
+                    x=_roll_beta.index, y=_roll_beta.values,
+                    name=f"Rolling Beta ({_roll_win_corr}d)",
+                    line=dict(color="#FFA726", width=1.5, dash="dot"),
+                    yaxis="y2",
+                ))
+                _fig_rc.update_layout(
+                    xaxis_title="תאריך",
+                    yaxis=dict(title="Correlation", range=[-1.1, 1.1], color="#42A5F5"),
+                    yaxis2=dict(title="Beta (hedge ratio)", overlaying="y", side="right",
+                                color="#FFA726"),
+                    legend=dict(orientation="h", y=1.05),
+                    height=300,
+                    margin=dict(l=10, r=10, t=30, b=10),
+                    plot_bgcolor="rgba(0,0,0,0)",
+                    paper_bgcolor="rgba(0,0,0,0)",
+                    font=dict(color="#ECEFF1"),
+                )
+                st.plotly_chart(_fig_rc, use_container_width=True)
+
+                # Stability metrics
+                _corr_mean = float(_roll_corr.dropna().mean())
+                _corr_std = float(_roll_corr.dropna().std())
+                _beta_mean = float(_roll_beta.dropna().mean())
+                _beta_std = float(_roll_beta.dropna().std())
+                _stab_c1, _stab_c2, _stab_c3, _stab_c4 = st.columns(4)
+                _stab_c1.metric("Avg Rolling Corr", f"{_corr_mean:.3f}")
+                _stab_c2.metric("Corr Stability (σ)", f"{_corr_std:.3f}",
+                                help="נמוך = קורלציה יציבה; גבוה = קורלציה נדיפה")
+                _stab_c3.metric("Avg Rolling Beta", f"{_beta_mean:.3f}")
+                _stab_c4.metric("Beta Stability (σ)", f"{_beta_std:.3f}",
+                                help="נמוך = יחס גידור יציב; גבוה = hedge ratio נדיף")
+            else:
+                st.caption(f"אין מספיק נתונים ({len(s1a)} < {_roll_win_corr}) לחלון rolling.")
+        except Exception as _rc_err:
+            st.caption(f"Rolling correlation/beta chart unavailable: {_rc_err}")
+
+        # 5.12 Signal Quality Go/No-Go panel
+        st.markdown("#### 🚦 Go / No-Go — סיכום מהיר")
+        try:
+            _gng_checks: list[dict] = []
+
+            # Correlation check
+            _corr_ok = not np.isnan(corr_static) and corr_static >= 0.60
+            _gng_checks.append({"Check": "Correlation ≥ 0.60", "Value": f"{corr_static:.3f}",
+                                 "Status": "✅" if _corr_ok else "❌"})
+
+            # Half-life check: 2 ≤ HL ≤ 120
+            _hl_ok = not np.isnan(hl) and 2 <= hl <= 120
+            _gng_checks.append({"Check": "Half-life ∈ [2, 120] days", "Value": f"{hl:.1f}",
+                                 "Status": "✅" if _hl_ok else "❌"})
+
+            # Realized vol check: Vol > 0
+            _vol_ok = not np.isnan(vol_20) and vol_20 > 0
+            _gng_checks.append({"Check": "Realized Vol > 0", "Value": f"{vol_20:.4f}",
+                                 "Status": "✅" if _vol_ok else "❌"})
+
+            # Z-score magnitude: |Z| > 0 (live signal exists)
+            _z_ok = not np.isnan(z_last) and abs(z_last) > 0.1
+            _gng_checks.append({"Check": "|Z-score| > 0.1 (signal exists)", "Value": f"{z_last:.3f}",
+                                 "Status": "✅" if _z_ok else "⚠️"})
+
+            # Z-score entry: |Z| ≥ entry_z (entry signal active)
+            _z_entry_ok = not np.isnan(z_last) and abs(z_last) >= entry_z
+            _gng_checks.append({"Check": f"|Z| ≥ entry_z ({entry_z})", "Value": f"{abs(z_last):.3f}",
+                                 "Status": "✅ Entry signal!" if _z_entry_ok else "⏸ Waiting"})
+
+            # Data quality: sufficient history
+            _npts = int(len(spread.dropna()))
+            _data_ok = _npts >= 60
+            _gng_checks.append({"Check": "History ≥ 60 days", "Value": f"{_npts} pts",
+                                 "Status": "✅" if _data_ok else "❌"})
+
+            _gng_df = pd.DataFrame(_gng_checks)
+            _n_pass = sum(1 for c in _gng_checks if c["Status"].startswith("✅"))
+            _n_total = len(_gng_checks)
+
+            _gng_col1, _gng_col2 = st.columns([1, 2])
+            with _gng_col1:
+                _overall_ok = _corr_ok and _hl_ok and _vol_ok and _data_ok
+                _overall_icon = "🟢 GO" if _overall_ok else ("🟡 CONDITIONAL" if _n_pass >= 4 else "🔴 NO-GO")
+                st.metric("Overall", _overall_icon, delta=f"{_n_pass}/{_n_total} checks passed")
+            with _gng_col2:
+                st.dataframe(_gng_df, use_container_width=True, hide_index=True)
+
+            # CSV export for diagnostics
+            if not diag_df.empty:
+                st.download_button(
+                    label="⬇ Export Diagnostics CSV",
+                    data=diag_df.to_csv(index=False).encode("utf-8"),
+                    file_name=f"diagnostics_{sym_x}_{sym_y}.csv",
+                    mime="text/csv",
+                    key="ov_diag_csv_btn",
+                )
+        except Exception as _gng_err:
+            st.caption(f"Go/No-Go panel unavailable: {_gng_err}")
 
     # =========================
     # TAB 2 — Stats & Regimes
@@ -1219,14 +1358,14 @@ def _render_pair_tab_core(
     # =========================
     with tab_report:
         st.subheader("🧾 Pair Report להורדה")
-        # כדי שהדוח יעבוד, נוודא שיש לנו את האובייקטים שהוגדרו בטאבים הקודמים
-        try:
-            hl_df_for_report  # noqa: F821
-        except NameError:
-            # אם משום מה לא רץ ה-Stats tab (Streamlit בכל מקרה מריץ הכל, אבל להיות דפנסיבי)
+        # משתנים כבר מאותחלים לפני הטאבים; מבצעים fallback רק אם עדיין ריקים.
+        if hl_df_for_report.empty:
             hl_df_for_report = _compute_multihorizon_half_life(spread, [20, 60, 120])
+        if hurst_val is None:
             hurst_val = _compute_hurst(spread)
+        if regime_df.empty:
             regime_df = _build_regime_summary(corr_static, vol_20, hl_df_for_report, hurst_val)
+        if regime_label is None:
             try:
                 regime_label = (
                     regime_df.loc[regime_df["Metric"] == "Regime (Corr/Vol)", "Value"]
@@ -1235,27 +1374,9 @@ def _render_pair_tab_core(
                 )
             except Exception:
                 regime_label = None
-
-        # אם לא הגיעו trade_stats_df / mr_scenarios_df / shock_scenarios_df – נגדיר כברירת מחדל
-        try:
-            trade_stats_df  # noqa: F821
-        except NameError:
-            trade_stats_df = pd.DataFrame()
-        try:
-            mr_scenarios_df  # noqa: F821
-        except NameError:
-            mr_scenarios_df = None
-        try:
-            shock_scenarios_df  # noqa: F821
-        except NameError:
-            shock_scenarios_df = None
-        try:
-            diag_df  # noqa: F821
-        except NameError:
+        if diag_df.empty:
             diag_df = _describe_spread(spread, z_series, entry_z=entry_z, exit_z=exit_z)
-        try:
-            legs_df  # noqa: F821
-        except NameError:
+        if legs_df.empty:
             legs_df = _build_legs_summary(sym_x, s1, sym_y, s2)
 
         _render_pair_report_section(
@@ -1556,7 +1677,7 @@ def render_pair_tab(
             new_idx = (idx - 1) % len(pairs)
             st.session_state["pair_tab_active_pair"] = pairs[new_idx]
             st.session_state["pair_tab_last_pair"] = pairs[new_idx]
-            st.experimental_rerun()
+            st.rerun()
     with nav_col_mid:
         st.markdown(f"**זוג פעיל:** `{active_pair}`")
         if compare_pairs:
@@ -1567,7 +1688,7 @@ def render_pair_tab(
             new_idx = (idx + 1) % len(pairs)
             st.session_state["pair_tab_active_pair"] = pairs[new_idx]
             st.session_state["pair_tab_last_pair"] = pairs[new_idx]
-            st.experimental_rerun()
+            st.rerun()
 
     st.markdown("---")
 
@@ -1846,6 +1967,70 @@ def _run_stationarity_tests(
             }
         )
 
+    # --- Johansen Cointegration ---
+    try:
+        from statsmodels.tsa.vector_ar.vecm import coint_johansen  # type: ignore
+        _xa, _ya = x.align(y, join="inner")
+        _mat = pd.concat([_xa, _ya], axis=1).dropna().values
+        if len(_mat) > 20:
+            _joh = coint_johansen(_mat, det_order=0, k_ar_diff=1)
+            # Trace statistic: H0 = r<=0 (no cointegration) vs H1 = r>=1
+            _trace0 = float(_joh.lr1[0])   # trace statistic for r=0
+            _cv0_90 = float(_joh.cvt[0, 0])  # 90% critical value
+            _cv0_95 = float(_joh.cvt[0, 1])  # 95% critical value
+            if _trace0 > _cv0_95:
+                _joh_concl = f"Cointegrated at 95% (trace={_trace0:.2f} > cv95={_cv0_95:.2f})"
+            elif _trace0 > _cv0_90:
+                _joh_concl = f"Cointegrated at 90% (trace={_trace0:.2f} > cv90={_cv0_90:.2f})"
+            else:
+                _joh_concl = f"No cointegration (trace={_trace0:.2f} < cv95={_cv0_95:.2f})"
+            rows.append({
+                "Test": "Johansen Trace (r=0)",
+                "Statistic": round(_trace0, 4),
+                "p-value": np.nan,  # Johansen uses critical values, not p-values
+                "Conclusion": _joh_concl,
+            })
+        else:
+            rows.append({
+                "Test": "Johansen Trace (r=0)",
+                "Statistic": np.nan,
+                "p-value": np.nan,
+                "Conclusion": "Not enough data (< 20 aligned points)",
+            })
+    except Exception as exc:
+        rows.append({
+            "Test": "Johansen Trace (r=0)",
+            "Statistic": np.nan,
+            "p-value": np.nan,
+            "Conclusion": f"Failed: {exc}",
+        })
+
+    # --- Phillips-Perron (PP) on Spread ---
+    try:
+        from statsmodels.tsa.stattools import adfuller as _adf_pp  # reuse ADF as approximation
+        # True PP not in all statsmodels versions; use arch.unitroot if available
+        try:
+            from arch.unitroot import PhillipsPerron as _PP  # type: ignore
+            _pp_res = _PP(s)
+            _pp_stat = float(_pp_res.stat)
+            _pp_p = float(_pp_res.pvalue)
+            _pp_concl = "Stationary (PP)" if _pp_p < signif else "Non-stationary (PP)"
+            rows.append({
+                "Test": "Phillips-Perron (Spread)",
+                "Statistic": round(_pp_stat, 4),
+                "p-value": round(_pp_p, 4),
+                "Conclusion": _pp_concl,
+            })
+        except ImportError:
+            pass  # arch not installed; skip PP silently
+    except Exception as exc:
+        rows.append({
+            "Test": "Phillips-Perron (Spread)",
+            "Statistic": np.nan,
+            "p-value": np.nan,
+            "Conclusion": f"Failed: {exc}",
+        })
+
     return pd.DataFrame(rows)
 
 
@@ -1977,7 +2162,17 @@ def _render_advanced_diagnostics(
         for col in ["Statistic", "p-value"]:
             if col in display_df.columns:
                 display_df[col] = display_df[col].astype(float).round(4)
-        st.dataframe(display_df, width="stretch")
+        st.dataframe(display_df, use_container_width=True)
+        try:
+            st.download_button(
+                label="⬇ Export Tests CSV",
+                data=display_df.to_csv(index=False).encode("utf-8"),
+                file_name="stationarity_tests.csv",
+                mime="text/csv",
+                key="stat_tests_csv_btn",
+            )
+        except Exception:
+            pass
 
     # --- Ljung-Box + ACF/PACF ---
     col1, col2 = st.columns(2)
@@ -1991,7 +2186,7 @@ def _render_advanced_diagnostics(
             lb_disp = lb_df.copy()
             lb_disp["LB Stat"] = lb_disp["LB Stat"].astype(float).round(3)
             lb_disp["p-value"] = lb_disp["p-value"].astype(float).round(4)
-            st.dataframe(lb_disp, width="stretch")
+            st.dataframe(lb_disp, use_container_width=True)
 
     with col2:
         st.markdown("**📊 ACF / PACF ל-Z**")
@@ -2008,7 +2203,7 @@ def _render_advanced_diagnostics(
                 yaxis_title="Correlation",
                 title="ACF of Z",
             )
-            st.plotly_chart(fig_acf, width="stretch")
+            st.plotly_chart(fig_acf, use_container_width=True)
 
             fig_pacf = go.Figure()
             fig_pacf.add_trace(
@@ -2019,13 +2214,13 @@ def _render_advanced_diagnostics(
                 yaxis_title="Partial Correlation",
                 title="PACF of Z",
             )
-            st.plotly_chart(fig_pacf, width="stretch")
+            st.plotly_chart(fig_pacf, use_container_width=True)
 
     # --- היסטוגרמת Z + Normal ---
     st.markdown("**📈 התפלגות Z (Histogram + Normal Overlay)**")
     fig_hist = _plot_z_hist_with_normal(z_series)
     if fig_hist.data:
-        st.plotly_chart(fig_hist, width="stretch")
+        st.plotly_chart(fig_hist, use_container_width=True)
     else:
         st.caption("לא ניתן להציג היסטוגרמת Z (אין מספיק נתונים).")
 
@@ -2250,16 +2445,16 @@ def _render_mean_reversion_and_regime(
     if hl_df.empty:
         st.caption("לא ניתן לחשב Half-Life (נתונים חסרים או חלונות גדולים מדי).")
     else:
-        st.dataframe(hl_df, width="stretch")
+        st.dataframe(hl_df, use_container_width=True)
         fig_hl = _plot_hl_bar_chart(hl_df)
         if fig_hl.data:
-            st.plotly_chart(fig_hl, width="stretch")
+            st.plotly_chart(fig_hl, use_container_width=True)
 
     # ===== Hurst & Regime Summary =====
     st.markdown("**🌐 Hurst & Regime Summary**")
     hurst_val = _compute_hurst(spread)
     regime_df = _build_regime_summary(corr_static, vol_20, hl_df, hurst_val)
-    st.dataframe(regime_df, width="stretch")
+    st.dataframe(regime_df, use_container_width=True)
 
     # כרטיסי KPI קטנים לתחושת "מצב הזוג" מבחינת Mean-Reversion
     c1, c2, c3 = st.columns(3)
@@ -2602,7 +2797,17 @@ def _render_trade_analytics(backtest_result: Any) -> None:
             return v
 
         display_df["Value"] = display_df["Value"].map(_fmt_val)
-        st.dataframe(display_df, width="stretch")
+        st.dataframe(display_df, use_container_width=True)
+        try:
+            st.download_button(
+                label="⬇ Export Trade Stats CSV",
+                data=display_df.to_csv(index=False).encode("utf-8"),
+                file_name="trade_stats.csv",
+                mime="text/csv",
+                key="trade_stats_csv_btn",
+            )
+        except Exception:
+            pass
 
     # ===== גרפי טריידים =====
     col1, col2 = st.columns(2)
@@ -2611,7 +2816,7 @@ def _render_trade_analytics(backtest_result: Any) -> None:
         st.markdown("**📉 Trade PnL Distribution**")
         fig_hist = _plot_trade_pnl_histogram(trades)
         if fig_hist.data:
-            st.plotly_chart(fig_hist, width="stretch")
+            st.plotly_chart(fig_hist, use_container_width=True)
         else:
             st.caption("לא ניתן לבנות היסטוגרמת PnL (אין מספיק נתונים).")
 
@@ -2619,7 +2824,7 @@ def _render_trade_analytics(backtest_result: Any) -> None:
         st.markdown("**📈 Cumulative PnL**")
         fig_cum = _plot_cumulative_pnl(equity_curve)
         if fig_cum.data:
-            st.plotly_chart(fig_cum, width="stretch")
+            st.plotly_chart(fig_cum, use_container_width=True)
         else:
             st.caption("לא ניתן לבנות עקומת PnL מצטבר (אין equity curve זמין).")
 
@@ -2627,7 +2832,7 @@ def _render_trade_analytics(backtest_result: Any) -> None:
     st.markdown("**📌 MAE / MFE (אם קיים ב-Backtest)**")
     fig_mae_mfe = _plot_mae_mfe_scatter(trades)
     if fig_mae_mfe is not None and fig_mae_mfe.data:
-        st.plotly_chart(fig_mae_mfe, width="stretch")
+        st.plotly_chart(fig_mae_mfe, use_container_width=True)
     else:
         st.caption("לא נמצאו עמודות MAE/MFE בנתוני הטריידים — מדלג על הגרף.")
 
@@ -2943,7 +3148,17 @@ def _render_scenario_analysis(
             help="Z הנוכחי של הספרד לפי ההיסטוריה וציון זד נוכחי.",
         )
 
-        st.dataframe(mr_df, width="stretch")
+        st.dataframe(mr_df, use_container_width=True)
+        try:
+            st.download_button(
+                label="⬇ Export MR Scenarios CSV",
+                data=mr_df.to_csv(index=False).encode("utf-8"),
+                file_name="mr_scenarios.csv",
+                mime="text/csv",
+                key="mr_scenarios_csv_btn",
+            )
+        except Exception:
+            pass
 
     # ==== תרחישי Shock במחירים ====
     st.markdown("### ⚡ Equity Shock Scenarios (X/Y ±%)")
@@ -2960,7 +3175,17 @@ def _render_scenario_analysis(
     if shocks_df.empty:
         st.caption("לא ניתן לחשב תרחישי Shock — חסר דאטה למחירי X/Y או לספרד.")
     else:
-        st.dataframe(shocks_df, width="stretch")
+        st.dataframe(shocks_df, use_container_width=True)
+        try:
+            st.download_button(
+                label="⬇ Export Shock Scenarios CSV",
+                data=shocks_df.to_csv(index=False).encode("utf-8"),
+                file_name="shock_scenarios.csv",
+                mime="text/csv",
+                key="shock_scenarios_csv_btn",
+            )
+        except Exception:
+            pass
 
     # טקסט סיכום קטן
     st.markdown("**📌 הערות מקצועיות לתרחישים:**")

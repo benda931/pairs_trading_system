@@ -11,6 +11,7 @@ smart_scan_tab.py — HF-grade Smart Scan Tab
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import (
     Any,
     Dict,
@@ -2439,10 +2440,9 @@ def adapt_metrics_from_history(
         source="ml_adapted",
     )
  
- # =============================================
+# =============================================
 # Part 5/5 — Composite Smart Score + Smart Scan UI (HF-grade)
 # =============================================
-from datetime import datetime, timezone
 
 def compute_composite_smart_score(
     df: pd.DataFrame,
@@ -2789,7 +2789,7 @@ def render_smart_scan_tab(
 
     # --- Universe preview + Diagnostics ---
     st.markdown("**Universe preview (עד 50 שורות):**")
-    st.dataframe(df_universe.head(50), width="stretch")
+    st.dataframe(df_universe.head(50), use_container_width=True)
 
     with st.expander("Universe diagnostics", expanded=False):
         try:
@@ -2809,9 +2809,9 @@ def render_smart_scan_tab(
                         }
                     )
             if diag_rows:
-                st.dataframe(pd.DataFrame(diag_rows), width="stretch")
-        except Exception:
-            pass
+                st.dataframe(pd.DataFrame(diag_rows), use_container_width=True)
+        except Exception as _silent_exc:
+            logger.debug("Silent exception swallowed: %s", _silent_exc)
 
     # Universe פרטני לזוגות — pairs_df בליבה (נשתמש בו לשכבת Macro Overlay)
     pairs_df = df_universe.copy()
@@ -2928,7 +2928,7 @@ def render_smart_scan_tab(
         if df_param_scores is not None and not df_param_scores.empty:
             coverage_rows.append({"layer": "Param Scores", "rows": len(df_param_scores)})
         if coverage_rows:
-            st.dataframe(pd.DataFrame(coverage_rows), width="stretch")
+            st.dataframe(pd.DataFrame(coverage_rows), use_container_width=True)
 
     # ======================================================
     # 4) Layer configs (Param / Fundamental / Macro / Metrics)
@@ -3281,7 +3281,7 @@ def render_smart_scan_tab(
                     }
                 )
         if health_rows:
-            st.dataframe(pd.DataFrame(health_rows), width="stretch")
+            st.dataframe(pd.DataFrame(health_rows), use_container_width=True)
 
         # אם macro_coverage נמוך מאוד – אזהרה
         macro_coverage = next((r["coverage"] for r in health_rows if r["layer"] == "MacroScore"), None)
@@ -3289,7 +3289,185 @@ def render_smart_scan_tab(
             st.warning("⚠️ Macro layer coverage נמוך (<40%) — כדאי לא להסתמך יותר מדי על macro_score_total.")
 
     st.markdown(f"**Top 50 by `{ranking_metric}`**")
-    st.dataframe(df_view.head(50), width="stretch")
+    st.dataframe(df_view.head(50), use_container_width=True)
+
+    # ---- CSV / Excel export ----
+    try:
+        _csv_bytes = df_view.to_csv(index=False).encode("utf-8")
+        st.download_button(
+            label="⬇ Export scan results (CSV)",
+            data=_csv_bytes,
+            file_name="smart_scan_results.csv",
+            mime="text/csv",
+            key="smart_scan_csv_dl",
+        )
+    except Exception as _dl_err:
+        st.caption(f"Export unavailable: {_dl_err}")
+
+    # ---- Plotly: Top-K composite score bar chart ----
+    st.markdown("#### 📊 Top pairs — composite score breakdown")
+    try:
+        import plotly.graph_objects as _go_ss
+        _top_n_chart = min(20, len(df_view))
+        _df_chart = df_view.head(_top_n_chart).copy()
+        _pair_labels = _df_chart["pair"].astype(str).tolist()
+
+        _layer_defs = [
+            ("param_optimism_score_total", "Param", "#42A5F5"),
+            ("fundamental_score_total", "Fund", "#66BB6A"),
+            ("macro_score_total", "Macro", "#FFA726"),
+            ("metrics_score_total", "Metrics", "#EF5350"),
+        ]
+
+        _fig_bar = _go_ss.Figure()
+        for _col, _lbl, _color in _layer_defs:
+            if _col in _df_chart.columns:
+                _vals = pd.to_numeric(_df_chart[_col], errors="coerce").fillna(0.0).tolist()
+                _fig_bar.add_trace(_go_ss.Bar(
+                    name=_lbl,
+                    x=_pair_labels,
+                    y=_vals,
+                    marker_color=_color,
+                    opacity=0.85,
+                ))
+
+        _fig_bar.update_layout(
+            barmode="stack",
+            title=f"Top {_top_n_chart} pairs — layer contribution (stacked)",
+            xaxis_title="Pair",
+            yaxis_title="Score contribution",
+            yaxis=dict(range=[0, 1.05]),
+            legend=dict(orientation="h", y=1.08),
+            height=380,
+            margin=dict(l=10, r=10, t=60, b=80),
+            plot_bgcolor="rgba(0,0,0,0)",
+            paper_bgcolor="rgba(0,0,0,0)",
+            font=dict(color="#ECEFF1"),
+        )
+        _fig_bar.update_xaxes(tickangle=-40)
+        st.plotly_chart(_fig_bar, use_container_width=True)
+    except Exception as _bar_err:
+        st.caption(f"Bar chart unavailable: {_bar_err}")
+
+    # ---- Plotly: Composite score distribution histogram ----
+    st.markdown("#### 📈 Composite score distribution")
+    try:
+        import plotly.graph_objects as _go_hist
+        _scores = pd.to_numeric(df_scan.get("smart_score_total", pd.Series(dtype=float)), errors="coerce").dropna()
+        if len(_scores) > 0:
+            _fig_hist = _go_hist.Figure(_go_hist.Histogram(
+                x=_scores.values,
+                nbinsx=20,
+                marker_color="#42A5F5",
+                opacity=0.8,
+                name="smart_score_total",
+            ))
+            # Overlay macro-adjusted if available
+            if "smart_score_with_macro" in df_scan.columns:
+                _scores_macro = pd.to_numeric(df_scan["smart_score_with_macro"], errors="coerce").dropna()
+                _fig_hist.add_trace(_go_hist.Histogram(
+                    x=_scores_macro.values,
+                    nbinsx=20,
+                    marker_color="#FFA726",
+                    opacity=0.6,
+                    name="smart_score_with_macro",
+                ))
+            _fig_hist.update_layout(
+                barmode="overlay",
+                title="Score distribution across universe",
+                xaxis_title="Smart Score",
+                yaxis_title="# pairs",
+                height=280,
+                margin=dict(l=10, r=10, t=40, b=10),
+                legend=dict(orientation="h", y=1.05),
+                plot_bgcolor="rgba(0,0,0,0)",
+                paper_bgcolor="rgba(0,0,0,0)",
+                font=dict(color="#ECEFF1"),
+            )
+            _score_mean = float(_scores.mean())
+            _score_med = float(_scores.median())
+            _sc_c1, _sc_c2, _sc_c3, _sc_c4 = st.columns(4)
+            _sc_c1.metric("Mean score", f"{_score_mean:.3f}")
+            _sc_c2.metric("Median score", f"{_score_med:.3f}")
+            _sc_c3.metric("Top-1 score", f"{float(_scores.max()):.3f}")
+            _sc_c4.metric("# pairs scored", f"{len(_scores)}")
+            st.plotly_chart(_fig_hist, use_container_width=True)
+        else:
+            st.caption("No numeric smart_score_total values to plot.")
+    except Exception as _hist_err:
+        st.caption(f"Score histogram unavailable: {_hist_err}")
+
+    # ---- Plotly: Per-layer score heatmap (top 20 pairs) ----
+    st.markdown("#### 🔥 Layer score heatmap (top 20 pairs)")
+    try:
+        import plotly.graph_objects as _go_hm
+        _hm_cols = [c for c in [
+            "param_optimism_score_total",
+            "fundamental_score_total",
+            "macro_score_total",
+            "metrics_score_total",
+            "smart_score_total",
+        ] if c in df_view.columns]
+        if _hm_cols and len(df_view) > 0:
+            _df_hm = df_view.head(20)[["pair"] + _hm_cols].copy()
+            _df_hm = _df_hm.set_index("pair")
+            for _c in _hm_cols:
+                _df_hm[_c] = pd.to_numeric(_df_hm[_c], errors="coerce").fillna(0.0)
+            _pretty_cols = [c.replace("_score_total", "").replace("_optimism", "").replace("smart_score_with_macro", "composite+macro").replace("smart_score_total", "composite") for c in _hm_cols]
+            _fig_hm = _go_hm.Figure(_go_hm.Heatmap(
+                z=_df_hm.values.T.tolist(),
+                x=_df_hm.index.tolist(),
+                y=_pretty_cols,
+                colorscale="RdYlGn",
+                zmin=0.0,
+                zmax=1.0,
+                text=[[f"{v:.2f}" for v in row] for row in _df_hm.values.T.tolist()],
+                texttemplate="%{text}",
+                showscale=True,
+                colorbar=dict(title="Score"),
+            ))
+            _fig_hm.update_layout(
+                title="Layer scores heatmap (top 20 pairs)",
+                height=340,
+                margin=dict(l=10, r=10, t=50, b=80),
+                xaxis_tickangle=-40,
+                plot_bgcolor="rgba(0,0,0,0)",
+                paper_bgcolor="rgba(0,0,0,0)",
+                font=dict(color="#ECEFF1"),
+            )
+            st.plotly_chart(_fig_hm, use_container_width=True)
+        else:
+            st.caption("Not enough score columns for heatmap.")
+    except Exception as _hm_err:
+        st.caption(f"Layer heatmap unavailable: {_hm_err}")
+
+    # ---- Per-layer score breakdown table (expander) ----
+    with st.expander("🔬 Per-layer score breakdown (full table)", expanded=False):
+        try:
+            _breakdown_cols = ["pair"] + [c for c in [
+                "param_optimism_score_total",
+                "fundamental_score_total",
+                "macro_score_total",
+                "metrics_score_total",
+                "smart_score_total",
+                "smart_score_with_macro",
+                "stability_ratio",
+                "fv_score",
+            ] if c in df_scan.columns]
+            _df_breakdown = df_scan[_breakdown_cols].copy()
+            for _bc in _breakdown_cols[1:]:
+                _df_breakdown[_bc] = pd.to_numeric(_df_breakdown[_bc], errors="coerce").round(4)
+            _df_breakdown = _df_breakdown.sort_values("smart_score_total", ascending=False)
+            st.dataframe(_df_breakdown, use_container_width=True)
+            st.download_button(
+                label="⬇ Export full breakdown CSV",
+                data=_df_breakdown.to_csv(index=False).encode("utf-8"),
+                file_name="smart_scan_breakdown.csv",
+                mime="text/csv",
+                key="smart_scan_breakdown_dl",
+            )
+        except Exception as _bd_err:
+            st.caption(f"Breakdown table unavailable: {_bd_err}")
 
     # ======================================================
     # 8) Stability Scan (weight perturbations)
@@ -3367,7 +3545,37 @@ def render_smart_scan_tab(
             ).sort_values("stability_ratio", ascending=False)
 
             st.caption("Higher stability_ratio → הזוג כמעט תמיד נשאר בצמרת גם כשמשנים קצת משקלים.")
-            st.dataframe(stab_df.head(50), width="stretch")
+            st.dataframe(stab_df.head(50), use_container_width=True)
+
+            # Stability bar chart
+            try:
+                import plotly.graph_objects as _go_stab
+                _stab_top = stab_df.head(20)
+                _stab_colors = [
+                    "#66BB6A" if v >= 0.7 else ("#FFA726" if v >= 0.4 else "#EF5350")
+                    for v in _stab_top["stability_ratio"]
+                ]
+                _fig_stab = _go_stab.Figure(_go_stab.Bar(
+                    x=_stab_top["pair"].astype(str).tolist(),
+                    y=_stab_top["stability_ratio"].tolist(),
+                    marker_color=_stab_colors,
+                    text=[f"{v:.0%}" for v in _stab_top["stability_ratio"]],
+                    textposition="outside",
+                ))
+                _fig_stab.update_layout(
+                    title="Stability ratio — top 20 pairs (green≥70%, orange≥40%, red<40%)",
+                    xaxis_title="Pair",
+                    yaxis=dict(title="Stability ratio", range=[0, 1.1]),
+                    height=300,
+                    margin=dict(l=10, r=10, t=50, b=80),
+                    xaxis_tickangle=-40,
+                    plot_bgcolor="rgba(0,0,0,0)",
+                    paper_bgcolor="rgba(0,0,0,0)",
+                    font=dict(color="#ECEFF1"),
+                )
+                st.plotly_chart(_fig_stab, use_container_width=True)
+            except Exception as _stab_chart_err:
+                st.caption(f"Stability chart unavailable: {_stab_chart_err}")
 
             # נסמן stability_ratio ב-df_scan
             stab_map = dict(zip(stab_df["pair"], stab_df["stability_ratio"]))
@@ -3397,7 +3605,47 @@ def render_smart_scan_tab(
                     }
                 )
         if diag_rows:
-            st.dataframe(pd.DataFrame(diag_rows), width="stretch")
+            _df_diag = pd.DataFrame(diag_rows)
+            st.dataframe(_df_diag, use_container_width=True)
+            # Layer diagnostics bar chart (mean ± range)
+            try:
+                import plotly.graph_objects as _go_diag
+                _fig_diag = _go_diag.Figure()
+                _fig_diag.add_trace(_go_diag.Bar(
+                    name="Mean",
+                    x=_df_diag["layer"].tolist(),
+                    y=_df_diag["mean"].tolist(),
+                    marker_color="#42A5F5",
+                    text=[f"{v:.3f}" for v in _df_diag["mean"]],
+                    textposition="outside",
+                ))
+                _fig_diag.add_trace(_go_diag.Scatter(
+                    name="Max",
+                    x=_df_diag["layer"].tolist(),
+                    y=_df_diag["max"].tolist(),
+                    mode="markers",
+                    marker=dict(symbol="triangle-up", size=10, color="#66BB6A"),
+                ))
+                _fig_diag.add_trace(_go_diag.Scatter(
+                    name="Min",
+                    x=_df_diag["layer"].tolist(),
+                    y=_df_diag["min"].tolist(),
+                    mode="markers",
+                    marker=dict(symbol="triangle-down", size=10, color="#EF5350"),
+                ))
+                _fig_diag.update_layout(
+                    title="Layer score averages (mean, min, max)",
+                    yaxis=dict(title="Score", range=[0, 1.1]),
+                    height=280,
+                    margin=dict(l=10, r=10, t=40, b=10),
+                    legend=dict(orientation="h", y=1.05),
+                    plot_bgcolor="rgba(0,0,0,0)",
+                    paper_bgcolor="rgba(0,0,0,0)",
+                    font=dict(color="#ECEFF1"),
+                )
+                st.plotly_chart(_fig_diag, use_container_width=True)
+            except Exception as _diag_chart_err:
+                st.caption(f"Layer diagnostics chart unavailable: {_diag_chart_err}")
 
     # שמירת df_scan ל-session_state
     st.session_state["smart_scan_results"] = df_scan
@@ -3417,7 +3665,7 @@ def render_smart_scan_tab(
         avg_sharpe = None
 
     # שימוש ב-UTC בצורה בטוחה (בלי timezone אובייקט כדי לא להחזיר את הבאג)
-    now_utc = datetime.utcnow()
+    now_utc = datetime.now(timezone.utc)
 
     smart_meta = {
         "scan_run_id": scan_run_id,
@@ -3458,8 +3706,8 @@ def render_smart_scan_tab(
             }
         )
         st.session_state["smart_scan_history"] = history[-50:]
-    except Exception:
-        pass
+    except Exception as _silent_exc:
+        logger.debug("Silent exception swallowed: %s", _silent_exc)
 
     # Auto-select top pair
     top_pair = None
@@ -3533,7 +3781,7 @@ def render_smart_scan_tab(
                 shortlist_df = pd.DataFrame(picked_rows).reset_index(drop=True)
                 st.session_state["smart_scan_shortlist"] = shortlist_df
                 st.success(f"נבנתה רשימת Shortlist של {len(shortlist_df)} זוגות.")
-                st.dataframe(shortlist_df, width="stretch")
+                st.dataframe(shortlist_df, use_container_width=True)
             else:
                 st.info("לא נבחרו זוגות ל-Shortlist (יתכן שמגבלות הגיוון היו מחמירות מדי).")
 
@@ -3589,7 +3837,7 @@ def render_smart_scan_tab(
             st.caption("לא בוצעו עדיין סריקות לשמירה בהיסטוריה.")
         else:
             df_hist = pd.DataFrame(hist)
-            st.dataframe(df_hist.sort_values("ts_utc"), width="stretch", height=260)
+            st.dataframe(df_hist.sort_values("ts_utc"), use_container_width=True, height=260)
 
             if len(df_hist) >= 2:
                 c1, c2 = st.columns(2)

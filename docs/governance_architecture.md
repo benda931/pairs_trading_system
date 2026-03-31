@@ -4,6 +4,14 @@
 **Last reviewed:** 2026-03-31
 **Package root:** `pairs_trading_system/` (10 governance packages)
 
+> **Integration Status: SCAFFOLD**
+> Governance infrastructure is implemented and tested (100 tests pass). As of 2026-03-31,
+> **no operational decision is gated by any governance check.** Audit chains are empty.
+> SurveillanceEngine.detect() is never called from operational code.
+> The only partial integration: GovernanceEngine is referenced in ML registry promote()
+> but is non-blocking on ImportError.
+> See: `docs/INTEGRATION_STATUS.md`, `docs/remediation/remediation_ledger.md:P1-GOV`
+
 ---
 
 ## 1. Overview

@@ -24,7 +24,7 @@ fair_value_api_tab.py — Fair Value Engine / Optimizer / Advisor API Lab (v2)
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 import itertools
@@ -195,7 +195,7 @@ def _build_demo_prices(n_days: int = 252) -> Dict[str, Any]:
     - שלושה סימבולים: SPY, QQQ, IWM.
     - מהלך רנדומלי עם קורלציה גבוהה בין SPY/QQQ, קצת שונה ל-IWM.
     """
-    end = datetime.utcnow().date()
+    end = datetime.now(timezone.utc).date()
     dates = [end - timedelta(days=i) for i in range(n_days)]
     dates = sorted(dates)
 
@@ -308,7 +308,7 @@ def _build_from_csv(uploaded_file, key_prefix: str) -> Optional[Dict[str, Any]]:
             series = pd.to_numeric(df[sym], errors="coerce")
         except Exception:
             continue
-        prices_wide[sym] = series.fillna(method="ffill").fillna(method="bfill").tolist()
+        prices_wide[sym] = series.ffill().bfill().tolist()
 
     time_index = [dt.to_pydatetime() for dt in idx]
 
@@ -442,7 +442,7 @@ def _payload_download_ui(payload: Dict[str, Any], label: str, key_prefix: str) -
     st.download_button(
         label=label,
         data=b,
-        file_name=f"{key_prefix}_payload_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.json",
+        file_name=f"{key_prefix}_payload_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.json",
         mime="application/json",
         key=f"{key_prefix}_download_btn",
     )
@@ -470,6 +470,632 @@ def _payload_upload_json_ui(key_prefix: str) -> Optional[Dict[str, Any]]:
     except Exception as e:
         st.error(f"כשל בקריאת JSON: {e}")
         return None
+
+
+# =====================================
+#  Analytics helpers (Engine results)
+# =====================================
+
+# All 26 engine output columns with labels and descriptions
+_ENGINE_COLS_META: Dict[str, Dict[str, str]] = {
+    "pair":             {"label": "Pair",          "group": "id"},
+    "window":           {"label": "Window",        "group": "config"},
+    "action":           {"label": "Action",        "group": "signal"},
+    "mispricing":       {"label": "Mispricing",    "group": "edge"},
+    "vol_adj_mispricing": {"label": "Vol-adj Misprice", "group": "edge"},
+    "zscore":           {"label": "Z-score",       "group": "signal"},
+    "band_p95":         {"label": "Band p95",      "group": "band"},
+    "band_upper":       {"label": "Band upper",    "group": "band"},
+    "band_lower":       {"label": "Band lower",    "group": "band"},
+    "halflife":         {"label": "Half-life (d)", "group": "quality"},
+    "rolling_corr":     {"label": "Rolling Corr",  "group": "quality"},
+    "distance_corr":    {"label": "Dist Corr",     "group": "quality"},
+    "adf_p":            {"label": "ADF p-val",     "group": "stat"},
+    "residual_adf_p":   {"label": "Resid ADF p",  "group": "stat"},
+    "is_coint":         {"label": "Cointegrated",  "group": "stat"},
+    "y_fair":           {"label": "Fair Value Y",  "group": "valuation"},
+    "target_pos_units": {"label": "Target Pos",   "group": "sizing"},
+    "cost_spread_units": {"label": "Cost Spread",  "group": "sizing"},
+    "rp_weight":        {"label": "RP Weight",     "group": "sizing"},
+    "sr_net":           {"label": "Sharpe net",    "group": "perf"},
+    "psr_net":          {"label": "PSR net",       "group": "perf"},
+    "dsr_net":          {"label": "DSR net",       "group": "perf"},
+    "avg_hold_days":    {"label": "Avg hold (d)",  "group": "perf"},
+    "turnover_est":     {"label": "Turnover est",  "group": "perf"},
+    "net_edge_z":       {"label": "Net edge Z",    "group": "edge"},
+    "reason":           {"label": "Reason",        "group": "signal"},
+}
+
+_STAT_QUALITY_THRESHOLDS = {
+    "adf_p":            {"good": 0.05,  "warn": 0.10,  "direction": "lower"},
+    "residual_adf_p":   {"good": 0.05,  "warn": 0.10,  "direction": "lower"},
+    "rolling_corr":     {"good": 0.65,  "warn": 0.50,  "direction": "higher"},
+    "distance_corr":    {"good": 0.50,  "warn": 0.35,  "direction": "higher"},
+    "halflife":         {"good_lo": 2,  "good_hi": 60, "warn_hi": 120, "direction": "range"},
+    "net_edge_z":       {"good": 1.0,   "warn": 0.0,   "direction": "higher"},
+    "dsr_net":          {"good": 0.5,   "warn": 0.0,   "direction": "higher"},
+}
+
+
+def _stat_status(col: str, val: float) -> str:
+    """Returns 'good', 'warn', or 'bad' for a given metric value."""
+    t = _STAT_QUALITY_THRESHOLDS.get(col)
+    if t is None or val is None or (isinstance(val, float) and np.isnan(val)):
+        return "neutral"
+    d = t.get("direction", "higher")
+    if d == "range":
+        if t["good_lo"] <= val <= t["good_hi"]:
+            return "good"
+        if val <= t.get("warn_hi", 120):
+            return "warn"
+        return "bad"
+    if d == "higher":
+        if val >= t["good"]:
+            return "good"
+        if val >= t["warn"]:
+            return "warn"
+        return "bad"
+    # lower is better
+    if val <= t["good"]:
+        return "good"
+    if val <= t["warn"]:
+        return "warn"
+    return "bad"
+
+
+def _status_color(status: str) -> str:
+    return {"good": "#4CAF50", "warn": "#FF9800", "bad": "#F44336", "neutral": "#9E9E9E"}.get(status, "#9E9E9E")
+
+
+def _render_statistical_scorecard(df: pd.DataFrame) -> None:
+    """
+    Renders a per-pair statistical quality scorecard.
+    Covers ADF p-val, half-life, rolling corr, distance corr, cointegration,
+    net edge Z, and the action signal for each pair.
+    """
+    st.markdown("### 🧪 Statistical Quality Scorecard")
+    st.caption(
+        "Green = passes quality threshold · Orange = marginal · Red = fails. "
+        "Half-life target: 2–60 days (mean-reversion). ADF p-val < 0.05 preferred."
+    )
+
+    score_cols = [c for c in ["adf_p", "residual_adf_p", "rolling_corr", "distance_corr",
+                               "halflife", "net_edge_z", "dsr_net", "is_coint", "action"] if c in df.columns]
+    if not score_cols:
+        st.info("No quality-score columns available from the engine response.")
+        return
+
+    # Colour-coded aggregate per pair
+    try:
+        import plotly.graph_objects as _go_sc
+        stat_dim_cols = [c for c in ["adf_p", "residual_adf_p", "rolling_corr", "distance_corr", "halflife", "net_edge_z", "dsr_net"] if c in df.columns]
+
+        pairs_list = df["pair"].tolist() if "pair" in df.columns else [str(i) for i in df.index]
+        n_pairs = len(pairs_list)
+
+        # Build score matrix
+        z_vals = []
+        hover_texts = []
+        for col in stat_dim_cols:
+            col_z = []
+            col_h = []
+            for _, row in df.iterrows():
+                val = row.get(col)
+                try:
+                    val_f = float(val)
+                except Exception:
+                    val_f = float("nan")
+                status = _stat_status(col, val_f)
+                score = {"good": 1.0, "warn": 0.5, "bad": 0.0, "neutral": 0.5}.get(status, 0.5)
+                col_z.append(score)
+                col_h.append(f"{col}={val_f:.4f} [{status}]" if not np.isnan(val_f) else f"{col}=N/A")
+            z_vals.append(col_z)
+            hover_texts.append(col_h)
+
+        col_labels = [_ENGINE_COLS_META.get(c, {}).get("label", c) for c in stat_dim_cols]
+        pair_labels = pairs_list[:min(25, n_pairs)]
+        z_trimmed = [row[:len(pair_labels)] for row in z_vals]
+        hover_trimmed = [row[:len(pair_labels)] for row in hover_texts]
+
+        fig_hm = _go_sc.Figure(data=_go_sc.Heatmap(
+            z=z_trimmed,
+            x=pair_labels,
+            y=col_labels,
+            colorscale="RdYlGn",
+            zmin=0, zmax=1,
+            text=[[f"{v:.2f}" for v in row] for row in z_trimmed],
+            texttemplate="%{text}",
+            hovertext=hover_trimmed,
+            hoverinfo="text",
+            showscale=True,
+            colorbar=dict(title="Quality", tickvals=[0, 0.5, 1], ticktext=["Fail", "Warn", "Pass"]),
+        ))
+        fig_hm.update_layout(
+            title="Statistical Quality Matrix (1=Pass, 0.5=Marginal, 0=Fail)",
+            plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+            font=dict(color="#ECEFF1"), height=max(250, len(stat_dim_cols) * 45 + 80),
+            xaxis=dict(tickangle=-30),
+        )
+        st.plotly_chart(fig_hm, use_container_width=True)
+    except Exception as _hm_err:
+        st.caption(f"Quality heatmap unavailable: {_hm_err}")
+
+    # Metric summary table with colour flags
+    try:
+        summary_rows = []
+        for col in [c for c in ["adf_p", "residual_adf_p", "rolling_corr", "distance_corr",
+                                  "halflife", "net_edge_z", "dsr_net"] if c in df.columns]:
+            series = pd.to_numeric(df[col], errors="coerce")
+            n_good = int(series.apply(lambda v: _stat_status(col, v) == "good").sum())
+            n_warn = int(series.apply(lambda v: _stat_status(col, v) == "warn").sum())
+            n_bad  = int(series.apply(lambda v: _stat_status(col, v) == "bad").sum())
+            summary_rows.append({
+                "Metric": _ENGINE_COLS_META.get(col, {}).get("label", col),
+                "Mean": round(float(series.mean()), 4) if series.notna().any() else None,
+                "Median": round(float(series.median()), 4) if series.notna().any() else None,
+                "Min": round(float(series.min()), 4) if series.notna().any() else None,
+                "Max": round(float(series.max()), 4) if series.notna().any() else None,
+                "Pass": n_good,
+                "Warn": n_warn,
+                "Fail": n_bad,
+            })
+        if summary_rows:
+            df_summary = pd.DataFrame(summary_rows)
+            st.markdown("**Quality metric summary across all pairs:**")
+            st.dataframe(df_summary, use_container_width=True, hide_index=True)
+    except Exception as _sum_err:
+        st.caption(f"Summary table unavailable: {_sum_err}")
+
+    # Cointegration + action breakdown
+    col_coint, col_act = st.columns(2)
+    with col_coint:
+        if "is_coint" in df.columns:
+            try:
+                coint_counts = df["is_coint"].value_counts()
+                n_coint = int(coint_counts.get(True, 0))
+                n_not = int(coint_counts.get(False, 0))
+                st.metric("Cointegrated pairs", f"{n_coint} / {n_coint + n_not}", delta=f"{n_coint/(n_coint+n_not)*100:.0f}%" if (n_coint+n_not) > 0 else "0%")
+            except Exception:
+                pass
+    with col_act:
+        if "action" in df.columns:
+            try:
+                act_counts = df["action"].value_counts().reset_index()
+                act_counts.columns = ["Action", "Count"]
+                st.markdown("**Signal actions:**")
+                st.dataframe(act_counts, use_container_width=True, hide_index=True)
+            except Exception:
+                pass
+
+
+def _render_engine_multi_charts(df: pd.DataFrame) -> None:
+    """
+    Multi-panel analytics: Z-score vs mispricing scatter, performance bar,
+    rolling-corr vs half-life scatter, and full metrics heatmap.
+    """
+    import plotly.graph_objects as _go_mc
+    import plotly.express as _px_mc
+
+    st.markdown("### 📈 Advanced Analytics — All Engine Dimensions")
+
+    tab_scatter, tab_bar, tab_heatmap, tab_perf = st.tabs([
+        "🔵 Z vs Edge", "📊 Top-N Bar", "🟩 Metrics Heatmap", "📉 Performance"
+    ])
+
+    # --- Tab 1: Z-score vs net_edge_z scatter ---
+    with tab_scatter:
+        try:
+            z_col  = next((c for c in ["zscore", "vol_adj_mispricing"] if c in df.columns), None)
+            e_col  = next((c for c in ["net_edge_z", "mispricing"] if c in df.columns), None)
+            if z_col and e_col:
+                df_sc = df[["pair", z_col, e_col]].copy()
+                df_sc[z_col] = pd.to_numeric(df_sc[z_col], errors="coerce")
+                df_sc[e_col] = pd.to_numeric(df_sc[e_col], errors="coerce")
+                df_sc = df_sc.dropna()
+
+                color_col = "action" if "action" in df.columns else None
+                df_sc2 = df_sc.copy()
+                if color_col:
+                    df_sc2[color_col] = df[color_col].values[:len(df_sc2)]
+
+                fig_sc = _px_mc.scatter(
+                    df_sc2, x=z_col, y=e_col,
+                    hover_data=["pair"],
+                    color=color_col,
+                    labels={z_col: _ENGINE_COLS_META.get(z_col, {}).get("label", z_col),
+                            e_col: _ENGINE_COLS_META.get(e_col, {}).get("label", e_col)},
+                    title=f"{_ENGINE_COLS_META.get(z_col,{}).get('label',z_col)} vs {_ENGINE_COLS_META.get(e_col,{}).get('label',e_col)}",
+                    template="plotly_dark",
+                )
+                fig_sc.add_hline(y=0, line_dash="dash", line_color="gray", opacity=0.5)
+                fig_sc.add_vline(x=0, line_dash="dash", line_color="gray", opacity=0.5)
+                fig_sc.update_layout(height=420, plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)")
+                st.plotly_chart(fig_sc, use_container_width=True)
+
+                # Correlation between z-score and edge
+                corr_ze = df_sc[[z_col, e_col]].corr().iloc[0, 1]
+                st.caption(f"Pearson r({z_col}, {e_col}) = {corr_ze:.3f}")
+            else:
+                st.info("Z-score and edge columns not found in engine output.")
+
+            # Second scatter: rolling_corr vs halflife
+            if "rolling_corr" in df.columns and "halflife" in df.columns:
+                st.markdown("**Rolling Correlation vs Half-Life**")
+                df_hl = df[["pair", "rolling_corr", "halflife"]].copy()
+                df_hl["rolling_corr"] = pd.to_numeric(df_hl["rolling_corr"], errors="coerce")
+                df_hl["halflife"] = pd.to_numeric(df_hl["halflife"], errors="coerce")
+                df_hl = df_hl.dropna()
+                fig_hl = _px_mc.scatter(
+                    df_hl, x="halflife", y="rolling_corr",
+                    hover_data=["pair"],
+                    title="Mean-Reversion Quality: Half-Life vs Rolling Correlation",
+                    labels={"halflife": "Half-life (days)", "rolling_corr": "Rolling Corr"},
+                    template="plotly_dark",
+                    color_discrete_sequence=["#42A5F5"],
+                )
+                # Add quality zones
+                fig_hl.add_vrect(x0=2, x1=60, fillcolor="rgba(76,175,80,0.07)", line_width=0, annotation_text="Optimal HL zone")
+                fig_hl.add_hrect(y0=0.60, y1=1.0, fillcolor="rgba(76,175,80,0.07)", line_width=0)
+                fig_hl.update_layout(height=380, plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)")
+                st.plotly_chart(fig_hl, use_container_width=True)
+        except Exception as _sc_err:
+            st.caption(f"Scatter chart unavailable: {_sc_err}")
+
+    # --- Tab 2: Top-N bar chart ---
+    with tab_bar:
+        try:
+            perf_options = [c for c in ["dsr_net", "psr_net", "sr_net", "net_edge_z"] if c in df.columns]
+            if perf_options:
+                bar_metric = st.selectbox("Metric for Top-N bar:", options=perf_options, key="fv_bar_metric")
+                top_n_bar = st.slider("Top-N pairs:", 5, min(50, len(df)), min(15, len(df)), key="fv_bar_topn")
+                df_bar = df[["pair", bar_metric]].copy()
+                df_bar[bar_metric] = pd.to_numeric(df_bar[bar_metric], errors="coerce")
+                df_bar = df_bar.dropna().sort_values(bar_metric, ascending=False).head(top_n_bar)
+
+                colors = ["#4CAF50" if v > 0 else "#F44336" for v in df_bar[bar_metric]]
+                fig_bar = _go_mc.Figure(_go_mc.Bar(
+                    x=df_bar["pair"], y=df_bar[bar_metric],
+                    marker_color=colors,
+                    text=[f"{v:.3f}" for v in df_bar[bar_metric]],
+                    textposition="outside",
+                ))
+                fig_bar.update_layout(
+                    title=f"Top-{top_n_bar} Pairs by {_ENGINE_COLS_META.get(bar_metric,{}).get('label',bar_metric)}",
+                    height=420, xaxis_tickangle=-35,
+                    plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+                    font=dict(color="#ECEFF1"),
+                )
+                fig_bar.add_hline(y=0, line_color="white", line_dash="dot", opacity=0.4)
+                st.plotly_chart(fig_bar, use_container_width=True)
+
+                # Show also worst pairs
+                df_worst = df[["pair", bar_metric]].copy()
+                df_worst[bar_metric] = pd.to_numeric(df_worst[bar_metric], errors="coerce")
+                df_worst = df_worst.dropna().sort_values(bar_metric, ascending=True).head(5)
+                if not df_worst.empty:
+                    st.markdown("**Bottom 5 pairs:**")
+                    st.dataframe(df_worst, use_container_width=True, hide_index=True)
+            else:
+                st.info("No performance columns found.")
+        except Exception as _bar_err:
+            st.caption(f"Bar chart unavailable: {_bar_err}")
+
+    # --- Tab 3: Full metrics heatmap ---
+    with tab_heatmap:
+        try:
+            num_cols = [c for c in df.columns if c not in ("pair", "action", "reason", "window", "is_coint") and
+                        pd.api.types.is_numeric_dtype(df[c])]
+            if num_cols and "pair" in df.columns:
+                hm_cols = st.multiselect(
+                    "Columns to include in heatmap:",
+                    options=num_cols,
+                    default=num_cols[:min(10, len(num_cols))],
+                    key="fv_hm_cols",
+                )
+                if hm_cols:
+                    df_hm = df[["pair"] + hm_cols].set_index("pair")
+                    df_hm = df_hm.apply(pd.to_numeric, errors="coerce")
+                    # Normalize per column for visual comparison
+                    df_norm = df_hm.copy()
+                    for c in hm_cols:
+                        col_min, col_max = df_hm[c].min(), df_hm[c].max()
+                        rng = col_max - col_min
+                        if rng > 0:
+                            df_norm[c] = (df_hm[c] - col_min) / rng
+                        else:
+                            df_norm[c] = 0.5
+
+                    fig_hm2 = _go_mc.Figure(_go_mc.Heatmap(
+                        z=df_norm.T.values.tolist(),
+                        x=df_norm.index.tolist(),
+                        y=[_ENGINE_COLS_META.get(c, {}).get("label", c) for c in df_norm.columns],
+                        colorscale="RdYlGn", zmin=0, zmax=1,
+                        text=[[f"{df_hm.iloc[ci][ri]:.3f}" for ci in range(len(df_hm))] for ri, _ in enumerate(df_norm.columns)],
+                        texttemplate="%{text}",
+                        hoverinfo="text",
+                        showscale=True,
+                        colorbar=dict(title="Norm."),
+                    ))
+                    fig_hm2.update_layout(
+                        title="All Metrics Heatmap (column-normalized 0→1)",
+                        height=max(300, len(hm_cols) * 30 + 100),
+                        xaxis_tickangle=-30,
+                        plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+                        font=dict(color="#ECEFF1"),
+                    )
+                    st.plotly_chart(fig_hm2, use_container_width=True)
+                    st.caption("Raw values shown in cells. Colors are column-normalized for cross-pair comparison.")
+            else:
+                st.info("No numeric columns available for heatmap.")
+        except Exception as _hm2_err:
+            st.caption(f"Metrics heatmap unavailable: {_hm2_err}")
+
+    # --- Tab 4: Performance distribution ---
+    with tab_perf:
+        try:
+            perf_cols = [c for c in ["sr_net", "psr_net", "dsr_net", "turnover_est", "avg_hold_days", "rp_weight"] if c in df.columns]
+            if perf_cols:
+                chosen = st.multiselect("Metrics to plot:", perf_cols, default=perf_cols[:min(3, len(perf_cols))], key="fv_perf_cols")
+                for pc in chosen:
+                    series = pd.to_numeric(df[pc], errors="coerce").dropna()
+                    if series.empty:
+                        continue
+                    fig_hist = _go_mc.Figure()
+                    fig_hist.add_trace(_go_mc.Histogram(
+                        x=series, nbinsx=20,
+                        name=_ENGINE_COLS_META.get(pc, {}).get("label", pc),
+                        marker_color="#42A5F5", opacity=0.75,
+                    ))
+                    fig_hist.add_vline(x=float(series.mean()), line_color="#FF9800", line_dash="dash",
+                                       annotation_text=f"Mean={series.mean():.3f}", annotation_position="top right")
+                    fig_hist.update_layout(
+                        title=f"Distribution: {_ENGINE_COLS_META.get(pc,{}).get('label',pc)}",
+                        height=300, bargap=0.05,
+                        plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+                        font=dict(color="#ECEFF1"),
+                    )
+                    st.plotly_chart(fig_hist, use_container_width=True)
+            else:
+                st.info("No performance columns found.")
+        except Exception as _perf_err:
+            st.caption(f"Performance charts unavailable: {_perf_err}")
+
+
+def _render_sensitivity_sweep(df: pd.DataFrame) -> None:
+    """
+    Sensitivity analysis: show how engine output KPIs vary across pairs
+    for different z_in / z_out / window settings already embedded in the results.
+    When multiple windows are present (batch), plots window vs KPI.
+    Also provides a manual parameter exploration UI.
+    """
+    st.markdown("### 🔭 Sensitivity Analysis")
+    st.caption("Explore how key metrics vary with z-threshold and window settings across the universe.")
+
+    try:
+        import plotly.graph_objects as _go_sens
+
+        # If engine returned multi-window results, use them
+        if "window" in df.columns and df["window"].nunique() > 1:
+            st.markdown("**Multi-window results detected — plotting KPI vs window:**")
+            kpi_sens = st.selectbox("KPI:", [c for c in ["dsr_net", "net_edge_z", "sr_net"] if c in df.columns], key="fv_sens_kpi")
+            df_ws = df[["window", kpi_sens]].copy()
+            df_ws[kpi_sens] = pd.to_numeric(df_ws[kpi_sens], errors="coerce")
+            df_ws_agg = df_ws.groupby("window")[kpi_sens].agg(["mean", "median", "std"]).reset_index()
+            fig_w = _go_sens.Figure()
+            fig_w.add_trace(_go_sens.Scatter(
+                x=df_ws_agg["window"], y=df_ws_agg["mean"],
+                name="Mean", mode="lines+markers", line=dict(color="#42A5F5"),
+            ))
+            fig_w.add_trace(_go_sens.Scatter(
+                x=df_ws_agg["window"], y=df_ws_agg["median"],
+                name="Median", mode="lines+markers", line=dict(color="#FF9800", dash="dash"),
+            ))
+            fig_w.update_layout(
+                title=f"{kpi_sens} vs Window size", height=350,
+                plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+                font=dict(color="#ECEFF1"),
+            )
+            st.plotly_chart(fig_w, use_container_width=True)
+        else:
+            # Cross-section sensitivity: show range of KPI across pairs + basic stats
+            st.markdown("**Cross-sectional KPI sensitivity (single window run):**")
+            kpi_list = [c for c in ["dsr_net", "net_edge_z", "sr_net", "halflife", "rolling_corr"] if c in df.columns]
+            if kpi_list:
+                df_kpis = df[kpi_list].apply(pd.to_numeric, errors="coerce")
+                stats = df_kpis.describe().loc[["mean", "std", "min", "25%", "50%", "75%", "max"]].T
+                stats.index = [_ENGINE_COLS_META.get(c, {}).get("label", c) for c in stats.index]
+                stats = stats.round(4)
+                st.dataframe(stats, use_container_width=True)
+
+                # Boxplot per KPI
+                fig_box = _go_sens.Figure()
+                for kpi_c in kpi_list:
+                    series = pd.to_numeric(df[kpi_c], errors="coerce").dropna()
+                    fig_box.add_trace(_go_sens.Box(
+                        y=series, name=_ENGINE_COLS_META.get(kpi_c, {}).get("label", kpi_c),
+                        boxmean="sd", marker_color="#42A5F5", jitter=0.3, pointpos=-1.5,
+                    ))
+                fig_box.update_layout(
+                    title="KPI distribution across pairs", height=380,
+                    plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+                    font=dict(color="#ECEFF1"), showlegend=False,
+                )
+                st.plotly_chart(fig_box, use_container_width=True)
+
+        # Manual z_in / z_out exploration (informational — shows where pairs would rank)
+        st.markdown("**Manual threshold exploration:**")
+        st.caption("Select z_in threshold to see how many pairs currently have |zscore| > z_in (entry signal).")
+        if "zscore" in df.columns:
+            z_thresh = st.slider("z_in threshold:", 0.5, 4.0, 2.0, 0.25, key="fv_sens_zthresh")
+            z_vals = pd.to_numeric(df["zscore"], errors="coerce").abs()
+            n_active = int((z_vals >= z_thresh).sum())
+            n_total = int(z_vals.notna().sum())
+            pct = n_active / n_total * 100 if n_total > 0 else 0.0
+            col_a, col_b, col_c = st.columns(3)
+            col_a.metric("Pairs with |Z| ≥ z_in", f"{n_active} / {n_total}")
+            col_b.metric("Active fraction", f"{pct:.1f}%")
+            if "net_edge_z" in df.columns:
+                mask = z_vals >= z_thresh
+                avg_edge = float(pd.to_numeric(df.loc[mask, "net_edge_z"], errors="coerce").mean()) if mask.any() else float("nan")
+                col_c.metric("Avg net_edge_z (active)", f"{avg_edge:.3f}" if not np.isnan(avg_edge) else "N/A")
+        else:
+            st.info("zscore column not in engine output.")
+    except Exception as _sens_err:
+        st.caption(f"Sensitivity analysis unavailable: {_sens_err}")
+
+
+def _render_data_quality_validator(payload: Dict[str, Any]) -> None:
+    """
+    Validates the input price data for gaps, stale prices, short history,
+    and missing symbols — before running the engine.
+    """
+    st.markdown("### 🔍 Data Quality Validator")
+    prices_wide: Dict[str, Any] = payload.get("pricesWide", {})
+    time_index: List[Any] = payload.get("timeIndex", [])
+
+    if not prices_wide or not time_index:
+        st.info("No data to validate — load a dataset first.")
+        return
+
+    try:
+        n_dates = len(time_index)
+        st.markdown(f"**Time index:** {n_dates} rows · First: `{time_index[0]}` · Last: `{time_index[-1]}`")
+
+        rows = []
+        for sym, vals in prices_wide.items():
+            arr = np.array(vals, dtype=float)
+            n_nan  = int(np.isnan(arr).sum())
+            n_zero = int((arr == 0).sum())
+            n_neg  = int((arr < 0).sum())
+            pct_miss = round(n_nan / len(arr) * 100, 2) if len(arr) > 0 else 0.0
+            # stale detection: runs of identical prices
+            if len(arr) > 1:
+                diffs = np.diff(arr)
+                max_stale_run = int(max(
+                    (sum(1 for _ in g) + 1 for k, g in itertools.groupby(diffs) if k == 0),
+                    default=0
+                ))
+            else:
+                max_stale_run = 0
+
+            status = "✅ OK"
+            if pct_miss > 10:
+                status = "❌ High missing"
+            elif pct_miss > 2:
+                status = "⚠️ Some gaps"
+            elif max_stale_run > 5:
+                status = "⚠️ Stale prices"
+            elif n_zero > 0 or n_neg > 0:
+                status = "⚠️ Zero/neg prices"
+
+            rows.append({
+                "Symbol": sym,
+                "N obs": len(arr),
+                "Missing %": pct_miss,
+                "Zero": n_zero,
+                "Negative": n_neg,
+                "Max stale run": max_stale_run,
+                "Status": status,
+            })
+
+        df_dq = pd.DataFrame(rows)
+        st.dataframe(df_dq, use_container_width=True, hide_index=True)
+
+        n_ok  = (df_dq["Status"] == "✅ OK").sum()
+        n_warn = df_dq["Status"].str.startswith("⚠️").sum()
+        n_err  = df_dq["Status"].str.startswith("❌").sum()
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Symbols OK", f"{n_ok} / {len(rows)}")
+        c2.metric("Warnings", n_warn, delta=f"-{n_warn}" if n_warn else None, delta_color="inverse")
+        c3.metric("Errors", n_err, delta=f"-{n_err}" if n_err else None, delta_color="inverse")
+
+        # Date gap detection
+        try:
+            idx_parsed = pd.to_datetime(time_index, errors="coerce")
+            idx_clean = idx_parsed.dropna().sort_values()
+            if len(idx_clean) > 1:
+                deltas = idx_clean.diff().dropna()
+                max_gap = deltas.max()
+                median_gap = deltas.median()
+                if max_gap > pd.Timedelta(days=5):
+                    st.warning(f"Date gap detected: max gap = {max_gap.days} days (median = {median_gap.days}d). Check for weekends/holidays or missing data.")
+                else:
+                    st.success(f"Date continuity OK · max gap: {max_gap.days}d · median: {median_gap.days}d")
+        except Exception:
+            pass
+
+        # CSV export
+        dq_csv = df_dq.to_csv(index=False).encode("utf-8")
+        st.download_button("⬇️ Export data quality report (CSV)", dq_csv, "data_quality.csv", "text/csv",
+                           key="fv_dq_download")
+    except Exception as _dq_err:
+        st.caption(f"Data quality validator error: {_dq_err}")
+
+
+def _render_per_pair_detail(df: pd.DataFrame) -> None:
+    """
+    Per-pair expandable detail cards with all 26 engine output columns,
+    colour-coded by quality thresholds.
+    """
+    st.markdown("### 🔎 Per-Pair Detail Cards")
+    st.caption("Click a pair to see all engine output columns with quality annotations.")
+
+    if df.empty or "pair" not in df.columns:
+        st.info("No pair data available.")
+        return
+
+    pairs = df["pair"].tolist()
+    selected_pairs = st.multiselect(
+        "Select pairs to inspect:",
+        options=pairs,
+        default=pairs[:min(3, len(pairs))],
+        key="fv_per_pair_select",
+    )
+
+    for pair_id in selected_pairs:
+        row = df[df["pair"] == pair_id].iloc[0].to_dict()
+        with st.expander(f"🔬 {pair_id}", expanded=True):
+            group_order = ["signal", "stat", "quality", "edge", "band", "valuation", "sizing", "perf", "config", "id"]
+            groups: Dict[str, List[tuple]] = {}
+            for col, val in row.items():
+                meta = _ENGINE_COLS_META.get(col, {})
+                grp = meta.get("group", "other")
+                groups.setdefault(grp, []).append((col, meta.get("label", col), val))
+
+            for grp in group_order + ["other"]:
+                fields = groups.get(grp, [])
+                if not fields:
+                    continue
+                st.markdown(f"**{grp.upper()}**")
+                ncols = 3
+                field_chunks = [fields[i:i+ncols] for i in range(0, len(fields), ncols)]
+                for chunk in field_chunks:
+                    cols_ui = st.columns(ncols)
+                    for ci, (col, label, val) in enumerate(chunk):
+                        with cols_ui[ci]:
+                            try:
+                                val_f = float(val)
+                                status = _stat_status(col, val_f)
+                                color = _status_color(status)
+                                st.markdown(
+                                    f"<span style='color:{color};font-size:0.82em;'>{label}</span><br>"
+                                    f"<span style='font-size:1.0em;font-weight:600;'>{val_f:.4f}</span>",
+                                    unsafe_allow_html=True,
+                                )
+                            except (TypeError, ValueError):
+                                st.markdown(
+                                    f"<span style='color:#9E9E9E;font-size:0.82em;'>{label}</span><br>"
+                                    f"<span style='font-size:1.0em;'>{val}</span>",
+                                    unsafe_allow_html=True,
+                                )
+
+    # CSV export for all pairs
+    try:
+        csv_all = df.to_csv(index=False).encode("utf-8")
+        st.download_button("⬇️ Export all pairs (CSV)", csv_all, "engine_results.csv", "text/csv",
+                           key="fv_all_csv_export")
+    except Exception:
+        pass
 
 
 # =====================================
@@ -552,6 +1178,9 @@ def _render_engine_section() -> None:
                 "אפשר לבחור זוג/Universe מתוך ה-UI של הטאב.")
         return  # שוב, return במקום st.stop()
 
+    # Data quality validation (before sending to engine)
+    with st.expander("🔍 Data Quality Validator (pre-flight)", expanded=False):
+        _render_data_quality_validator(payload)
 
     if st.button("🚀 הרץ /engine/run", type="primary", key="fv_engine_send"):
         with st.spinner("מריץ את FairValueEngine דרך ה-API..."):
@@ -633,6 +1262,21 @@ def _render_engine_section() -> None:
         else:
             st.info("בחר לפחות מדד אחד כדי לראות גרפים ו-Top pairs.")
 
+        st.divider()
+
+        # ── New professional analytics sections ──────────────────────────
+        _render_statistical_scorecard(df)
+
+        st.divider()
+        _render_engine_multi_charts(df)
+
+        st.divider()
+        _render_sensitivity_sweep(df)
+
+        st.divider()
+        with st.expander("🔎 Per-Pair Detail Cards", expanded=False):
+            _render_per_pair_detail(df)
+
 
 # =====================================
 #  Advisor Section (עם השוואת ריצות)
@@ -656,7 +1300,7 @@ def _store_advisor_run(summary: Dict[str, Any], advice: List[Dict[str, Any]], pa
     run_id = f"run_{len(runs) + 1}"
     entry = {
         "id": run_id,
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
         "summary": summary,
         "advice": advice,
         "payload": payload,
@@ -969,21 +1613,26 @@ def _render_fv_local_single_opt_section() -> None:
         return
 
     with st.spinner(f"Optimising {sym1}-{sym2} via api_optimize_pair…"):
-        df_res, meta = api_optimize_pair(
-            sym1,
-            sym2,
-            ranges=None,     # כרגע נותנים לו לבנות לפי profile דיפולט
-            weights=weights,
-            n_trials=int(n_trials),
-            timeout_min=int(timeout_min),
-            direction="maximize",
-            sampler_name="TPE",
-            pruner_name="median",
-            profile="default",
-            multi_objective=False,
-            objective_metrics=None,
-            param_mapping=None,
-        )
+        try:
+            df_res, meta = api_optimize_pair(
+                sym1,
+                sym2,
+                ranges=None,     # כרגע נותנים לו לבנות לפי profile דיפולט
+                weights=weights,
+                n_trials=int(n_trials),
+                timeout_min=int(timeout_min),
+                direction="maximize",
+                sampler_name="TPE",
+                pruner_name="median",
+                profile="default",
+                multi_objective=False,
+                objective_metrics=None,
+                param_mapping=None,
+            )
+        except Exception as _opt_err:
+            st.error(f"Local optimisation failed: {_opt_err}")
+            logger.exception("api_optimize_pair raised for %s-%s", sym1, sym2)
+            return
 
     st.markdown("#### 🧾 Meta (local optimiser)")
     st.json(meta)
@@ -1320,8 +1969,8 @@ def _render_optimizer_section() -> None:
         st.markdown("### 🏆 תוצאות אופטימיזציה")
         st.json(data)
 
-        best_params = data.get("bestParams") or {}
-        if best_params:
+        best_params = data.get("bestParams")
+        if best_params is not None:
             st.markdown("#### 📋 bestParams כטבלה")
             df_params = pd.DataFrame(
                 [{"param": k, "value": v} for k, v in best_params.items()]

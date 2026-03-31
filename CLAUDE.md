@@ -251,6 +251,39 @@ WalkForwardHarness(
 4. Register in `agents/registry.py` `_populate_default_registry()`
 5. Add a test in `tests/test_agents.py`
 
+---
+
+## Migration & Deprecation — Contributor Safety
+
+> **Read before contributing.** The following paths have been deprecated or removed.
+> See `docs/migration/migration_ledger.md` for the full ledger with rationale.
+
+### Forbidden Paths (do NOT use in new code)
+
+| Old Path | Canonical Replacement | Reason |
+|----------|----------------------|--------|
+| `root/backtest.py:ExitReason` | `core/contracts.py:ExitReason` | Removed -- was an incompatible 10-value duplicate of the canonical 19-value enum |
+| `secrets/` package | `secrets_mgmt/` package | Renamed -- old name shadowed Python stdlib `secrets` module, breaking numpy |
+| `root.utils`, `root.data_loader`, `root.config_manager` | `common.utils`, `common.data_loader`, `common.config_manager` | Dead aliases removed -- use direct `common.*` imports |
+
+### Deprecated Paths (still present, sunset pending)
+
+| Path | Canonical Alternative | Sunset Condition |
+|------|----------------------|------------------|
+| `root/backtest.py:TradeSide` | `core/contracts.py:SignalDirection` | Migrate internal references, then remove |
+| `root/trade_logic.py:TradeSide` | `core/contracts.py:SignalDirection` | Migrate internal references, then remove |
+| `core/signals_engine.py` | `core/signal_pipeline.py` (ADR-006) | Wire signal_pipeline to backtester (P1-PIPE), then deprecate |
+
+### Walk-Forward Disambiguation
+
+- **Calendar stability check:** `root/optimization_tab.py:_run_walkforward_for_params` — uses calendar
+  segments with 63-day minimum floor. This is a **stability check, NOT true walk-forward.**
+- **True walk-forward:** `research/walk_forward.py:WalkForwardHarness` — expanding-window walk-forward
+  with purged splits, embargo, and correct train/test discipline.
+- The optimization tab labels its output "walk-forward" in the UI but it is **calendar splitting only.**
+
+---
+
 ## Discovery Layer — Critical Doctrine
 
 **Correlation is a discovery primitive, NOT tradability proof.**
@@ -318,7 +351,7 @@ Use `ExitReason` enum values everywhere. Never use bare strings for exit reasons
 
 ## How to Add a New Signal Family (z-score variant, alternative spread, etc.)
 
-1. Add the spread/signal variant to `core/signals_engine.py` or create a new module
+1. Add the spread/signal variant to `core/signal_pipeline.py` (canonical per ADR-006) or create a new module
 2. Ensure the new family computes a z-score and a conviction score [0,1]
 3. Expose `regime` as a parameter — never hard-code thresholds inside the family
 4. Wire conviction through `SignalQualityEngine.assess(conviction=..., mr_score=..., regime=...)`

@@ -368,23 +368,25 @@ class SlippageMode(str, Enum):
     ATR_FRAC = "atr_frac"
 
 
+# DEPRECATED (2026-03-31): This TradeSide enum is local to the backtest UI
+# layer.  An incompatible TradeSide also exists in root/trade_logic.py.
+# Neither is canonical.  New code should use core.contracts.SignalDirection
+# (LONG_SPREAD / SHORT_SPREAD / FLAT / EXIT) as the authoritative direction
+# type.  This local enum is retained temporarily because it is referenced
+# at line ~985 in this file.
+# Sunset condition: migrate backtest rendering to use SignalDirection, then remove.
+# See: docs/migration/migration_ledger.md — MIG-002
 class TradeSide(str, Enum):
     SHORT_LONG = "Short-Long"  # short X, long Y
     LONG_SHORT = "Long-Short"  # long X, short Y
     FLAT = "Flat"
 
 
-class ExitReason(str, Enum):
-    NORMAL = "normal"
-    Z_EXIT = "z_exit"
-    Z_STOP = "z_stop"
-    MAX_BARS = "max_bars"
-    EDGE_DROP = "edge_drop"
-    ATR_EXIT = "atr_exit"
-    REVERSAL = "reversal"
-    RUN_DD_STOP = "run_dd_stop"
-    KILL_SWITCH = "kill_switch"
-    OTHER = "other"
+# REMOVED (2026-03-31): Local ExitReason enum was a duplicate of
+# core.contracts.ExitReason (the canonical source of truth with 19 values).
+# This local copy had only 10 incompatible values and was never referenced
+# by any code.  Use core.contracts.ExitReason for all new work.
+# See: docs/migration/migration_ledger.md — MIG-001
 
 
 # ============================================================================
@@ -2892,7 +2894,7 @@ def _render_backtest_advanced_panels(
                     st.info("Monte-Carlo לא החזיר תוצאה (אולי מעט מדי טריידים).")
                 else:
                     st.markdown("**סטטיסטיקות על תרחישי Monte-Carlo**")
-                    st.dataframe(mc_summary.describe().T, width="stretch", height=260)
+                    st.dataframe(mc_summary.describe().T, use_container_width=True, height=260)
 
                     # התפלגות PnL סופי
                     fig_mc = go.Figure()
@@ -2967,7 +2969,7 @@ def _render_backtest_advanced_panels(
             if wf_df.empty:
                 st.info("Walk-Forward לא החזיר נתונים (בדוק טווח תאריכים / פרמטרים).")
             else:
-                st.dataframe(wf_df, width="stretch", height=260)
+                st.dataframe(wf_df, use_container_width=True, height=260)
                 metric_col = wf_mode
                 if metric_col in wf_df.columns:
                     fig_wf = go.Figure()
@@ -3015,7 +3017,7 @@ def _render_backtest_advanced_panels(
             if sens_df.empty:
                 st.info("לא התקבלו תוצאות לרגישות פרמטרים (בדוק טווחים/פרמטרים).")
             else:
-                st.dataframe(sens_df, width="stretch", height=260)
+                st.dataframe(sens_df, use_container_width=True, height=260)
 
                 # Heatmap של Sharpe
                 try:
@@ -3043,7 +3045,7 @@ def _render_backtest_advanced_panels(
         # נשמור היסטוריה ב-session
         history: List[Dict[str, Any]] = st.session_state.get("bt_run_history", [])
         snap = {
-            "ts": datetime.now(timezone.utc)().isoformat(),
+            "ts": datetime.now(timezone.utc).isoformat(),
             "sym_x": sym_x,
             "sym_y": sym_y,
             "Sharpe": float(result.metrics.get("Sharpe", 0.0)),
@@ -3058,7 +3060,7 @@ def _render_backtest_advanced_panels(
         if hist_df.empty:
             st.caption("אין עדיין היסטוריית ריצות (זו הראשונה).")
         else:
-            st.dataframe(hist_df.tail(20), width="stretch", height=260)
+            st.dataframe(hist_df.tail(20), use_container_width=True, height=260)
 
             if len(hist_df) >= 2:
                 last = hist_df.iloc[-1]
@@ -3084,6 +3086,537 @@ def _render_backtest_advanced_panels(
             except Exception:
                 pass
 
+    # ===== 5) Drawdown Deep Dive =====
+    with st.expander("📉 Drawdown Deep Dive — Underwater & Recovery Analysis", expanded=False):
+        try:
+            if trades_df.empty or "pnl" not in trades_df.columns:
+                st.caption("אין טריידים לניתוח Drawdown.")
+            else:
+                pnls_dd = pd.to_numeric(trades_df["pnl"], errors="coerce").fillna(0.0)
+                cum_dd = pnls_dd.cumsum()
+                peak_dd = cum_dd.cummax()
+                underwater = cum_dd - peak_dd  # תמיד ≤ 0
+
+                # --- KPIs ---
+                max_dd_val = float(underwater.min())
+                avg_dd = float(underwater[underwater < 0].mean()) if (underwater < 0).any() else 0.0
+                # CDaR: Conditional Drawdown at Risk (ממוצע ה-5% worst drawdowns)
+                dd_5pct_thresh = float(underwater.quantile(0.05))
+                cdar = float(underwater[underwater <= dd_5pct_thresh].mean()) if (underwater <= dd_5pct_thresh).any() else max_dd_val
+
+                # Recovery analysis: כמה טריידים לחזרה מ-peak
+                in_dd = False
+                dd_start = 0
+                recovery_durations: List[int] = []
+                for i, (uw, pk) in enumerate(zip(underwater, peak_dd)):
+                    if uw < 0 and not in_dd:
+                        in_dd = True
+                        dd_start = i
+                    elif uw >= 0 and in_dd:
+                        recovery_durations.append(i - dd_start)
+                        in_dd = False
+
+                avg_recovery = float(np.mean(recovery_durations)) if recovery_durations else 0.0
+                max_recovery = int(max(recovery_durations)) if recovery_durations else 0
+
+                kc1, kc2, kc3, kc4 = st.columns(4)
+                kc1.metric("Max Drawdown", f"{max_dd_val:,.1f}")
+                kc2.metric("Avg Drawdown", f"{avg_dd:,.1f}")
+                kc3.metric("CDaR (5%)", f"{cdar:,.1f}", help="Conditional Drawdown at Risk — ממוצע 5% worst")
+                kc4.metric("Avg Recovery (trades)", f"{avg_recovery:.1f}")
+
+                if max_recovery > 0:
+                    st.caption(f"⏱ הזמן המרבי לחזרה מ-peak: **{max_recovery} טריידים**")
+
+                # --- Underwater Chart ---
+                if go is not None:
+                    try:
+                        fig_uw = go.Figure()
+                        x_axis = list(range(len(underwater)))
+                        fig_uw.add_trace(go.Scatter(
+                            x=x_axis, y=underwater.tolist(),
+                            fill="tozeroy",
+                            fillcolor="rgba(231,76,60,0.25)",
+                            line=dict(color="#E74C3C", width=1.5),
+                            name="Underwater",
+                        ))
+                        fig_uw.add_trace(go.Scatter(
+                            x=x_axis, y=cum_dd.tolist(),
+                            line=dict(color="#3498DB", width=1.5),
+                            name="Equity Curve",
+                        ))
+                        fig_uw.add_hline(y=0, line_color="black", line_width=0.5)
+                        fig_uw.update_layout(
+                            title="Underwater Equity Chart — כחול=Equity, אדום=Drawdown",
+                            xaxis_title="Trade #",
+                            yaxis_title="PnL ($)",
+                            height=380,
+                        )
+                        st.plotly_chart(fig_uw, use_container_width=True)
+                    except Exception:
+                        pass
+
+                # --- Drawdown distribution ---
+                dd_vals = underwater[underwater < 0]
+                if go is not None and len(dd_vals) > 3:
+                    try:
+                        fig_ddist = go.Figure(go.Histogram(
+                            x=dd_vals.tolist(),
+                            nbinsx=30,
+                            marker_color="#E74C3C",
+                            name="DD distribution",
+                        ))
+                        fig_ddist.add_vline(x=cdar, line_dash="dash", line_color="black",
+                                            annotation_text=f"CDaR={cdar:.1f}")
+                        fig_ddist.update_layout(
+                            title="התפלגות Drawdown (per-trade)",
+                            xaxis_title="Drawdown ($)",
+                            yaxis_title="Count",
+                            height=280,
+                        )
+                        st.plotly_chart(fig_ddist, use_container_width=True)
+                    except Exception:
+                        pass
+
+                # --- הורדה ---
+                dd_export = pd.DataFrame({
+                    "trade_idx": range(len(underwater)),
+                    "equity": cum_dd.values,
+                    "peak": peak_dd.values,
+                    "underwater": underwater.values,
+                })
+                st.download_button(
+                    "💾 הורד drawdown_analysis.csv",
+                    data=dd_export.to_csv(index=False).encode("utf-8"),
+                    file_name=f"drawdown_analysis.csv",
+                    mime="text/csv",
+                    key="bt_dd_dl",
+                )
+        except Exception as e:
+            st.caption(f"Drawdown deep dive failed: {e}")
+
+    # ===== 6) Rolling Performance Panel =====
+    with st.expander("📈 Rolling Performance — Sharpe / WinRate / AvgPnL", expanded=False):
+        try:
+            if trades_df.empty or "pnl" not in trades_df.columns:
+                st.caption("אין טריידים לניתוח Rolling.")
+            else:
+                pnls_r = pd.to_numeric(trades_df["pnl"], errors="coerce").fillna(0.0)
+                n_trades_total = len(pnls_r)
+
+                c1r, c2r = st.columns(2)
+                roll_win = int(c1r.selectbox(
+                    "חלון Rolling (טריידים)",
+                    [10, 20, 30, 50, 100],
+                    index=1,
+                    key="bt_roll_win",
+                ))
+                min_periods_r = max(5, roll_win // 3)
+
+                if n_trades_total < roll_win:
+                    st.caption(f"פחות מ-{roll_win} טריידים — הגדל חלון או הרץ בקטסט ארוך יותר.")
+                else:
+                    # Rolling Sharpe
+                    roll_mean = pnls_r.rolling(roll_win, min_periods=min_periods_r).mean()
+                    roll_std = pnls_r.rolling(roll_win, min_periods=min_periods_r).std()
+                    roll_sharpe = (roll_mean / (roll_std + 1e-12)) * np.sqrt(252.0)
+
+                    # Rolling WinRate
+                    roll_wr = (pnls_r > 0).rolling(roll_win, min_periods=min_periods_r).mean()
+
+                    # Rolling AvgPnL
+                    roll_avg = pnls_r.rolling(roll_win, min_periods=min_periods_r).mean()
+
+                    # Rolling MaxDD (over window)
+                    def _roll_maxdd(s: pd.Series, w: int) -> pd.Series:
+                        out: List[float] = []
+                        for i in range(len(s)):
+                            sl = s.iloc[max(0, i - w + 1): i + 1]
+                            c = sl.cumsum()
+                            pk = c.cummax()
+                            dd = (pk - c).max()
+                            out.append(float(dd) if not np.isnan(dd) else 0.0)
+                        return pd.Series(out, index=s.index)
+
+                    x_idx = list(range(len(pnls_r)))
+                    if go is not None:
+                        try:
+                            # Single figure with 4 subplots
+                            from plotly.subplots import make_subplots  # type: ignore
+                            fig_roll = make_subplots(
+                                rows=2, cols=2,
+                                subplot_titles=[
+                                    f"Rolling Sharpe ({roll_win}t)",
+                                    f"Rolling WinRate ({roll_win}t)",
+                                    f"Rolling AvgPnL ({roll_win}t)",
+                                    "Cumulative PnL",
+                                ],
+                            )
+                            fig_roll.add_trace(go.Scatter(
+                                x=x_idx, y=roll_sharpe.tolist(),
+                                line=dict(color="#3498DB"), name="Sharpe"
+                            ), row=1, col=1)
+                            fig_roll.add_trace(go.Scatter(
+                                x=x_idx, y=roll_wr.tolist(),
+                                line=dict(color="#2ECC71"), name="WinRate"
+                            ), row=1, col=2)
+                            fig_roll.add_trace(go.Scatter(
+                                x=x_idx, y=roll_avg.tolist(),
+                                line=dict(color="#E67E22"), name="AvgPnL"
+                            ), row=2, col=1)
+                            fig_roll.add_trace(go.Scatter(
+                                x=x_idx, y=pnls_r.cumsum().tolist(),
+                                fill="tozeroy",
+                                fillcolor="rgba(52,152,219,0.12)",
+                                line=dict(color="#3498DB"), name="CumPnL"
+                            ), row=2, col=2)
+                            # Reference lines
+                            fig_roll.add_hline(y=0, row=1, col=1, line_color="gray", line_dash="dot")
+                            fig_roll.add_hline(y=0.5, row=1, col=2, line_color="gray", line_dash="dot")
+                            fig_roll.add_hline(y=0, row=2, col=1, line_color="gray", line_dash="dot")
+                            fig_roll.update_layout(
+                                height=500,
+                                title_text=f"Rolling Performance Analysis ({roll_win}-trade window)",
+                                showlegend=False,
+                            )
+                            st.plotly_chart(fig_roll, use_container_width=True)
+                        except Exception:
+                            # fallback: individual charts
+                            if go is not None:
+                                fig_sh = go.Figure(go.Scatter(x=x_idx, y=roll_sharpe.tolist(), name="Rolling Sharpe"))
+                                fig_sh.update_layout(title=f"Rolling Sharpe ({roll_win}t)")
+                                st.plotly_chart(fig_sh, use_container_width=True)
+
+                    # Summary stats per tertile (beginning/middle/end)
+                    st.markdown("**Summary: First/Middle/Last Tertile**")
+                    n3 = len(pnls_r) // 3
+                    thirds = {
+                        "First third": pnls_r.iloc[:n3],
+                        "Middle third": pnls_r.iloc[n3:2*n3],
+                        "Last third": pnls_r.iloc[2*n3:],
+                    }
+                    tert_rows: List[Dict[str, Any]] = []
+                    for label, seg in thirds.items():
+                        if len(seg) == 0:
+                            continue
+                        s = seg.values
+                        sh = float((s.mean() / (s.std(ddof=0) + 1e-12)) * np.sqrt(252)) if s.std() > 0 else 0.0
+                        tert_rows.append({
+                            "period": label,
+                            "n_trades": len(seg),
+                            "total_pnl": round(float(s.sum()), 2),
+                            "avg_pnl": round(float(s.mean()), 2),
+                            "win_rate": round(float((s > 0).mean()), 3),
+                            "sharpe": round(sh, 3),
+                        })
+                    if tert_rows:
+                        st.dataframe(pd.DataFrame(tert_rows), use_container_width=True)
+
+                    # Download
+                    roll_export = pd.DataFrame({
+                        "trade_idx": x_idx,
+                        f"rolling_sharpe_{roll_win}": roll_sharpe.values,
+                        f"rolling_winrate_{roll_win}": roll_wr.values,
+                        f"rolling_avgpnl_{roll_win}": roll_avg.values,
+                    })
+                    st.download_button(
+                        "💾 הורד rolling_performance.csv",
+                        data=roll_export.to_csv(index=False).encode("utf-8"),
+                        file_name="rolling_performance.csv",
+                        mime="text/csv",
+                        key="bt_roll_dl",
+                    )
+        except Exception as e:
+            st.caption(f"Rolling performance panel failed: {e}")
+
+    # ===== 7) Trade Attribution Panel =====
+    with st.expander("🏷️ Trade Attribution — Entry/Exit Reasons & Side Analysis", expanded=False):
+        try:
+            if trades_df.empty:
+                st.caption("אין טריידים לניתוח Attribution.")
+            else:
+                pnls_a = pd.to_numeric(trades_df.get("pnl", pd.Series(dtype=float)), errors="coerce").fillna(0.0)
+
+                # --- Exit Reason Breakdown ---
+                st.markdown("#### Exit Reason Breakdown")
+                if "exit_reason" in trades_df.columns:
+                    reason_grp = trades_df.groupby("exit_reason").agg(
+                        n_trades=("pnl", "count"),
+                        total_pnl=("pnl", "sum"),
+                        avg_pnl=("pnl", "mean"),
+                        win_rate=("pnl", lambda x: (pd.to_numeric(x, errors="coerce") > 0).mean()),
+                    ).reset_index()
+                    reason_grp = reason_grp.round(3)
+                    st.dataframe(reason_grp, use_container_width=True)
+
+                    if go is not None:
+                        try:
+                            fig_reason = go.Figure(go.Bar(
+                                x=reason_grp["exit_reason"].astype(str).tolist(),
+                                y=reason_grp["total_pnl"].tolist(),
+                                marker_color=[
+                                    "#2ECC71" if v >= 0 else "#E74C3C"
+                                    for v in reason_grp["total_pnl"]
+                                ],
+                                name="Total PnL by Reason",
+                            ))
+                            fig_reason.update_layout(
+                                title="Total PnL by Exit Reason",
+                                xaxis_title="Exit Reason",
+                                yaxis_title="Total PnL ($)",
+                                height=300,
+                            )
+                            st.plotly_chart(fig_reason, use_container_width=True)
+                        except Exception:
+                            pass
+                else:
+                    st.caption("עמודת exit_reason לא קיימת בטריידים.")
+
+                # --- Long vs Short Analysis ---
+                st.markdown("#### Long vs Short Performance")
+                side_col = next((c for c in ["side", "direction", "trade_side"] if c in trades_df.columns), None)
+                if side_col:
+                    side_grp = trades_df.groupby(side_col).agg(
+                        n_trades=("pnl", "count"),
+                        total_pnl=("pnl", "sum"),
+                        avg_pnl=("pnl", "mean"),
+                        win_rate=("pnl", lambda x: (pd.to_numeric(x, errors="coerce") > 0).mean()),
+                        max_loss=("pnl", "min"),
+                        max_gain=("pnl", "max"),
+                    ).reset_index().round(3)
+                    st.dataframe(side_grp, use_container_width=True)
+                else:
+                    # Try to infer from z_entry sign
+                    if "z_entry" in trades_df.columns:
+                        trades_df = trades_df.copy()
+                        trades_df["inferred_side"] = pd.to_numeric(
+                            trades_df["z_entry"], errors="coerce"
+                        ).apply(lambda z: "SHORT_X" if z > 0 else "LONG_X")
+                        side_grp2 = trades_df.groupby("inferred_side").agg(
+                            n_trades=("pnl", "count"),
+                            total_pnl=("pnl", "sum"),
+                            avg_pnl=("pnl", "mean"),
+                            win_rate=("pnl", lambda x: (pd.to_numeric(x, errors="coerce") > 0).mean()),
+                        ).reset_index().round(3)
+                        st.dataframe(side_grp2, use_container_width=True)
+                    else:
+                        st.caption("עמודת side/direction לא קיימת בטריידים.")
+
+                # --- Trade Duration Distribution ---
+                st.markdown("#### Trade Duration Distribution")
+                bars_col = next((c for c in ["bars_held", "duration", "n_bars"] if c in trades_df.columns), None)
+                if bars_col:
+                    dur = pd.to_numeric(trades_df[bars_col], errors="coerce").dropna()
+                    if len(dur) > 0:
+                        d1, d2, d3, d4 = st.columns(4)
+                        d1.metric("Avg Duration", f"{dur.mean():.1f} bars")
+                        d2.metric("Median Duration", f"{dur.median():.1f} bars")
+                        d3.metric("Max Duration", f"{int(dur.max())} bars")
+                        d4.metric("Min Duration", f"{int(dur.min())} bars")
+
+                        if go is not None:
+                            try:
+                                fig_dur = go.Figure(go.Histogram(
+                                    x=dur.tolist(), nbinsx=30,
+                                    marker_color="#9B59B6",
+                                    name="Duration Distribution",
+                                ))
+                                fig_dur.update_layout(
+                                    title="Trade Duration Distribution (bars held)",
+                                    xaxis_title="Bars Held",
+                                    yaxis_title="Count",
+                                    height=280,
+                                )
+                                st.plotly_chart(fig_dur, use_container_width=True)
+                            except Exception:
+                                pass
+
+                        # Duration vs PnL scatter
+                        if go is not None and "pnl" in trades_df.columns:
+                            try:
+                                pnl_scatter = pd.to_numeric(trades_df["pnl"], errors="coerce")
+                                fig_scatter = go.Figure(go.Scatter(
+                                    x=dur.values,
+                                    y=pnl_scatter.values,
+                                    mode="markers",
+                                    marker=dict(
+                                        color=["#2ECC71" if v >= 0 else "#E74C3C" for v in pnl_scatter],
+                                        size=6, opacity=0.7,
+                                    ),
+                                    name="Duration vs PnL",
+                                ))
+                                fig_scatter.update_layout(
+                                    title="Duration vs PnL (ירוק=Win, אדום=Loss)",
+                                    xaxis_title="Bars Held",
+                                    yaxis_title="PnL ($)",
+                                    height=300,
+                                )
+                                st.plotly_chart(fig_scatter, use_container_width=True)
+                            except Exception:
+                                pass
+
+                # --- PnL Distribution — Percentiles ---
+                st.markdown("#### PnL Percentile Table")
+                if len(pnls_a) > 0:
+                    percentiles = [0.01, 0.05, 0.10, 0.25, 0.50, 0.75, 0.90, 0.95, 0.99]
+                    perc_vals = [float(pnls_a.quantile(p)) for p in percentiles]
+                    perc_df = pd.DataFrame({
+                        "percentile": [f"{int(p*100)}%" for p in percentiles],
+                        "pnl": [round(v, 2) for v in perc_vals],
+                        "interpretation": [
+                            "1% worst", "5% worst (VaR-like)", "10% worst",
+                            "Bottom quartile", "Median", "Top quartile",
+                            "90% best", "95% best", "99% best (outlier)"
+                        ],
+                    })
+                    st.dataframe(perc_df, use_container_width=True)
+
+                # --- Download ---
+                st.download_button(
+                    "💾 הורד trade_attribution.csv",
+                    data=trades_df.to_csv(index=False).encode("utf-8"),
+                    file_name="trade_attribution.csv",
+                    mime="text/csv",
+                    key="bt_attr_dl",
+                )
+        except Exception as e:
+            st.caption(f"Trade attribution panel failed: {e}")
+
+    # ===== 8) Calendar Period Segmentation =====
+    with st.expander("📅 Calendar Segmentation — Performance by Year / Quarter / Month", expanded=False):
+        try:
+            if trades_df.empty:
+                st.caption("אין טריידים לניתוח calendar segmentation.")
+            else:
+                # Infer time column
+                time_col = next(
+                    (c for c in ["exit_time", "entry_time", "date", "timestamp"] if c in trades_df.columns),
+                    None,
+                )
+                if time_col is None:
+                    st.caption("לא נמצאה עמודת תאריך בטריידים.")
+                else:
+                    df_cal = trades_df.copy()
+                    df_cal["_dt"] = pd.to_datetime(df_cal[time_col], errors="coerce")
+                    df_cal = df_cal.dropna(subset=["_dt"])
+                    df_cal["pnl"] = pd.to_numeric(df_cal["pnl"], errors="coerce").fillna(0.0)
+
+                    if df_cal.empty:
+                        st.caption("לא ניתן לפרש תאריכים.")
+                    else:
+                        seg_mode = st.selectbox(
+                            "פריסת הסגמנטציה",
+                            ["Year", "Quarter", "Month"],
+                            index=0,
+                            key="bt_cal_seg",
+                        )
+
+                        if seg_mode == "Year":
+                            df_cal["period"] = df_cal["_dt"].dt.year.astype(str)
+                        elif seg_mode == "Quarter":
+                            df_cal["period"] = df_cal["_dt"].dt.to_period("Q").astype(str)
+                        else:  # Month
+                            df_cal["period"] = df_cal["_dt"].dt.to_period("M").astype(str)
+
+                        cal_grp = df_cal.groupby("period").agg(
+                            n_trades=("pnl", "count"),
+                            total_pnl=("pnl", "sum"),
+                            avg_pnl=("pnl", "mean"),
+                            win_rate=("pnl", lambda x: float((x > 0).mean())),
+                            max_loss=("pnl", "min"),
+                            max_gain=("pnl", "max"),
+                        ).reset_index().round(3)
+                        cal_grp = cal_grp.sort_values("period")
+
+                        # Sharpe per period
+                        sharpes_per_period: List[float] = []
+                        for _, grp in df_cal.groupby("period"):
+                            s = grp["pnl"].values
+                            if len(s) > 1 and s.std() > 0:
+                                sharpes_per_period.append(
+                                    float((s.mean() / s.std(ddof=0)) * np.sqrt(252))
+                                )
+                            else:
+                                sharpes_per_period.append(0.0)
+                        cal_grp["sharpe"] = sharpes_per_period
+
+                        st.dataframe(cal_grp, use_container_width=True,
+                                     height=min(500, 35 * len(cal_grp) + 40))
+
+                        if go is not None:
+                            try:
+                                # PnL bar chart by period
+                                colors = [
+                                    "#2ECC71" if v >= 0 else "#E74C3C"
+                                    for v in cal_grp["total_pnl"]
+                                ]
+                                fig_cal = go.Figure()
+                                fig_cal.add_trace(go.Bar(
+                                    x=cal_grp["period"].tolist(),
+                                    y=cal_grp["total_pnl"].tolist(),
+                                    marker_color=colors,
+                                    name="Total PnL",
+                                ))
+                                fig_cal.add_trace(go.Scatter(
+                                    x=cal_grp["period"].tolist(),
+                                    y=cal_grp["sharpe"].tolist(),
+                                    mode="lines+markers",
+                                    yaxis="y2",
+                                    name="Sharpe",
+                                    line=dict(color="#9B59B6", width=2),
+                                ))
+                                fig_cal.update_layout(
+                                    title=f"Performance by {seg_mode}",
+                                    yaxis=dict(title="Total PnL ($)"),
+                                    yaxis2=dict(title="Sharpe", overlaying="y", side="right"),
+                                    height=380,
+                                    barmode="group",
+                                )
+                                st.plotly_chart(fig_cal, use_container_width=True)
+
+                                # Win-rate heatmap (month × year) if Month mode
+                                if seg_mode == "Month" and len(df_cal) > 0:
+                                    try:
+                                        df_cal["year"] = df_cal["_dt"].dt.year
+                                        df_cal["month"] = df_cal["_dt"].dt.month
+                                        hm_data = df_cal.groupby(["year", "month"])["pnl"].agg(
+                                            lambda x: float((x > 0).mean())
+                                        ).reset_index()
+                                        hm_pivot = hm_data.pivot(index="year", columns="month", values="pnl")
+                                        month_labels = ["Jan","Feb","Mar","Apr","May","Jun",
+                                                        "Jul","Aug","Sep","Oct","Nov","Dec"]
+                                        fig_hm = go.Figure(go.Heatmap(
+                                            z=hm_pivot.values,
+                                            x=[month_labels[m-1] for m in hm_pivot.columns],
+                                            y=hm_pivot.index.astype(str).tolist(),
+                                            colorscale="RdYlGn",
+                                            zmid=0.5,
+                                            text=hm_pivot.values.round(2).tolist(),
+                                            texttemplate="%{text:.0%}",
+                                            colorbar=dict(title="WinRate"),
+                                        ))
+                                        fig_hm.update_layout(
+                                            title="Monthly WinRate Heatmap (Year × Month)",
+                                            height=max(200, 50 * len(hm_pivot)),
+                                        )
+                                        st.plotly_chart(fig_hm, use_container_width=True)
+                                    except Exception:
+                                        pass
+                            except Exception:
+                                pass
+
+                        # Download
+                        st.download_button(
+                            "💾 הורד calendar_segmentation.csv",
+                            data=cal_grp.to_csv(index=False).encode("utf-8"),
+                            file_name=f"backtest_calendar_{seg_mode.lower()}.csv",
+                            mime="text/csv",
+                            key="bt_cal_dl",
+                        )
+        except Exception as e:
+            st.caption(f"Calendar segmentation panel failed: {e}")
+
+
 # -----------------------------------------------------------------------
 # 5.1 — Result panels: trades table, exports, history, audit
 # -----------------------------------------------------------------------
@@ -3091,7 +3624,7 @@ def _render_backtest_advanced_panels(
 def _build_bt_run_snapshot(result: BacktestResult) -> Dict[str, Any]:
     """יוצר snapshot קטן לריצה, לשימוש ב־history / audit."""
     return {
-        "ts_utc": datetime.now(timezone.utc)().isoformat() + "Z",
+        "ts_utc": datetime.now(timezone.utc).isoformat() + "Z",
         "symbols": list(result.symbols),
         "window": (
             result.window[0].isoformat() if result.window[0] else None,
@@ -3153,7 +3686,7 @@ def push_backtest_metrics_to_ctx(
             "window": window_str,
         }
         try:
-            payload["last_run_utc"] = datetime.now(timezone.utc)().isoformat(timespec="seconds") + "Z"
+            payload["last_run_utc"] = datetime.now(timezone.utc).isoformat(timespec="seconds") + "Z"
         except Exception:
             payload["last_run_utc"] = None
 
@@ -4485,14 +5018,14 @@ def log_result_to_duckdb(
         return
 
     try:
-        rid = run_id or result.run_id or f"run_{datetime.now(timezone.utc)().isoformat()}"
+        rid = run_id or result.run_id or f"run_{datetime.now(timezone.utc).isoformat()}"
 
         # --- Runs table: שורה אחת לכל ריצה ---
         run_row = pd.DataFrame(
             [
                 {
                     "run_id": rid,
-                    "ts": datetime.now(timezone.utc)(),
+                    "ts": datetime.now(timezone.utc),
                     "strategy": result.strategy.value,
                     "sym_x": result.symbols[0],
                     "sym_y": result.symbols[1],

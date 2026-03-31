@@ -1409,7 +1409,7 @@ class TestSecrets:
 
     def test_secret_reference_construction_no_value(self):
         """SecretReference stores only metadata — no actual secret value."""
-        from secrets.contracts import SecretReference
+        from secrets_mgmt.contracts import SecretReference
         ref = SecretReference(
             ref_id=_make_id("ref"),
             secret_name="FMP_API_KEY",
@@ -1426,7 +1426,7 @@ class TestSecrets:
 
     def test_secret_loader_check_available_missing_returns_false(self):
         """SecretLoader.check_available() returns False for a non-existent env var."""
-        from secrets.contracts import SecretLoader, SecretReference
+        from secrets_mgmt.contracts import SecretLoader, SecretReference
         ref = SecretReference(
             ref_id=_make_id("ref"),
             secret_name="TOTALLY_NONEXISTENT_SECRET_VAR_XYZ",
@@ -1441,7 +1441,7 @@ class TestSecrets:
 
     def test_secret_loader_load_returns_none_for_missing_secret(self):
         """SecretLoader.load() returns None for a missing secret without raising."""
-        from secrets.contracts import SecretLoader, SecretReference
+        from secrets_mgmt.contracts import SecretLoader, SecretReference
         ref = SecretReference(
             ref_id=_make_id("ref"),
             secret_name="MISSING_SECRET_ABSOLUTELY_XYZ123",
@@ -1457,7 +1457,7 @@ class TestSecrets:
 
     def test_validate_freshness_returns_bool_str_tuple(self):
         """validate_freshness() returns a (bool, str) tuple."""
-        from secrets.contracts import SecretLoader, SecretReference
+        from secrets_mgmt.contracts import SecretLoader, SecretReference
         ref = SecretReference(
             ref_id=_make_id("ref"),
             secret_name="TEST_KEY",
