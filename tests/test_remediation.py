@@ -654,6 +654,162 @@ class TestP1PortfolioIntegration:
 
 
 # ---------------------------------------------------------------------------
+# P1-SAFE: Runtime safety gating on portfolio bridge
+# ---------------------------------------------------------------------------
+
+class TestP1SafetyGating:
+    """P1-SAFE: is_safe_to_trade() blocks entries via portfolio bridge."""
+
+    def _make_valid_decision(self):
+        from core.signal_pipeline import SignalDecision
+        from core.contracts import PairId, SignalDirection
+        from core.intents import EntryIntent
+        from datetime import datetime
+
+        pair = PairId("AAPL", "MSFT")
+        return SignalDecision(
+            pair_id=pair,
+            as_of=datetime.utcnow(),
+            z_score=2.5,
+            regime="MEAN_REVERTING",
+            quality_grade="A",
+            intent=EntryIntent(
+                pair_id=pair, confidence=0.7, z_score=2.5,
+                direction=SignalDirection.LONG_SPREAD,
+            ),
+            blocked=False,
+            size_multiplier=1.0,
+        )
+
+    def test_bridge_accepts_safety_check_parameter(self):
+        """P1-SAFE: bridge_signals_to_allocator must accept safety_check kwarg."""
+        import inspect
+        from core.portfolio_bridge import bridge_signals_to_allocator
+        sig = inspect.signature(bridge_signals_to_allocator)
+        assert "safety_check" in sig.parameters, (
+            "P1-SAFE: bridge_signals_to_allocator must accept 'safety_check' parameter"
+        )
+
+    def test_unsafe_state_blocks_all_entries(self):
+        """P1-SAFE: When safety_check returns (False, reasons), all entries are blocked."""
+        from core.portfolio_bridge import bridge_signals_to_allocator
+
+        decisions = [self._make_valid_decision()]
+
+        # Inject a safety check that says "UNSAFE"
+        def unsafe_check():
+            return (False, ["kill_switch_active: test_emergency"])
+
+        allocations, diagnostics = bridge_signals_to_allocator(
+            decisions,
+            capital=1_000_000.0,
+            safety_check=unsafe_check,
+        )
+
+        # Must block ALL entries
+        assert len(allocations) == 0, (
+            f"P1-SAFE: Unsafe state must produce 0 allocations, got {len(allocations)}"
+        )
+        # Diagnostics must record the block
+        assert diagnostics.n_blocked_risk > 0, (
+            "P1-SAFE: Diagnostics must record blocked entries when unsafe"
+        )
+        # Binding constraints must include SAFETY_BLOCK
+        assert any("SAFETY_BLOCK" in c for c in diagnostics.binding_constraints), (
+            f"P1-SAFE: binding_constraints must include SAFETY_BLOCK, got {diagnostics.binding_constraints}"
+        )
+
+    def test_safe_state_allows_entries(self):
+        """P1-SAFE: When safety_check returns (True, []), entries proceed normally."""
+        from core.portfolio_bridge import bridge_signals_to_allocator
+
+        decisions = [self._make_valid_decision()]
+
+        # Inject a safety check that says "SAFE"
+        def safe_check():
+            return (True, [])
+
+        allocations, diagnostics = bridge_signals_to_allocator(
+            decisions,
+            capital=1_000_000.0,
+            safety_check=safe_check,
+        )
+
+        # Must produce at least one allocation decision
+        assert len(allocations) >= 1, (
+            f"P1-SAFE: Safe state must allow allocations, got {len(allocations)}"
+        )
+
+    def test_no_safety_check_allows_entries(self):
+        """P1-SAFE: Without safety_check (research/backtest), entries proceed."""
+        from core.portfolio_bridge import bridge_signals_to_allocator
+
+        decisions = [self._make_valid_decision()]
+
+        # No safety_check parameter → entries proceed (backward compatible)
+        allocations, diagnostics = bridge_signals_to_allocator(
+            decisions, capital=1_000_000.0,
+        )
+
+        assert len(allocations) >= 1, (
+            "P1-SAFE: Without safety_check, allocations must proceed normally"
+        )
+
+    def test_safety_check_exception_treated_as_unsafe(self):
+        """P1-SAFE: If safety_check raises, treat as unsafe (conservative)."""
+        from core.portfolio_bridge import bridge_signals_to_allocator
+
+        decisions = [self._make_valid_decision()]
+
+        def broken_check():
+            raise RuntimeError("connection lost")
+
+        allocations, diagnostics = bridge_signals_to_allocator(
+            decisions, capital=1_000_000.0,
+            safety_check=broken_check,
+        )
+
+        assert len(allocations) == 0, (
+            "P1-SAFE: Safety check exception must block all entries"
+        )
+        assert any("SAFETY_BLOCK" in c for c in diagnostics.binding_constraints), (
+            "P1-SAFE: Exception must be recorded in binding_constraints"
+        )
+
+    def test_runtime_state_manager_compatible(self):
+        """P1-SAFE: RuntimeStateManager.is_safe_to_trade matches expected signature."""
+        from runtime.state import RuntimeStateManager
+        mgr = RuntimeStateManager(env="test")
+
+        safe, reasons = mgr.is_safe_to_trade()
+        assert isinstance(safe, bool), "P1-SAFE: is_safe_to_trade must return bool"
+        assert isinstance(reasons, list), "P1-SAFE: is_safe_to_trade must return list"
+
+        # Default state should be safe (no kill switch, no halted components)
+        # Note: INITIALIZING state may be unsafe depending on implementation
+        # We just verify the signature contract here
+
+    def test_bridge_source_does_not_import_runtime(self):
+        """P1-SAFE: core/portfolio_bridge.py must NOT import from runtime/."""
+        import pathlib, ast
+        bridge_path = pathlib.Path(__file__).parent.parent / "core" / "portfolio_bridge.py"
+        source = bridge_path.read_text(encoding="utf-8-sig")
+        tree = ast.parse(source)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.module:
+                assert not node.module.startswith("runtime"), (
+                    f"P1-SAFE: core/portfolio_bridge.py has 'from {node.module} import ...' "
+                    "— core/ must not import from runtime/ (architecture boundary)"
+                )
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    assert not alias.name.startswith("runtime"), (
+                        f"P1-SAFE: core/portfolio_bridge.py has 'import {alias.name}' "
+                        "— core/ must not import from runtime/"
+                    )
+
+
+# ---------------------------------------------------------------------------
 # P1-GOV: Governance gate on model promotion
 # ---------------------------------------------------------------------------
 

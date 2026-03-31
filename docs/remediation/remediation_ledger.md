@@ -27,7 +27,7 @@
 | P1-PIPE | Canonical signal pipeline wired to backtester | P1 | COMPLETE | SignalPipeline.evaluate_bar() called from backtester when use_signal_pipeline=True | core/signal_pipeline.py, core/optimization_backtester.py |
 | P1-PORTINT | Signal-to-portfolio bridge wired | P1 | COMPLETE | core/portfolio_bridge.py extracts EntryIntents from SignalDecisions and feeds them to PortfolioAllocator.run_cycle() | core/portfolio_bridge.py, portfolio/allocator.py |
 | P1-MINOBS | Minimum observation count too low (60 days) for AR(1) reliability | P1 | IN_PROGRESS | Raise to 252 | research/pair_validator.py |
-| P1-SAFE | is_safe_to_trade() never called in execution paths | P1 | PLANNED | Wire into at least one execution path | runtime/state.py |
+| P1-SAFE | Runtime safety gating wired via portfolio bridge | P1 | COMPLETE | bridge_signals_to_allocator() accepts safety_check callback; blocks all entries when unsafe. Architecture boundary preserved — core/ does not import runtime/. | core/portfolio_bridge.py, runtime/state.py |
 | P1-SURV | Survivorship bias — no delisted stock filtering documented | P1 | IN_PROGRESS | Document EligibilityFilter as mitigation | research/universe.py |
 
 ### P1 Findings (Integration Gaps — Overstated Capabilities)

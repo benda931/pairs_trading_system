@@ -6,30 +6,57 @@ core/portfolio_bridge.py — Signal-to-Portfolio Bridge
 This module is the canonical integration point between the signal pipeline
 (core/signal_pipeline.py) and the portfolio allocator (portfolio/allocator.py).
 
-It resolves the P1-PORTINT finding: "PortfolioAllocator never receives real signals."
+It resolves P1-PORTINT ("PortfolioAllocator never receives real signals") and
+P1-SAFE ("is_safe_to_trade() never called in execution paths").
 
 Contract:
-    SignalPipeline.evaluate() → SignalDecision (with EntryIntent inside)
-        ↓
-    bridge_signals_to_allocator()
-        ↓ filters non-blocked EntryIntents, enriches with quality/regime metadata
-    PortfolioAllocator.run_cycle(intents=[...])
-        ↓
+    SignalPipeline.evaluate() -> SignalDecision (with EntryIntent inside)
+        |
+    bridge_signals_to_allocator(safety_check=...)
+        | 1. Check runtime safety (if callback provided)
+        | 2. Filter non-blocked EntryIntents
+        | 3. Enrich with quality/regime metadata
+        | 4. Feed to PortfolioAllocator.run_cycle()
+        |
     list[AllocationDecision], PortfolioDiagnostics
+
+Safety gating (P1-SAFE):
+    The ``safety_check`` parameter accepts an optional callback with signature
+    ``() -> tuple[bool, list[str]]``.  The infrastructure layer (orchestrator,
+    dashboard, control plane) injects this — for example:
+
+        from runtime.state import get_runtime_state_manager
+        mgr = get_runtime_state_manager()
+        bridge_signals_to_allocator(decisions, safety_check=mgr.is_safe_to_trade)
+
+    This preserves the architecture boundary: core/ does NOT import runtime/.
+    The safety check is injected from outside, not hard-wired.
+
+    When safety_check returns (False, reasons):
+        - All new entries are BLOCKED
+        - Diagnostics record the safety block with rationale
+        - No allocation cycle runs
+        - This is explicit, not silent
 
 The bridge does NOT:
     - Size positions (that is the portfolio layer's job)
     - Execute trades (no execution layer exists yet)
     - Override portfolio risk constraints
     - Bypass the ranking/competition logic
+    - Import from runtime/ or control_plane/ (architecture boundary)
 
 Usage:
     from core.portfolio_bridge import bridge_signals_to_allocator
 
-    decisions = [pipeline.evaluate(z, spread, px, py) for ...]
-    allocations, diagnostics = bridge_signals_to_allocator(
-        signal_decisions=decisions,
+    # Without safety check (research/backtest mode)
+    allocations, diag = bridge_signals_to_allocator(decisions, capital=1_000_000.0)
+
+    # With safety check (operational mode)
+    from runtime.state import get_runtime_state_manager
+    allocations, diag = bridge_signals_to_allocator(
+        decisions,
         capital=1_000_000.0,
+        safety_check=get_runtime_state_manager().is_safe_to_trade,
     )
 """
 
@@ -37,13 +64,18 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
-from typing import Optional
+from typing import Callable, Optional
 
 from core.contracts import PairId
 from core.intents import EntryIntent
 from core.signal_pipeline import SignalDecision
 
 logger = logging.getLogger(__name__)
+
+# Type alias for safety check callback.
+# Signature: () -> (is_safe: bool, blocking_reasons: list[str])
+# This is injected by the infrastructure layer — core/ never imports runtime/.
+SafetyCheckFn = Callable[[], tuple[bool, list[str]]]
 
 
 def extract_entry_intents(
@@ -110,6 +142,7 @@ def bridge_signals_to_allocator(
     signal_decisions: list[SignalDecision],
     capital: float = 1_000_000.0,
     *,
+    safety_check: Optional[SafetyCheckFn] = None,
     active_allocations=None,
     drawdown_state=None,
     throttle_state=None,
@@ -124,7 +157,7 @@ def bridge_signals_to_allocator(
     hedge_ratios: Optional[dict[str, float]] = None,
 ):
     """
-    End-to-end bridge: SignalDecision list → PortfolioAllocator.run_cycle().
+    End-to-end bridge: SignalDecision list -> PortfolioAllocator.run_cycle().
 
     Parameters
     ----------
@@ -132,6 +165,13 @@ def bridge_signals_to_allocator(
         Raw output from SignalPipeline.evaluate() for each pair.
     capital : float
         Total capital for allocation (default $1M).
+    safety_check : callable, optional
+        Runtime safety gate.  Signature: ``() -> (bool, list[str])``.
+        When provided and returning ``(False, reasons)``, all new entries
+        are blocked and diagnostics record the safety block with rationale.
+        Inject from infrastructure layer:
+        ``safety_check=get_runtime_state_manager().is_safe_to_trade``
+        This preserves the core/ architecture boundary — no runtime/ imports.
     sector_map, cluster_map : dict, optional
         Metadata for concentration enforcement.  If missing, sector/cluster
         constraints are **not enforced** — this is documented, not silent.
@@ -142,13 +182,35 @@ def bridge_signals_to_allocator(
     tuple[list[AllocationDecision], PortfolioDiagnostics]
         Allocation decisions (funded and unfunded with rationale) and
         diagnostic summary of the allocation cycle.
-
-    Notes
-    -----
-    If sector_map or cluster_map is None, concentration constraints are
-    skipped by the allocator.  This is honest — the CLAUDE.md doctrine says:
-    "UNKNOWN cluster/sector skips concentration enforcement."
     """
+    from portfolio.contracts import PortfolioDiagnostics
+
+    # ── Step 0: Runtime safety gate (P1-SAFE) ────────────────────
+    if safety_check is not None:
+        try:
+            is_safe, blocking_reasons = safety_check()
+        except Exception as e:
+            logger.error("Safety check raised: %s — treating as UNSAFE", e)
+            is_safe = False
+            blocking_reasons = [f"safety_check_exception: {e}"]
+
+        if not is_safe:
+            logger.warning(
+                "SAFETY BLOCK: %d signal decisions rejected — %s",
+                len(signal_decisions),
+                "; ".join(blocking_reasons),
+            )
+            return [], PortfolioDiagnostics(
+                n_intents_received=len(signal_decisions),
+                n_blocked_risk=len(signal_decisions),
+                binding_constraints=[
+                    f"SAFETY_BLOCK: {r}" for r in blocking_reasons
+                ],
+                kill_switch_mode="ACTIVE" if any(
+                    "kill_switch" in r.lower() for r in blocking_reasons
+                ) else "OFF",
+            )
+
     from portfolio.allocator import PortfolioAllocator
     from portfolio.capital import CapitalManager
 
@@ -156,8 +218,9 @@ def bridge_signals_to_allocator(
     intents = extract_entry_intents(signal_decisions)
 
     if not intents:
-        logger.info("bridge_signals_to_allocator: no eligible intents — returning empty cycle")
-        from portfolio.contracts import PortfolioDiagnostics
+        logger.info(
+            "bridge_signals_to_allocator: no eligible intents — returning empty cycle"
+        )
         return [], PortfolioDiagnostics(
             n_intents_received=len(signal_decisions),
             n_blocked_signal=len(signal_decisions) - len(intents),

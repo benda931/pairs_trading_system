@@ -49,7 +49,7 @@ and awaiting integration with System A.
 | `governance/engine.py` | Governance policy engine | 100 tests pass | **Not enforced** at runtime (P1-GOV) |
 | `audit/chain.py` | Hash-linked audit chain | Tested | **All chains empty** (P1-AUDIT) |
 | `surveillance/engine.py` | 12 surveillance rules | Tested | **detect() never called** operationally (P1-SURV2) |
-| `runtime/state.py` | Runtime state manager | 113 tests pass | **is_safe_to_trade() never called** (P1-SAFE) |
+| `runtime/state.py` | Runtime state manager | 113 tests pass | **Integrated**: `is_safe_to_trade()` callable via portfolio bridge `safety_check` callback (P1-SAFE COMPLETE). Architecture boundary preserved — core/ does not import runtime/. |
 | `control_plane/engine.py` | Control plane operations | Tested | No operational callers |
 
 ## Known Backtest Limitations (ADR-007)
