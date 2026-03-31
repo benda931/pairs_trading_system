@@ -209,6 +209,34 @@ class RiskState:
         return asdict(self)
 
 
+def check_risk_breaches(state: RiskState, limits: RiskLimits) -> list:
+    """Return a list of breach description strings (empty if no breaches)."""
+    breaches: list[str] = []
+
+    if state.max_dd_pct is not None and state.max_dd_pct > limits.max_drawdown_pct:
+        breaches.append(f"Drawdown {state.max_dd_pct:.2%} exceeds limit {limits.max_drawdown_pct:.2%}")
+
+    if state.daily_pnl_pct is not None and state.daily_pnl_pct < -limits.max_daily_loss_pct:
+        breaches.append(f"Daily loss {state.daily_pnl_pct:.2%} exceeds limit {limits.max_daily_loss_pct:.2%}")
+
+    if state.weekly_pnl_pct is not None and state.weekly_pnl_pct < -limits.max_weekly_loss_pct:
+        breaches.append(f"Weekly loss {state.weekly_pnl_pct:.2%} exceeds limit {limits.max_weekly_loss_pct:.2%}")
+
+    if state.monthly_pnl_pct is not None and state.monthly_pnl_pct < -limits.max_monthly_loss_pct:
+        breaches.append(f"Monthly loss {state.monthly_pnl_pct:.2%} exceeds limit {limits.max_monthly_loss_pct:.2%}")
+
+    if state.gross_leverage is not None and state.gross_leverage > limits.max_gross_leverage:
+        breaches.append(f"Gross leverage {state.gross_leverage:.2f} exceeds limit {limits.max_gross_leverage:.2f}")
+
+    if state.net_leverage is not None and state.net_leverage > limits.max_net_leverage:
+        breaches.append(f"Net leverage {state.net_leverage:.2f} exceeds limit {limits.max_net_leverage:.2f}")
+
+    if state.vix is not None and state.vix > limits.vix_kill_threshold:
+        breaches.append(f"VIX {state.vix:.1f} exceeds kill threshold {limits.vix_kill_threshold:.1f}")
+
+    return breaches
+
+
 # ========= RiskEvent (יומן אירועי סיכון) =========
 
 @dataclass

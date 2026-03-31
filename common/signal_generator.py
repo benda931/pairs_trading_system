@@ -354,7 +354,7 @@ def zscore_signals(price: PriceSeries, cfg: ZScoreConfig) -> SignalFrame:
     _validate_series(price, "price")
     from common.feature_engineering import zscore as fe_zscore
 
-    z = fe_zscore(price, cfg.window)
+    z = fe_zscore(price, cfg.window).fillna(0.0)
 
     z_shift = z.shift(1)
     long_entry = ((z < -cfg.entry_threshold) & (z_shift >= -cfg.entry_threshold)).astype(int)

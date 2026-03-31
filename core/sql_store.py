@@ -904,6 +904,12 @@ class SqlStore:
             "has_dashboard_snapshots": self._tbl("dashboard_snapshots") in tables,
         }
 
+    def _ensure_writable(self, operation: str) -> bool:
+        if getattr(self, 'read_only', False):
+            logger.warning("SqlStore: cannot %s — store is read-only", operation)
+            return False
+        return True
+
     def _ensure_index(
         self,
         table: str,
@@ -1073,7 +1079,10 @@ class SqlStore:
         """
         tbl = self._tbl(short_table_name)
         try:
-            df = pd.read_sql_table(tbl, self.engine)
+            # Use raw SQL instead of pd.read_sql_table to avoid
+            # SQLAlchemy reflection queries that fail on DuckDB
+            # (pg_catalog.pg_collation does not exist in DuckDB).
+            df = pd.read_sql(f'SELECT * FROM "{tbl}"', self.engine)
             return df
         except Exception as exc:
             self._last_error = str(exc)

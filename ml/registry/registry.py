@@ -38,6 +38,14 @@ from ml.contracts import (
 )
 from ml.evaluation.metrics import auc_roc, brier_score, information_coefficient, regime_sliced_metrics
 
+try:
+    from governance.engine import get_governance_engine as _get_governance_engine
+except ImportError:
+    _get_governance_engine = None
+
+# Module-level reference for patching
+get_governance_engine = _get_governance_engine
+
 logger = logging.getLogger("ml.registry")
 
 
@@ -204,27 +212,27 @@ class MLModelRegistry:
         # Finding: docs/remediation/remediation_ledger.md:P1-GOV
         if to_status == ModelStatus.CHAMPION:
             try:
-                from governance.engine import get_governance_engine
-                gov_engine = get_governance_engine()
-                check = gov_engine.check_policy(
-                    agent_name="ml_registry",
-                    task_type="model_promotion",
-                    action_type="MODEL_PROMOTE_TO_CHAMPION",
-                    environment="production",
-                    risk_class="HIGH",
-                    task_id=f"promote:{model_id}",
-                )
-                if check is not None and not check.passed and check.severity.value in ("CRITICAL", "EMERGENCY"):
-                    raise ValueError(
-                        f"Governance policy blocked champion promotion for model {model_id}: "
-                        f"{check.message}. "
-                        f"Use GovernanceEngine to review. Finding: P1-GOV"
+                if get_governance_engine is not None:
+                    gov_engine = get_governance_engine()
+                    check = gov_engine.check_policy(
+                        agent_name="ml_registry",
+                        task_type="model_promotion",
+                        action_type="MODEL_PROMOTE_TO_CHAMPION",
+                        environment="production",
+                        risk_class="HIGH",
+                        task_id=f"promote:{model_id}",
                     )
-            except ImportError:
-                logger.warning(
-                    "Governance engine not available — skipping policy check for model %s promotion",
-                    model_id,
-                )
+                    if check is not None and not check.passed and check.severity.value in ("CRITICAL", "EMERGENCY"):
+                        raise ValueError(
+                            f"Governance policy blocked champion promotion for model {model_id}: "
+                            f"{check.message}. "
+                            f"Use GovernanceEngine to review. Finding: P1-GOV"
+                        )
+                else:
+                    logger.warning(
+                        "Governance engine not available — skipping policy check for model %s promotion",
+                        model_id,
+                    )
             except ValueError:
                 raise  # Re-raise governance blocks
             except Exception as e:

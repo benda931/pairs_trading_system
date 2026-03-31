@@ -44,6 +44,9 @@
 
 | ID | Title | Severity | Status | Strategy | Evidence Files |
 |----|-------|----------|--------|----------|---------------|
+| P0-KS | Kill-switch bridge to control plane | P0 | COMPLETE | KillSwitchManager accepts cfg= and control_plane_callback; callback fires on trigger | portfolio/risk_ops.py |
+| P1-GOV | Governance gate on model promotion | P1 | COMPLETE | GovernanceEngine.check_policy() called at module level in promote(); CRITICAL blocks raise ValueError | ml/registry/registry.py |
+| P1-SURV2 | Stale data surveillance hook | P1 | COMPLETE | _compute_data_age_hours() + SURV-DI-001 detection in load_price_data(); errors never break loading | common/data_loader.py |
 | P2-COSTS | Flat cost model (no volume-based market impact) | P2 | DEFERRED | Document limitation; acceptable for daily | core/optimization_backtester.py |
 | P2-DUPRANK | Duplicate pair ranking (core/pair_ranking.py vs portfolio/ranking.py) | P2 | PLANNED | Deprecate core/pair_ranking.py | core/pair_ranking.py |
 | P2-DUPTHROT | Duplicate throttle (HeatState vs ThrottleLevel) | P2 | PLANNED | Bridge in P0-KS fix | portfolio/risk_ops.py, control_plane/ |

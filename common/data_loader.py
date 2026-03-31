@@ -857,6 +857,37 @@ def _apply_freq_and_fill(
     return out
 
 
+# ---------------------------------------------------------------------------
+# Surveillance helper — SURV-DI-001 stale data detection
+# ---------------------------------------------------------------------------
+
+try:
+    from surveillance.engine import get_surveillance_engine
+except ImportError:
+    get_surveillance_engine = None
+
+
+def _compute_data_age_hours(df) -> Optional[float]:
+    """Return hours since the last data point, or None if df is None/empty."""
+    if df is None:
+        return None
+    if not hasattr(df, "empty"):
+        return None
+    if df.empty:
+        return None
+    try:
+        last_ts = pd.Timestamp(df.index.max())
+        if pd.isna(last_ts):
+            return None
+        now = pd.Timestamp.now(tz="UTC")
+        if last_ts.tzinfo is None:
+            last_ts = last_ts.tz_localize("UTC")
+        delta = now - last_ts
+        return float(delta.total_seconds() / 3600.0)
+    except Exception:
+        return None
+
+
 def load_price_data(
     symbol: str,
     start_date: Optional[Union[datetime, date]] = None,
@@ -936,6 +967,20 @@ def load_price_data(
         first = float(df["close"].iloc[0])
         if first != 0:
             df["close"] = df["close"] / first * 100.0
+
+    # P1-SURV2: Stale data surveillance hook — SURV-DI-001
+    try:
+        age_hours = _compute_data_age_hours(df)
+        if age_hours is not None and get_surveillance_engine is not None:
+            surv = get_surveillance_engine()
+            surv.detect(
+                rule_id="SURV-DI-001",
+                entity_type="symbol",
+                entity_id=symbol,
+                metric_value=age_hours,
+            )
+    except Exception:
+        pass  # Surveillance errors never break data loading
 
     return df
 

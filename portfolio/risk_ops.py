@@ -355,10 +355,10 @@ class KillSwitchManager:
 
     def __init__(
         self,
-        config: Optional[KillSwitchConfig] = None,
+        cfg: Optional[KillSwitchConfig] = None,
         control_plane_callback: Optional[Callable[[str], None]] = None,
     ):
-        self._cfg = config or KillSwitchConfig()
+        self._cfg = cfg or KillSwitchConfig()
         self._state = KillSwitchState()
         self._control_plane_callback = control_plane_callback
 
