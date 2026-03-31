@@ -687,23 +687,45 @@ def render_risk_tab(
         • Summary מלא.
     """
 
-    st.title("⚠️ Fund-Level Risk Dashboard (Real Data, HF-grade)")
-
     st.markdown(
         """
-        הטאב הזה נותן **תמונת מצב סיכון ברמת הקרן** על בסיס דאטה אמיתי בלבד:
-
-        - Overall Risk Score + Scaling factor.  
-        - Risk Goals מול ביצועים בפועל (Vol / DD / Sharpe).  
-        - Risk Timeline (Vol / DD גלגלי) אם קיים.  
-        - Bucket risks + הצעות Scaling (אם הועבר bucket_col למנוע).  
-        - Kill-Switch status + Reason + breached limits.  
-        - Macro overlay + Smart Scan overlay לחיבור עם שאר הטאבים במערכת.  
-
-        אין כאן שום סימולציה או דמו – הכל יוצא מהיסטוריית Equity/PnL אמיתית
-        מה-Session או מה-SqlStore.
-        """
+<div style="
+    background: linear-gradient(90deg, #B71C1C 0%, #C62828 100%);
+    border-radius: 10px;
+    padding: 14px 20px;
+    margin-bottom: 16px;
+    box-shadow: 0 2px 8px rgba(198,40,40,0.20);
+">
+    <div style="font-size:1.25rem;font-weight:800;color:white;letter-spacing:-0.2px;">
+        ⚠️ Fund-Level Risk Dashboard
+    </div>
+    <div style="font-size:0.80rem;color:rgba(255,255,255,0.80);margin-top:4px;">
+        Real-data only · VaR · Drawdown · Kill-Switch · Macro Overlay · Scaling Simulation
+    </div>
+</div>
+""",
+        unsafe_allow_html=True,
     )
+
+    with st.expander("ℹ️ About this tab", expanded=False):
+        st.markdown(
+            """
+            **Risk Dashboard** provides a real-data fund-level risk view:
+
+            | Panel | Description |
+            |---|---|
+            | **Risk Score** | Overall risk score + scaling factor |
+            | **Goals vs Realized** | Vol / Drawdown / Sharpe vs targets |
+            | **Timeline** | Rolling Vol/DD history |
+            | **Buckets** | Per-strategy bucket risks + scaling hints |
+            | **Kill-Switch** | Status + breach reasons |
+            | **Macro Overlay** | Regime-aware risk integration |
+            | **Smart Scan** | Signal-level risk contribution |
+            | **What-if** | Scaling simulation |
+
+            > Data source: `risk_hist_df` / `backtest_history_df` / `portfolio_history_df` in session, or `equity_curve` in SqlStore.
+            """
+        )
 
     # 1) היסטוריית Equity/PnL
     hist_raw = _load_history_for_risk(app_ctx)

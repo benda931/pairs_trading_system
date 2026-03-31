@@ -5897,9 +5897,29 @@ def render_portfolio_tab(
     if prefs.get("show_runtime_banner", True):
         env_label = env.upper()
         profile_label = profile.upper()
-        st.caption(
-            f"**Portfolio Tab Runtime** | env=`{env_label}` | profile=`{profile_label}` | "
-            f"range=`{start_date} → {end_date}` | run_id=`{tab_run_id}` (#{run_index}) | snapshot=`{snapshot_id}`"
+        env_color = {"LIVE": "#C62828", "PAPER": "#1565C0", "DEV": "#37474F",
+                     "RESEARCH": "#2E7D32", "BACKTEST": "#6A1B9A"}.get(env_label, "#37474F")
+        st.markdown(
+            f"""
+<div style="
+    background:linear-gradient(90deg,#1A237E 0%,#283593 100%);
+    border-radius:8px;padding:10px 18px;margin-bottom:12px;
+    display:flex;align-items:center;justify-content:space-between;
+    box-shadow:0 2px 6px rgba(26,35,126,0.20);
+">
+    <div style="font-size:1.05rem;font-weight:800;color:#E8EAF6;letter-spacing:-0.2px;">
+        💼 Live Portfolio Dashboard
+    </div>
+    <div style="display:flex;gap:6px;align-items:center;">
+        <span style="background:{env_color};color:white;padding:2px 8px;border-radius:10px;
+                     font-size:0.68rem;font-weight:700;text-transform:uppercase;">{env_label}</span>
+        <span style="background:#3949AB;color:#C5CAE9;padding:2px 8px;border-radius:10px;
+                     font-size:0.68rem;font-weight:600;">{profile_label}</span>
+        <span style="color:#90A4AE;font-size:0.70rem;">{start_date} → {end_date}</span>
+    </div>
+</div>
+""",
+            unsafe_allow_html=True,
         )
 
     # לוג קצר על התחלה

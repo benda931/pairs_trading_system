@@ -541,7 +541,23 @@ def render_config_tab(app_ctx: Optional[AppContext] = None) -> None:
         except Exception:
             app_ctx = None  # נסבול גם מצב שאין AppContext גלובלי
 
-    st.header("🧾 ניהול קונפיגים (הגדרות מערכת)")
+    st.markdown(
+        """
+<div style="
+    background:linear-gradient(90deg,#263238 0%,#37474F 100%);
+    border-radius:10px;padding:14px 20px;margin-bottom:14px;
+    box-shadow:0 2px 6px rgba(38,50,56,0.22);
+">
+    <div style="font-size:1.15rem;font-weight:800;color:white;letter-spacing:-0.2px;">
+        ⚙️ System Configuration Manager
+    </div>
+    <div style="font-size:0.76rem;color:rgba(255,255,255,0.74);margin-top:3px;">
+        Config editor · Database health · Environment settings · Live pair store
+    </div>
+</div>
+""",
+        unsafe_allow_html=True,
+    )
 
     if app_ctx is not None:
         with st.expander("📌 App / Env context", expanded=False):

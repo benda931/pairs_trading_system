@@ -559,10 +559,22 @@ def render_overview_tab() -> None:
     - Macro Tab (macro_snapshot)
     - Fair Value Advisor (fv_advisor_runs) אם קיים
     """
-    st.markdown("### 📊 סקירה כוללת (Overview) — Investment Committee View")
-    st.caption(
-        "מסך אחד שמרכז את האבחון לזוג הנבחר, תוצאות האופטימיזציה והבק-טסט, "
-        "מצב הפורטפוליו והמאקרו, לפני הכנסת כסף אמיתי."
+    st.markdown(
+        """
+<div style="
+    background:linear-gradient(90deg,#37474F 0%,#546E7A 100%);
+    border-radius:10px;padding:14px 20px;margin-bottom:14px;
+    box-shadow:0 2px 8px rgba(55,71,79,0.22);
+">
+    <div style="font-size:1.15rem;font-weight:800;color:white;letter-spacing:-0.2px;">
+        📊 Investment Committee Overview
+    </div>
+    <div style="font-size:0.76rem;color:rgba(255,255,255,0.78);margin-top:3px;">
+        Pair diagnostics · Optimization vs backtest comparison · Portfolio snapshot · Macro overlay · GO / NO-GO verdict
+    </div>
+</div>
+""",
+        unsafe_allow_html=True,
     )
 
     ctx_dict = st.session_state.get("ctx", {}) or {}

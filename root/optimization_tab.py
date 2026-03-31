@@ -5009,7 +5009,23 @@ def render_optimization_tab(
                 ctrl_opt["wf_use"] = bool(hint["wf_use"])
 
     # ==== 1) Title + Settings Sidebar ====
-    st.title("⚙️ Pairs-Trading Optimiser — Hedge-Fund Grade")
+    st.markdown(
+        """
+<div style="
+    background:linear-gradient(90deg,#E65100 0%,#F57C00 100%);
+    border-radius:10px;padding:14px 20px;margin-bottom:14px;
+    box-shadow:0 2px 8px rgba(230,81,0,0.22);
+">
+    <div style="font-size:1.20rem;font-weight:800;color:white;letter-spacing:-0.2px;">
+        ⚙️ Pairs-Trading Optimiser
+    </div>
+    <div style="font-size:0.78rem;color:rgba(255,255,255,0.82);margin-top:3px;">
+        Optuna-based search · Grid / Bayesian / Meta-optimization · Calendar validation · Walk-forward harness
+    </div>
+</div>
+""",
+        unsafe_allow_html=True,
+    )
 
     # Snapshot מהריצה האחרונה (אם יש)
     _render_optimization_snapshot_panel()

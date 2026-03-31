@@ -1338,10 +1338,26 @@ def render_fair_value_api_tab() -> None:
     טאב מבודד – לא נוגע בשום State גלובלי של הדשבורד.
     מיועד לבדיקה/משחק עם Fair Value API בלבד.
     """
-    st.markdown("## 🧬 Fair Value API Lab — Sandbox מבודד")
+    st.markdown(
+        """
+<div style="
+    background:linear-gradient(90deg,#1A237E 0%,#283593 100%);
+    border-radius:10px;padding:14px 20px;margin-bottom:14px;
+    box-shadow:0 2px 8px rgba(26,35,126,0.22);
+">
+    <div style="font-size:1.15rem;font-weight:800;color:white;letter-spacing:-0.2px;">
+        ⚖️ Fair Value API Lab
+    </div>
+    <div style="font-size:0.76rem;color:rgba(255,255,255,0.76);margin-top:3px;">
+        Isolated sandbox · API testing · Universe analysis · Advisor recommendations · Run comparison
+    </div>
+</div>
+""",
+        unsafe_allow_html=True,
+    )
     st.caption(
-        "הטאב הזה עובד רק מול ה-API המקומי (root/api_server.py) דרך HTTP. "
-        "הוא לא משנה שום דבר בקונפיג, דאטה או טבלאות אחרות."
+        "This tab interacts only with the local API server (root/api_server.py) via HTTP. "
+        "No global config, data, or tables are modified."
     )
 
     cfg = _get_fair_value_config()

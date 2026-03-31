@@ -2744,10 +2744,22 @@ def render_matrix_research_tab(
     # ------------------------------------------------------------------
     # Header
     # ------------------------------------------------------------------
-    st.header("🔬 Matrix / Correlation Research")
-    st.caption(
-        "טאב מחקר מטריצות קורלציה / קובאריאנס / תשואות ברמת קרן גידור — "
-        "עם ניתוח מספרי, סיכון, AutoML ו־Workflow-ים מוגדרים מראש."
+    st.markdown(
+        """
+<div style="
+    background:linear-gradient(90deg,#006064 0%,#00838F 100%);
+    border-radius:10px;padding:14px 20px;margin-bottom:14px;
+    box-shadow:0 2px 8px rgba(0,96,100,0.22);
+">
+    <div style="font-size:1.15rem;font-weight:800;color:white;letter-spacing:-0.2px;">
+        🔬 Matrix &amp; Correlation Research
+    </div>
+    <div style="font-size:0.76rem;color:rgba(255,255,255,0.78);margin-top:3px;">
+        Correlation · Covariance · PCA · Pair metrics · AutoML · Portfolio risk · Series analysis
+    </div>
+</div>
+""",
+        unsafe_allow_html=True,
     )
 
     if analysis_preset != "Manual / custom":

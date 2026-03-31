@@ -2600,7 +2600,26 @@ def render_smart_scan_tab(
       כבר מיובאים בראש הקובץ כרגיל.
     """
 
-    st.markdown("### 🔍 Smart Scan — Composite HF-grade Scanner")
+    st.markdown(
+        """
+<div style="
+    background:linear-gradient(90deg,#4527A0 0%,#5E35B1 100%);
+    border-radius:10px;padding:14px 20px;margin-bottom:14px;
+    box-shadow:0 2px 8px rgba(69,39,160,0.22);
+    display:flex;align-items:center;justify-content:space-between;
+">
+    <div>
+        <div style="font-size:1.20rem;font-weight:800;color:white;letter-spacing:-0.2px;">
+            🔍 Smart Scan — Composite Universe Scanner
+        </div>
+        <div style="font-size:0.78rem;color:rgba(255,255,255,0.78);margin-top:3px;">
+            Multi-layer scoring · Macro overlay · Fundamentals · Backtest metrics · Shortlist
+        </div>
+    </div>
+</div>
+""",
+        unsafe_allow_html=True,
+    )
 
     # ======================================================
     # 0) הקמת Service + Context + Run ID ו-telemetry בסיסי

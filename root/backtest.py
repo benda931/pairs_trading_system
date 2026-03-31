@@ -3352,7 +3352,23 @@ def render_backtest_tab(opt_params: Optional[Dict[str, Any]] = None) -> None:
     if st is None:
         raise RuntimeError("Streamlit is not installed in this environment.")
 
-    st.header("🔁 Backtest — Pair Z-Score Mean Reversion (Pro)")
+    st.markdown(
+        """
+<div style="
+    background:linear-gradient(90deg,#004D40 0%,#00695C 100%);
+    border-radius:10px;padding:14px 20px;margin-bottom:14px;
+    box-shadow:0 2px 8px rgba(0,77,64,0.22);
+">
+    <div style="font-size:1.20rem;font-weight:800;color:white;letter-spacing:-0.2px;">
+        🔁 Backtest — Z-Score Mean Reversion
+    </div>
+    <div style="font-size:0.78rem;color:rgba(255,255,255,0.78);margin-top:3px;">
+        Institutional-grade backtesting · Execution lag=1 bar · Risk budget · Performance targets · Config presets
+    </div>
+</div>
+""",
+        unsafe_allow_html=True,
+    )
 
     # ===== 0. Merge incoming opt_params with session_state["opt_params"] =====
     base_params: Dict[str, Any] = {}

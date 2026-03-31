@@ -1444,24 +1444,28 @@ def render_pair_tab(
     env = feature_flags.get("env") or config.get("env") or "dev"
     profile = (feature_flags.get("profile") or config.get("profile") or "research").lower()
 
-    st.markdown("### 🧪 ניתוח זוג ברמת קרן")
-
-    hdr_col1, hdr_col2, hdr_col3 = st.columns([2, 2, 2])
-
-    with hdr_col1:
-        st.markdown(f"**Environment:** `{env}`  |  **Profile:** `{profile}`")
-        if nav_source:
-            st.caption(f"Nav source: `{nav_source}`")
-
-    with hdr_col2:
-        st.markdown(
-            f"**טווח תאריכים (לפני presets):** {start_date.isoformat()} → {end_date.isoformat()}"
-        )
-        st.caption("ניתן לשנות Preset בסרגל הצד.")
-
-    with hdr_col3:
-        st.markdown(f"**מספר זוגות זמינים:** `{len(pairs)}`")
-        st.caption("בחר זוג פעיל וגם Compare mode אם תרצה.")
+    st.markdown(
+        f"""
+<div style="
+    background:linear-gradient(90deg,#01579B 0%,#0277BD 100%);
+    border-radius:10px;padding:14px 20px;margin-bottom:14px;
+    box-shadow:0 2px 8px rgba(1,87,155,0.20);
+    display:flex;align-items:center;justify-content:space-between;
+">
+    <div>
+        <div style="font-size:1.15rem;font-weight:800;color:white;letter-spacing:-0.2px;">
+            🧪 Pair Analysis — Institutional Grade
+        </div>
+        <div style="font-size:0.76rem;color:rgba(255,255,255,0.78);margin-top:3px;">
+            {start_date.isoformat()} → {end_date.isoformat()} &nbsp;·&nbsp;
+            {len(pairs)} pairs available &nbsp;·&nbsp;
+            env: <b style="color:#B3E5FC;">{env}</b> &nbsp;·&nbsp; profile: <b style="color:#B3E5FC;">{profile}</b>
+        </div>
+    </div>
+</div>
+""",
+        unsafe_allow_html=True,
+    )
 
     st.markdown("---")
 

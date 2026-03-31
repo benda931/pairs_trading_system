@@ -3126,6 +3126,28 @@ def render(
     except Exception:  # noqa: BLE001
         pass
 
+    # --- Professional tab header -------------------------------------------
+    st.markdown(
+        """
+<div style="
+    background:linear-gradient(90deg,#1B5E20 0%,#2E7D32 100%);
+    border-radius:10px;padding:14px 20px;margin-bottom:14px;
+    box-shadow:0 2px 8px rgba(46,125,50,0.20);
+    display:flex;align-items:center;justify-content:space-between;
+">
+    <div>
+        <div style="font-size:1.20rem;font-weight:800;color:white;letter-spacing:-0.2px;">
+            🌍 Macro &amp; Regime Dashboard
+        </div>
+        <div style="font-size:0.78rem;color:rgba(255,255,255,0.78);margin-top:3px;">
+            Regime classification · Factor analysis · Pair overlays · Risk budget hints
+        </div>
+    </div>
+</div>
+""",
+        unsafe_allow_html=True,
+    )
+
     # --- בסיס: pairs_df + ולידציה -----------------------------------------
     pairs_df = _ensure_pairs_df(pairs_df)
     _render_pairs_warnings(pairs_df)

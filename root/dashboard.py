@@ -7832,33 +7832,70 @@ def _render_global_header(
 
     top = st.container()
     with top:
-        col_left, col_mid, col_right = st.columns([2, 1, 1.4])
+        # Professional institutional header bar
+        dates_line = ""
+        if start_date and end_date:
+            dates_line = f"{start_date.isoformat()} → {end_date.isoformat()}"
+        elif start_date:
+            dates_line = f"{start_date.isoformat()} → present"
+        elif end_date:
+            dates_line = f"↑ {end_date.isoformat()}"
+
+        env_colors = {
+            "live": "#C62828", "paper": "#1565C0", "dev": "#37474F",
+            "research": "#2E7D32", "backtest": "#6A1B9A", "staging": "#E65100",
+        }
+        env_color = env_colors.get(env, "#37474F")
+
+        st.markdown(
+            f"""
+<div style="
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    background: linear-gradient(90deg, #0D1B2A 0%, #1A2744 100%);
+    border-radius: 10px;
+    padding: 12px 20px;
+    margin-bottom: 6px;
+    border-left: 5px solid #1E88E5;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+">
+    <div style="display:flex;align-items:center;gap:16px;">
+        <div>
+            <div style="font-size:1.20rem;font-weight:800;color:#E3F2FD;letter-spacing:-0.3px;">
+                {APP_ICON} {APP_NAME}
+            </div>
+            <div style="font-size:0.73rem;color:#78909C;margin-top:1px;">
+                v{APP_VERSION} &nbsp;·&nbsp;
+                <span style="color:#90A4AE;">Host:</span> {app_status.get('host', RUNTIME_HOST)} &nbsp;·&nbsp;
+                <span style="color:#90A4AE;">User:</span> {app_status.get('user', RUNTIME_USER)}
+                {f'&nbsp;·&nbsp;<span style="color:#90A4AE;">Dates:</span> {dates_line}' if dates_line else ''}
+            </div>
+        </div>
+        <div style="display:flex;gap:6px;align-items:center;">
+            <span style="background:{env_color};color:white;padding:3px 10px;border-radius:12px;
+                         font-size:0.70rem;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;">
+                {env}
+            </span>
+            <span style="background:#283142;color:#B0BEC5;padding:3px 10px;border-radius:12px;
+                         font-size:0.70rem;font-weight:600;text-transform:uppercase;">
+                {profile}
+            </span>
+        </div>
+    </div>
+    <div style="font-size:0.68rem;color:#546E7A;text-align:right;">
+        <div><b style="color:#90A4AE;">Currency:</b> {base_currency} &nbsp; <b style="color:#90A4AE;">TZ:</b> {tz_name}</div>
+        <div><b style="color:#90A4AE;">Benchmark:</b> {benchmark} &nbsp; <b style="color:#90A4AE;">Run:</b> {run_id}</div>
+    </div>
+</div>
+""",
+            unsafe_allow_html=True,
+        )
+
+        col_left, col_mid, col_right = st.columns([1, 1, 1])
 
         with col_left:
-            st.markdown(
-                f"### {APP_ICON} {APP_NAME}  \n"
-                f"Version: `{APP_VERSION}`  •  Env: `{env}`  •  Profile: `{profile}`"
-            )
-            st.caption(
-                f"Host: `{app_status.get('host', RUNTIME_HOST)}`  •  "
-                f"User: `{app_status.get('user', RUNTIME_USER)}`  •  "
-                f"Run ID: `{run_id}`"
-            )
-
-            dates_line = ""
-            if start_date and end_date:
-                dates_line = f"{start_date.isoformat()} → {end_date.isoformat()}"
-            elif start_date:
-                dates_line = f"{start_date.isoformat()} → ?"
-            elif end_date:
-                dates_line = f"? → {end_date.isoformat()}"
-
-            st.markdown(
-                f"- **Base currency:** `{base_currency}`  •  "
-                f"**Timezone:** `{tz_name}`  \n"
-                f"- **Benchmark:** `{benchmark}`"
-                + (f"  •  **Dates:** {dates_line}" if dates_line else "")
-            )
+            pass  # header info now in the banner above
 
         with col_mid:
             _render_macro_banner(macro_status, feature_flags)
@@ -8593,22 +8630,58 @@ def _render_app_overview_sidebar(
     env: EnvName = feature_flags.get("env", DEFAULT_ENV)  # type: ignore[assignment]
     profile: ProfileName = feature_flags.get("profile", DEFAULT_PROFILE)  # type: ignore[assignment]
 
-    st.sidebar.markdown("### 🧭 App overview")
+    # Professional branded sidebar header
+    env_badge_color = {
+        "live": "#C62828", "paper": "#1565C0", "dev": "#37474F",
+        "research": "#2E7D32", "backtest": "#6A1B9A", "staging": "#E65100",
+    }.get(env, "#37474F")
 
     st.sidebar.markdown(
-        f"**{APP_ICON} {feature_flags.get('app_name', APP_NAME)}**  "
-        f"`v{feature_flags.get('version', APP_VERSION)}`"
+        f"""
+<div style="
+    background: linear-gradient(135deg, #1A1A2E 0%, #16213E 100%);
+    border-radius: 10px;
+    padding: 16px 14px 12px 14px;
+    margin-bottom: 8px;
+    border-left: 4px solid #1E88E5;
+">
+    <div style="font-size: 1.15rem; font-weight: 800; color: #E3F2FD; letter-spacing: -0.3px;">
+        {APP_ICON} {feature_flags.get('app_name', APP_NAME)}
+    </div>
+    <div style="font-size: 0.72rem; color: #90A4AE; margin-top: 2px;">
+        v{feature_flags.get('version', APP_VERSION)}
+    </div>
+    <div style="margin-top: 8px; display: flex; gap: 6px; flex-wrap: wrap;">
+        <span style="
+            background: {env_badge_color};
+            color: white;
+            padding: 2px 8px;
+            border-radius: 10px;
+            font-size: 0.68rem;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        ">{env}</span>
+        <span style="
+            background: #283142;
+            color: #B0BEC5;
+            padding: 2px 8px;
+            border-radius: 10px;
+            font-size: 0.68rem;
+            font-weight: 600;
+            text-transform: uppercase;
+        ">{profile}</span>
+    </div>
+</div>
+""",
+        unsafe_allow_html=True,
     )
-    st.sidebar.caption(f"Env: `{env}` • Profile: `{profile}`")
 
     uptime_hours = app_status.get("uptime_hours")
-    if isinstance(uptime_hours, (int, float)):
-        st.sidebar.caption(f"Uptime: ~{uptime_hours:.2f}h")
-
-    st.sidebar.caption(
-        f"Host: `{app_status.get('host', RUNTIME_HOST)}` • "
-        f"User: `{app_status.get('user', RUNTIME_USER)}`"
-    )
+    uptime_str = f"⏱ Uptime: ~{uptime_hours:.1f}h" if isinstance(uptime_hours, (int, float)) else ""
+    host = app_status.get("host", RUNTIME_HOST)
+    user = app_status.get("user", RUNTIME_USER)
+    st.sidebar.caption(f"🖥 `{host}` · 👤 `{user}`" + (f"  {uptime_str}" if uptime_str else ""))
 
 
 def _render_services_status_sidebar(
@@ -8622,8 +8695,6 @@ def _render_services_status_sidebar(
     - Market Data (source, latency)
     - Risk / Macro / Agents / Fair Value / Backtest / Optimizer
     """
-    st.sidebar.markdown("#### 🧩 Services status")
-
     sql = services_status.get("sql_store", {})
     broker = services_status.get("broker", {})
     market = services_status.get("market_data", {})
@@ -8631,45 +8702,57 @@ def _render_services_status_sidebar(
     macro = services_status.get("macro_engine", {})
     agents = services_status.get("agents", {})
     fv = services_status.get("fair_value", {})
-
     bt = services_status.get("backtester", {})
     opt = services_status.get("optimizer", {})
     meta_opt = services_status.get("meta_optimizer", {})
 
-    # SqlStore
-    sql_icon = "✅" if sql.get("available") else "⭕"
-    sql_backend = sql.get("backend") or "N/A"
-    sql_hist = _format_bool_tristate(sql.get("has_history"), "Yes", "No", "Unknown")
-    st.sidebar.caption(f"{sql_icon} SqlStore – backend: `{sql_backend}`, history: {sql_hist}")
+    def _status_dot(available: Any) -> str:
+        return "🟢" if available else "🔴"
 
-    # Broker
-    br_icon = "✅" if broker.get("available") else "⭕"
-    br_mode = broker.get("mode") or "N/A"
-    br_conn = _format_bool_tristate(broker.get("connected"), "Connected", "Disconnected", "Unknown")
-    st.sidebar.caption(f"{br_icon} Broker – mode: `{br_mode}`, {br_conn}")
+    def _svc_row(icon: str, name: str, detail: str) -> str:
+        return (
+            f'<div style="display:flex;align-items:center;gap:6px;padding:3px 0;'
+            f'border-bottom:1px solid #283142;">'
+            f'<span style="font-size:0.70rem;">{icon}</span>'
+            f'<span style="font-size:0.73rem;color:#CFD8DC;font-weight:600;flex:1;">{name}</span>'
+            f'<span style="font-size:0.68rem;color:#78909C;text-align:right;">{detail}</span>'
+            f'</div>'
+        )
 
-    # Market Data
-    md_icon = "✅" if market.get("available") else "⭕"
-    md_src = market.get("source") or "N/A"
-    md_lat = (market.get("latency_mode") or "N/A").lower()
-    st.sidebar.caption(f"{md_icon} Market Data – source: `{md_src}`, latency: `{md_lat}`")
+    sql_detail = f"{sql.get('backend','?')} · hist={'✓' if sql.get('has_history') else '✗'}"
+    br_detail = f"{broker.get('mode','?')} · {'conn' if broker.get('connected') else 'off'}"
+    md_detail = f"{market.get('source','?')} · {(market.get('latency_mode') or '?').lower()}"
 
-    # Engines – condensed line
-    risk_icon = "✅" if risk.get("available") else "⭕"
-    macro_icon = "✅" if macro.get("available") else "⭕"
-    agents_icon = "✅" if agents.get("available") else "⭕"
-    fv_icon = "✅" if fv.get("available") else "⭕"
+    rows_html = "".join([
+        _svc_row(_status_dot(sql.get("available")),   "SqlStore",    sql_detail),
+        _svc_row(_status_dot(broker.get("available")), "Broker",      br_detail),
+        _svc_row(_status_dot(market.get("available")), "Market Data", md_detail),
+        _svc_row(_status_dot(risk.get("available")),   "Risk Engine", ""),
+        _svc_row(_status_dot(macro.get("available")),  "Macro Engine",""),
+        _svc_row(_status_dot(agents.get("available")), "Agents",      ""),
+        _svc_row(_status_dot(fv.get("available")),     "Fair Value",  ""),
+        _svc_row(_status_dot(bt.get("available")),     "Backtester",  ""),
+        _svc_row(_status_dot(opt.get("available")),    "Optimizer",   ""),
+        _svc_row(_status_dot(meta_opt.get("available")),"Meta-Opt",   ""),
+    ])
 
-    st.sidebar.caption(
-        f"{risk_icon} Risk • {macro_icon} Macro • {agents_icon} Agents • {fv_icon} Fair Value"
-    )
-
-    # Backtest / Optimizer
-    bt_icon = "✅" if bt.get("available") else "⭕"
-    opt_icon = "✅" if opt.get("available") else "⭕"
-    mo_icon = "✅" if meta_opt.get("available") else "⭕"
-    st.sidebar.caption(
-        f"{bt_icon} Backtester • {opt_icon} Optimizer • {mo_icon} Meta-Opt"
+    st.sidebar.markdown(
+        f"""
+<div style="
+    background:#0F1923;
+    border-radius:8px;
+    padding:10px 12px;
+    margin:8px 0;
+    border:1px solid #1E2A38;
+">
+    <div style="font-size:0.72rem;font-weight:700;color:#607D8B;
+                text-transform:uppercase;letter-spacing:0.6px;margin-bottom:6px;">
+        🧩 Services
+    </div>
+    {rows_html}
+</div>
+""",
+        unsafe_allow_html=True,
     )
 
 
@@ -12046,6 +12129,340 @@ def persist_user_prefs_if_needed(
 
 
 # -------------------------
+# Global CSS Theme
+# -------------------------
+
+def _inject_global_css() -> None:
+    """
+    Injects a professional, institutional-grade CSS theme into the Streamlit app.
+    Called once per render at the top of the shell core.
+    """
+    st.markdown(
+        """
+<style>
+/* ============================================================
+   PAIRS TRADING DASHBOARD — PROFESSIONAL THEME
+   ============================================================ */
+
+/* --- Root variables --- */
+:root {
+    --pt-blue:       #1565C0;
+    --pt-blue-light: #1E88E5;
+    --pt-blue-pale:  #E3F2FD;
+    --pt-green:      #2E7D32;
+    --pt-green-pale: #E8F5E9;
+    --pt-red:        #C62828;
+    --pt-red-pale:   #FFEBEE;
+    --pt-amber:      #F57F17;
+    --pt-amber-pale: #FFF8E1;
+    --pt-gray-dark:  #1A1A2E;
+    --pt-gray-mid:   #37474F;
+    --pt-gray-light: #ECEFF1;
+    --pt-text:       #212121;
+    --pt-text-muted: #546E7A;
+    --pt-border:     #CFD8DC;
+    --pt-radius:     8px;
+    --pt-shadow:     0 2px 8px rgba(0,0,0,0.10);
+    --pt-shadow-md:  0 4px 16px rgba(0,0,0,0.14);
+}
+
+/* --- Typography --- */
+body, .stApp {
+    font-family: 'Inter', 'Segoe UI', 'Helvetica Neue', Arial, sans-serif !important;
+    color: var(--pt-text) !important;
+}
+
+h1, h2, h3, h4 {
+    font-weight: 700 !important;
+    letter-spacing: -0.3px;
+}
+
+h1 { font-size: 1.75rem !important; }
+h2 { font-size: 1.35rem !important; border-bottom: 2px solid var(--pt-blue); padding-bottom: 6px; margin-bottom: 16px; }
+h3 { font-size: 1.10rem !important; color: var(--pt-blue) !important; }
+h4 { font-size: 0.95rem !important; color: var(--pt-gray-mid) !important; text-transform: uppercase; letter-spacing: 0.5px; }
+
+/* --- Streamlit tab navigation --- */
+.stTabs [data-baseweb="tab-list"] {
+    gap: 4px;
+    background: var(--pt-gray-light);
+    border-radius: var(--pt-radius);
+    padding: 4px 6px;
+    border-bottom: 2px solid var(--pt-border);
+}
+
+.stTabs [data-baseweb="tab"] {
+    border-radius: 6px !important;
+    padding: 6px 14px !important;
+    font-size: 0.82rem !important;
+    font-weight: 600 !important;
+    color: var(--pt-text-muted) !important;
+    background: transparent !important;
+    border: none !important;
+    transition: background 0.15s, color 0.15s;
+}
+
+.stTabs [aria-selected="true"] {
+    background: white !important;
+    color: var(--pt-blue) !important;
+    box-shadow: var(--pt-shadow);
+}
+
+.stTabs [data-baseweb="tab"]:hover:not([aria-selected="true"]) {
+    background: rgba(21, 101, 192, 0.08) !important;
+    color: var(--pt-blue) !important;
+}
+
+/* --- Metric cards --- */
+[data-testid="metric-container"] {
+    background: white;
+    border: 1px solid var(--pt-border);
+    border-radius: var(--pt-radius);
+    padding: 12px 16px !important;
+    box-shadow: var(--pt-shadow);
+    transition: box-shadow 0.2s;
+}
+[data-testid="metric-container"]:hover {
+    box-shadow: var(--pt-shadow-md);
+}
+[data-testid="stMetricLabel"] {
+    font-size: 0.75rem !important;
+    font-weight: 700 !important;
+    text-transform: uppercase;
+    letter-spacing: 0.6px;
+    color: var(--pt-text-muted) !important;
+}
+[data-testid="stMetricValue"] {
+    font-size: 1.55rem !important;
+    font-weight: 800 !important;
+    color: var(--pt-text) !important;
+    line-height: 1.2;
+}
+[data-testid="stMetricDelta"] {
+    font-size: 0.80rem !important;
+    font-weight: 600 !important;
+}
+
+/* --- Dataframes / tables --- */
+.stDataFrame, [data-testid="stDataFrame"] {
+    border-radius: var(--pt-radius) !important;
+    overflow: hidden !important;
+    box-shadow: var(--pt-shadow) !important;
+    border: 1px solid var(--pt-border) !important;
+}
+[data-testid="stDataFrame"] table {
+    font-size: 0.82rem !important;
+}
+[data-testid="stDataFrame"] thead th {
+    background: var(--pt-gray-light) !important;
+    font-weight: 700 !important;
+    font-size: 0.75rem !important;
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+    color: var(--pt-text-muted) !important;
+    border-bottom: 2px solid var(--pt-border) !important;
+}
+
+/* --- Sidebar --- */
+[data-testid="stSidebar"] {
+    background: var(--pt-gray-dark) !important;
+    border-right: 1px solid #283142;
+}
+[data-testid="stSidebar"] .stMarkdown,
+[data-testid="stSidebar"] label,
+[data-testid="stSidebar"] p,
+[data-testid="stSidebar"] span {
+    color: #B0BEC5 !important;
+}
+[data-testid="stSidebar"] h3,
+[data-testid="stSidebar"] h4 {
+    color: #E3F2FD !important;
+}
+[data-testid="stSidebar"] .stSelectbox select,
+[data-testid="stSidebar"] .stTextInput input {
+    background: #283142 !important;
+    color: #E0E0E0 !important;
+    border-color: #37474F !important;
+}
+
+/* --- Buttons --- */
+.stButton > button {
+    border-radius: 6px !important;
+    font-weight: 600 !important;
+    font-size: 0.85rem !important;
+    padding: 6px 18px !important;
+    transition: all 0.15s !important;
+    border: 1.5px solid var(--pt-blue) !important;
+    color: var(--pt-blue) !important;
+    background: white !important;
+}
+.stButton > button:hover {
+    background: var(--pt-blue) !important;
+    color: white !important;
+    box-shadow: var(--pt-shadow-md) !important;
+}
+.stButton > button[kind="primary"] {
+    background: var(--pt-blue) !important;
+    color: white !important;
+}
+
+/* --- Input widgets --- */
+.stSelectbox > div > div,
+.stMultiselect > div > div,
+.stTextInput > div > div > input,
+.stNumberInput > div > div > input,
+.stDateInput > div > div > input {
+    border-radius: 6px !important;
+    border-color: var(--pt-border) !important;
+    font-size: 0.85rem !important;
+}
+
+/* --- Section dividers --- */
+hr {
+    border: none;
+    border-top: 1.5px solid var(--pt-border);
+    margin: 20px 0;
+}
+
+/* --- Alerts & notices --- */
+.stAlert {
+    border-radius: var(--pt-radius) !important;
+    font-size: 0.85rem !important;
+    font-weight: 500 !important;
+}
+[data-testid="stAlert"][data-baseweb="notification"][kind="info"] {
+    background: var(--pt-blue-pale) !important;
+    border-left: 4px solid var(--pt-blue) !important;
+}
+[data-testid="stAlert"][data-baseweb="notification"][kind="success"] {
+    background: var(--pt-green-pale) !important;
+    border-left: 4px solid var(--pt-green) !important;
+}
+[data-testid="stAlert"][data-baseweb="notification"][kind="warning"] {
+    background: var(--pt-amber-pale) !important;
+    border-left: 4px solid var(--pt-amber) !important;
+}
+[data-testid="stAlert"][data-baseweb="notification"][kind="error"] {
+    background: var(--pt-red-pale) !important;
+    border-left: 4px solid var(--pt-red) !important;
+}
+
+/* --- Expander --- */
+.streamlit-expanderHeader {
+    font-weight: 600 !important;
+    font-size: 0.88rem !important;
+    background: var(--pt-gray-light) !important;
+    border-radius: 6px !important;
+    padding: 8px 12px !important;
+}
+
+/* --- Spinner --- */
+.stSpinner {
+    color: var(--pt-blue) !important;
+}
+
+/* --- Caption / helper text --- */
+.stCaption, [data-testid="stCaptionContainer"] {
+    color: var(--pt-text-muted) !important;
+    font-size: 0.78rem !important;
+}
+
+/* --- Code blocks --- */
+.stCode, code {
+    background: #F5F7FA !important;
+    border: 1px solid var(--pt-border) !important;
+    border-radius: 4px !important;
+    font-size: 0.80rem !important;
+    font-family: 'JetBrains Mono', 'Fira Code', 'Courier New', monospace !important;
+}
+
+/* --- Plotly charts — remove Plotly toolbar clutter --- */
+.js-plotly-plot .plotly .modebar {
+    opacity: 0.3 !important;
+    transition: opacity 0.2s;
+}
+.js-plotly-plot .plotly .modebar:hover {
+    opacity: 1 !important;
+}
+
+/* --- Section header helper class --- */
+.pt-section-header {
+    background: linear-gradient(90deg, var(--pt-blue) 0%, var(--pt-blue-light) 100%);
+    color: white !important;
+    padding: 8px 16px;
+    border-radius: var(--pt-radius);
+    font-weight: 700;
+    font-size: 0.90rem;
+    margin-bottom: 12px;
+    letter-spacing: 0.3px;
+}
+
+/* --- KPI card helper class --- */
+.pt-kpi-card {
+    background: white;
+    border: 1px solid var(--pt-border);
+    border-radius: var(--pt-radius);
+    padding: 16px;
+    box-shadow: var(--pt-shadow);
+    text-align: center;
+}
+.pt-kpi-card .pt-kpi-label {
+    font-size: 0.72rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.6px;
+    color: var(--pt-text-muted);
+    margin-bottom: 4px;
+}
+.pt-kpi-card .pt-kpi-value {
+    font-size: 1.60rem;
+    font-weight: 800;
+    color: var(--pt-text);
+    line-height: 1.1;
+}
+.pt-kpi-card .pt-kpi-delta {
+    font-size: 0.78rem;
+    font-weight: 600;
+    margin-top: 4px;
+}
+.pt-kpi-card .pt-kpi-delta.positive { color: var(--pt-green); }
+.pt-kpi-card .pt-kpi-delta.negative { color: var(--pt-red); }
+
+/* --- Badge helper --- */
+.pt-badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 12px;
+    font-size: 0.72rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+}
+.pt-badge-blue   { background: var(--pt-blue-pale); color: var(--pt-blue); }
+.pt-badge-green  { background: var(--pt-green-pale); color: var(--pt-green); }
+.pt-badge-red    { background: var(--pt-red-pale); color: var(--pt-red); }
+.pt-badge-amber  { background: var(--pt-amber-pale); color: var(--pt-amber); }
+.pt-badge-gray   { background: var(--pt-gray-light); color: var(--pt-gray-mid); }
+
+/* --- Scrollbar --- */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--pt-border); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--pt-text-muted); }
+
+/* --- Main content padding --- */
+.main .block-container {
+    padding-top: 1.5rem !important;
+    padding-bottom: 2rem !important;
+    max-width: 1400px;
+}
+</style>
+""",
+        unsafe_allow_html=True,
+    )
+
+
+# -------------------------
 # Shell wrapping & wiring
 # -------------------------
 
@@ -12060,6 +12477,9 @@ def _render_dashboard_shell_core(runtime: DashboardRuntime) -> None:
     - Tabs (router)
     - Runtime debug (אופציונלי)
     """
+    # Inject professional CSS theme (runs every render; Streamlit deduplicates)
+    _inject_global_css()
+
     app_ctx = runtime.app_ctx
     feature_flags = runtime.feature_flags
     services_status = runtime.services_status
@@ -12488,7 +12908,23 @@ def _render_logs_internal_fallback(
     else:
         services_df = None
 
-    st.markdown("### 📜 Logs / System Health – Dashboard-level view")
+    st.markdown(
+        """
+<div style="
+    background:linear-gradient(90deg,#212121 0%,#37474F 100%);
+    border-radius:10px;padding:14px 20px;margin-bottom:14px;
+    box-shadow:0 2px 6px rgba(33,33,33,0.22);
+">
+    <div style="font-size:1.15rem;font-weight:800;color:white;letter-spacing:-0.2px;">
+        🧾 System Health &amp; Logs
+    </div>
+    <div style="font-size:0.76rem;color:rgba(255,255,255,0.74);margin-top:3px;">
+        Service health · Tab telemetry · Log viewer · Agent context · Dashboard diagnostics
+    </div>
+</div>
+""",
+        unsafe_allow_html=True,
+    )
 
     # --- Summary headline ---
     if summary is not None:
@@ -15356,7 +15792,23 @@ def _render_agents_internal_fallback(
 
     # ========= חלק 1 – Context overview (Health + capabilities + overview) =========
 
-    st.markdown("### 🤖 Agents – AI Control & Automation Center")
+    st.markdown(
+        """
+<div style="
+    background:linear-gradient(90deg,#0D47A1 0%,#1565C0 100%);
+    border-radius:10px;padding:14px 20px;margin-bottom:14px;
+    box-shadow:0 2px 8px rgba(13,71,161,0.22);
+">
+    <div style="font-size:1.15rem;font-weight:800;color:white;letter-spacing:-0.2px;">
+        🤖 Agent Control Center
+    </div>
+    <div style="font-size:0.76rem;color:rgba(255,255,255,0.78);margin-top:3px;">
+        AI supervision · Quick actions · System health · Saved views · Automation history
+    </div>
+</div>
+""",
+        unsafe_allow_html=True,
+    )
 
     col_ctx_left, col_ctx_mid, col_ctx_right = st.columns([1.5, 1.5, 1.5])
 

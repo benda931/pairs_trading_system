@@ -431,16 +431,27 @@ def render_tab(
     - או שאין → הסבר מה צריך להגדיר ועוצרים.
     """
 
-    st.title("🔬 Comparison Matrices — Tab Intelligence (HF-grade, Real Data)")
-
     st.markdown(
         """
-        הטאב הזה מנתח **דמיון / מרחק / קורלציה** בין טאבים אמיתיים במערכת,
-        על בסיס KPIs שאתה מספק (Sharpe / DD / Risk / Macro / Latency / וכו').
+<div style="
+    background:linear-gradient(90deg,#4A148C 0%,#6A1B9A 100%);
+    border-radius:10px;padding:14px 20px;margin-bottom:14px;
+    box-shadow:0 2px 8px rgba(74,20,140,0.22);
+">
+    <div style="font-size:1.15rem;font-weight:800;color:white;letter-spacing:-0.2px;">
+        🔬 Comparison Matrices — Tab Intelligence
+    </div>
+    <div style="font-size:0.76rem;color:rgba(255,255,255,0.78);margin-top:3px;">
+        Similarity · Distance · Correlation between tabs · KPI-based · Real data only
+    </div>
+</div>
+""",
+        unsafe_allow_html=True,
+    )
 
-        אין כאן *שום* דאטה מומצא.
-        אם אין לך עדיין טאב-פרופילים אמיתיים ב-SqlStore / Runtime / Session / CSV — הטאב יגיד לך מה חסר.
-        """
+    st.caption(
+        "Analyzes similarity/distance/correlation between system tabs based on real KPIs "
+        "(Sharpe / DD / Risk / Macro / Latency). No synthetic data — shows what is missing if tab profiles are unavailable."
     )
 
     # ------------------ 1. מקור פרופילים ------------------

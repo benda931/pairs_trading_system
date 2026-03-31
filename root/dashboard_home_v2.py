@@ -3935,7 +3935,38 @@ def render_dashboard_home_v2(
         or update_dashboard_home_context_in_session(runtime)
     )
 
-    st.markdown("### 🏠 Dashboard Home – Monitoring view")
+    st.markdown(
+        """
+<div style="
+    background:linear-gradient(135deg,#0D1B2A 0%,#1A2744 60%,#1E3A5F 100%);
+    border-radius:12px;padding:20px 24px;margin-bottom:16px;
+    box-shadow:0 4px 16px rgba(0,0,0,0.20);
+    border-left:5px solid #1E88E5;
+">
+    <div style="font-size:1.40rem;font-weight:900;color:#E3F2FD;letter-spacing:-0.3px;">
+        📊 Pairs Trading System
+    </div>
+    <div style="font-size:0.82rem;color:#90A4AE;margin-top:4px;font-weight:500;">
+        Institutional-grade statistical arbitrage · Portfolio-level · Regime-aware · Factor-aware
+    </div>
+    <div style="margin-top:10px;display:flex;gap:10px;flex-wrap:wrap;">
+        <span style="background:rgba(30,136,229,0.15);color:#64B5F6;padding:3px 10px;
+                     border-radius:12px;font-size:0.70rem;font-weight:700;border:1px solid rgba(30,136,229,0.3);">
+            PAIRS TRADING
+        </span>
+        <span style="background:rgba(46,125,50,0.15);color:#81C784;padding:3px 10px;
+                     border-radius:12px;font-size:0.70rem;font-weight:700;border:1px solid rgba(46,125,50,0.3);">
+            MARKET NEUTRAL
+        </span>
+        <span style="background:rgba(245,127,23,0.15);color:#FFB74D;padding:3px 10px;
+                     border-radius:12px;font-size:0.70rem;font-weight:700;border:1px solid rgba(245,127,23,0.3);">
+            REGIME AWARE
+        </span>
+    </div>
+</div>
+""",
+        unsafe_allow_html=True,
+    )
 
     # -------- 1.A – Health light + App meta --------
     hl: Dict[str, Any] = home_ctx.get("health_light", {}) or {}

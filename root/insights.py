@@ -1114,7 +1114,23 @@ def render_insights_tab(
     """
 
     # ===== 0. Header & Date context =====
-    st.header(HEB["title"])
+    st.markdown(
+        """
+<div style="
+    background:linear-gradient(90deg,#880E4F 0%,#AD1457 100%);
+    border-radius:10px;padding:14px 20px;margin-bottom:14px;
+    box-shadow:0 2px 8px rgba(136,14,79,0.22);
+">
+    <div style="font-size:1.15rem;font-weight:800;color:white;letter-spacing:-0.2px;">
+        🔍 System Insights — Log Analysis
+    </div>
+    <div style="font-size:0.76rem;color:rgba(255,255,255,0.78);margin-top:3px;">
+        Trade logs · KPIs · PnL distribution · Pair drill-down · ML bridge · Export
+    </div>
+</div>
+""",
+        unsafe_allow_html=True,
+    )
 
     # פרשנות של start/end כתאריכי pandas (לשימוש ב-_sidebar_filters)
     global_start_ts: Optional[pd.Timestamp] = None
