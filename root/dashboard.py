@@ -1374,11 +1374,9 @@ def bootstrap_session(app_ctx: "AppContext", feature_flags: FeatureFlags) -> Non
     # last_active_tab_key – ברירת מחדל home
     _ensure_session_default(SESSION_KEY_LAST_TAB_KEY, "home")
 
-    # base_dashboard_context – נבנה פעם אחת ונשמר
-    def _base_ctx_factory() -> Any:
-        return _build_base_dashboard_context(app_ctx, env, profile)
-
-    _ensure_session_default_factory(SESSION_KEY_BASE_CTX, _base_ctx_factory)
+    # base_dashboard_context – rebuild every session to keep dates fresh
+    base_ctx = _build_base_dashboard_context(app_ctx, env, profile)
+    st.session_state[SESSION_KEY_BASE_CTX] = base_ctx
 
     # snapshot אחרון – מוכן לשימוש ע"י DashboardService/SqlStore
     _ensure_session_default(SESSION_KEY_LAST_SNAPSHOT, None)
