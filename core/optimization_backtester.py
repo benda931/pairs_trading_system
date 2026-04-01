@@ -1589,11 +1589,12 @@ def _bt_build_signal_frame(
     pending_action: Optional[tuple] = None
 
     # ── Canonical signal pipeline integration (P1-PIPE) ──────────
-    # When use_signal_pipeline=True, entry/exit decisions are delegated to
-    # core.signal_pipeline.SignalPipeline which applies regime classification,
+    # When use_signal_pipeline=True (default), entry/exit decisions are delegated
+    # to core.signal_pipeline.SignalPipeline which applies regime classification,
     # adaptive thresholds, and signal quality gating.  The backtester still
     # computes z-score, but the pipeline decides whether to trade.
-    use_pipeline = bool(params.get("use_signal_pipeline", False))
+    # Set use_signal_pipeline=False to revert to legacy z-score threshold logic.
+    use_pipeline = bool(params.get("use_signal_pipeline", True))
     _pipeline = None
     if use_pipeline:
         try:

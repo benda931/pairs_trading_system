@@ -41,8 +41,9 @@ for validation, and residual mean reversion is the primary alpha abstraction.
 >   Dashboard UI panel in `root/portfolio_tab.py` allows manual dispatch.
 > - Runtime/control plane: `is_safe_to_trade()` wired via `bridge_signals_to_allocator()` safety_check param.
 > - Governance/audit: implemented; no operational decision is gated by any governance check
-> - Walk-forward: `root/optimization_tab.py` does calendar stability validation (not true WF);
->   true walk-forward lives in `research/walk_forward.py` and is not yet wired to the optimizer
+> - Walk-forward: `root/optimization_tab.py` does calendar stability validation (not true WF); UI now labeled
+>   "Temporal Stability Check — In-Sample Calendar Segments" with ADR-007 disclaimer (P0-WF COMPLETE).
+>   True walk-forward lives in `research/walk_forward.py` and is not yet wired to the optimizer.
 >
 > **See:** `docs/remediation/remediation_ledger.md` for the formal integration status register.
 >
@@ -279,7 +280,7 @@ WalkForwardHarness(
 |------|----------------------|------------------|
 | `root/backtest.py:TradeSide` | `core/contracts.py:SignalDirection` | Migrate internal references, then remove |
 | `root/trade_logic.py:TradeSide` | `core/contracts.py:SignalDirection` | Migrate internal references, then remove |
-| `core/signals_engine.py` | `core/signal_pipeline.py` (ADR-006) | P1-PIPE COMPLETE: pipeline wired to backtester via `use_signal_pipeline=True`. signals_engine.py still used by orchestrator/sql_store — deprecate after full migration |
+| `core/signals_engine.py` | `core/signal_pipeline.py` (ADR-006) | P1-PIPE COMPLETE: `use_signal_pipeline=True` is now the **default** in optimization_backtester.py. signals_engine.py still used by orchestrator/sql_store — deprecate after full migration |
 
 ### Walk-Forward Disambiguation
 

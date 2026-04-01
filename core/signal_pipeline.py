@@ -16,10 +16,11 @@ The pipeline:
         -> TradeLifecycleStateMachine.can_enter/can_add
         -> EntryIntent / ExitIntent / None
 
-Integration Status (2026-03-31):
-    This pipeline is implemented and wired to the backtester as the canonical
-    signal-decision path.  The backtester calls ``evaluate_bar()`` for each bar
-    when ``use_signal_pipeline=True`` is set in its parameters.
+Integration Status (2026-04-01):
+    This pipeline is the **default** backtester signal path (``use_signal_pipeline``
+    defaults to ``True`` in optimization_backtester.py).  The backtester calls
+    ``evaluate_bar()`` for each bar unless ``use_signal_pipeline=False`` is explicitly
+    set to revert to legacy z-score threshold logic.
 
     See also: ``evaluate()`` for the full evaluation with regime features from
     price series, and ``evaluate_bar()`` for the lightweight bar-by-bar path

@@ -322,13 +322,20 @@ class PairsOrchestrator:
             → data_refresh
             → agent_data_integrity (WorkflowEngine, P1-AGENTS)
             → compute_signals
+            → portfolio_allocation (SignalPipeline → bridge_signals_to_allocator,
+                                    with is_safe_to_trade + kill-switch factory)
             → risk_check
 
-        Two agent dispatches:
-        1. SystemHealthAgent (after health_check): validates all core modules
-           are importable. Second real agent dispatch from operational code.
-        2. DataIntegrityAgent (after data_refresh): validates price data quality.
-           First real agent dispatch from operational code.
+        Agent dispatches:
+        1. SystemHealthAgent (after health_check) — P1-AGENTS
+        2. DataIntegrityAgent (after data_refresh) — P1-AGENTS
+
+        Allocation:
+            After compute_signals, _collect_signal_decisions() runs SignalPipeline
+            for each active pair, then run_portfolio_allocation_cycle() feeds the
+            resulting SignalDecision objects through bridge_signals_to_allocator()
+            with runtime safety check and control-plane kill-switch (P1-PORTINT,
+            P1-SAFE, P0-KS — all COMPLETE via this call path).
         """
         logger.info("=" * 60)
         logger.info("Starting daily pipeline at %s", datetime.now(timezone.utc).isoformat())
@@ -357,6 +364,25 @@ class PairsOrchestrator:
                 if agent_result is not None:
                     results.append(agent_result)
                     self._results.append(agent_result)
+
+            # After compute_signals: collect SignalDecisions → allocate
+            if name == "compute_signals":
+                signal_decisions = self._collect_signal_decisions()
+                if signal_decisions:
+                    try:
+                        from common.config_manager import load_config
+                        capital = float(load_config().get("scheduler_capital", 1_000_000.0))
+                    except Exception:
+                        capital = 1_000_000.0
+                    alloc_result = self.run_portfolio_allocation_cycle(
+                        signal_decisions=signal_decisions,
+                        capital=capital,
+                    )
+                    if alloc_result is not None:
+                        results.append(alloc_result)
+                        self._results.append(alloc_result)
+                else:
+                    logger.info("run_daily_pipeline: no signal decisions — allocation skipped")
 
         # Summary
         ok = sum(1 for r in results if r.status == "success")
@@ -699,6 +725,331 @@ class PairsOrchestrator:
     def get_results_history(self, n: int = 20) -> List[Dict[str, Any]]:
         """Get recent task results."""
         return [asdict(r) for r in self._results[-n:]]
+
+    # ── Scheduler ─────────────────────────────────────────────────────────
+
+    def start_daemon(
+        self,
+        run_time: Optional[str] = None,
+        timezone: str = "America/New_York",
+        run_immediately: bool = False,
+    ) -> None:
+        """
+        Start a background daily pipeline scheduler.
+
+        Tries APScheduler (if installed); falls back to threading.Timer.
+
+        Parameters
+        ----------
+        run_time : str, optional
+            "HH:MM" string for daily trigger.  Reads ``scheduler_run_time``
+            from config.json if not provided; defaults to ``"16:15"``.
+        timezone : str
+            Timezone for the cron trigger (APScheduler only).
+        run_immediately : bool
+            If True, execute one pipeline run immediately before scheduling.
+        """
+        import atexit
+
+        try:
+            from common.config_manager import load_config
+            cfg = load_config()
+        except Exception:
+            cfg = {}
+
+        run_time = run_time or cfg.get("scheduler_run_time", "16:15")
+        timezone = cfg.get("scheduler_timezone", timezone)
+
+        if run_immediately:
+            logger.info("start_daemon: run_immediately=True — running pipeline now")
+            self.run_daily_pipeline()
+
+        # ── APScheduler path (preferred) ─────────────────────────────
+        try:
+            from apscheduler.schedulers.background import BackgroundScheduler
+            from apscheduler.triggers.cron import CronTrigger
+
+            h, m = (int(x) for x in run_time.split(":"))
+            scheduler = BackgroundScheduler(timezone=timezone)
+            scheduler.add_job(
+                self.run_daily_pipeline,
+                trigger=CronTrigger(hour=h, minute=m, timezone=timezone),
+                id="daily_pipeline",
+                name="Daily Pipeline",
+                misfire_grace_time=3600,
+            )
+            scheduler.start()
+            self._scheduler = scheduler
+            atexit.register(self.stop_daemon)
+            logger.info(
+                "start_daemon: APScheduler started — daily run at %s %s",
+                run_time, timezone,
+            )
+            return
+
+        except ImportError:
+            logger.debug("APScheduler not installed — using threading.Timer fallback")
+        except Exception as e:
+            logger.warning("APScheduler setup failed (%s) — using threading.Timer fallback", e)
+
+        # ── threading.Timer fallback ─────────────────────────────────
+        import threading
+        from datetime import datetime, timezone as dt_tz
+
+        self._daemon_stop_event = threading.Event()
+
+        def _next_run_seconds() -> float:
+            now = datetime.now()
+            h, m = (int(x) for x in run_time.split(":"))
+            target = now.replace(hour=h, minute=m, second=0, microsecond=0)
+            delta = (target - now).total_seconds()
+            return delta if delta > 0 else delta + 86400  # +24h if already past
+
+        def _loop():
+            while not self._daemon_stop_event.is_set():
+                delay = _next_run_seconds()
+                logger.info("start_daemon: next run in %.0fs (at %s)", delay, run_time)
+                if self._daemon_stop_event.wait(timeout=delay):
+                    break  # stop requested
+                if not self._daemon_stop_event.is_set():
+                    logger.info("start_daemon: triggering daily pipeline")
+                    try:
+                        self.run_daily_pipeline()
+                    except Exception as exc:
+                        logger.error("start_daemon: pipeline error: %s", exc)
+
+        self._daemon_thread = threading.Thread(target=_loop, daemon=True, name="pipeline-daemon")
+        self._daemon_thread.start()
+        atexit.register(self.stop_daemon)
+        logger.info("start_daemon: threading.Timer fallback started — daily run at %s", run_time)
+
+    def stop_daemon(self) -> None:
+        """Stop the background scheduler (APScheduler or threading fallback)."""
+        if hasattr(self, "_scheduler"):
+            try:
+                self._scheduler.shutdown(wait=False)
+                logger.info("stop_daemon: APScheduler stopped")
+            except Exception:
+                pass
+        if hasattr(self, "_daemon_stop_event"):
+            self._daemon_stop_event.set()
+            logger.info("stop_daemon: threading daemon stopped")
+
+    # ── Signal collection helpers ─────────────────────────────────────────
+
+    def _get_active_pairs(self) -> list:
+        """
+        Return the active pairs list from AppContext or config.json.
+
+        Returns [] with a warning if neither source is available.
+        """
+        try:
+            from core.app_context import AppContext
+            ctx = AppContext.get_global()
+            if ctx.pairs:
+                return list(ctx.pairs)
+        except Exception:
+            pass
+
+        try:
+            from common.config_manager import load_config
+            pairs = load_config().get("pairs", [])
+            if pairs:
+                return list(pairs)
+        except Exception:
+            pass
+
+        logger.warning("_get_active_pairs: no pairs found in AppContext or config")
+        return []
+
+    def _collect_signal_decisions(
+        self,
+        pairs: Optional[list] = None,
+        lookback_days: int = 252,
+    ) -> list:
+        """
+        Run SignalPipeline for every active pair and return SignalDecision objects.
+
+        Called from run_daily_pipeline() to bridge compute_signals →
+        run_portfolio_allocation_cycle().  Never raises — returns [] on any
+        error so the pipeline continues without allocation.
+
+        Parameters
+        ----------
+        pairs : list, optional
+            List of pair dicts ``{"sym_x": ..., "sym_y": ...}`` or 2-tuples.
+            Defaults to ``_get_active_pairs()``.
+        lookback_days : int
+            Price history length fed to SignalPipeline (default: 252).
+
+        Returns
+        -------
+        list[SignalDecision]
+        """
+        import time as _time
+        import numpy as np
+
+        if pairs is None:
+            pairs = self._get_active_pairs()
+        if not pairs:
+            return []
+
+        try:
+            from common.data_loader import load_prices_multi
+            from core.contracts import PairId
+            from core.signal_pipeline import SignalPipeline
+        except ImportError as exc:
+            logger.warning("_collect_signal_decisions: required import failed: %s", exc)
+            return []
+
+        decisions = []
+        t0 = _time.time()
+
+        for pair_def in pairs:
+            sym_x = sym_y = None
+            try:
+                if isinstance(pair_def, dict):
+                    sym_x = pair_def.get("sym_x") or pair_def.get("symbol_x")
+                    sym_y = pair_def.get("sym_y") or pair_def.get("symbol_y")
+                elif isinstance(pair_def, (list, tuple)) and len(pair_def) >= 2:
+                    sym_x, sym_y = str(pair_def[0]), str(pair_def[1])
+                else:
+                    continue
+
+                if not sym_x or not sym_y:
+                    continue
+
+                prices = load_prices_multi([sym_x, sym_y])
+                if prices is None or prices.empty:
+                    continue
+
+                # Resolve price series by column name or position
+                px = prices[sym_x] if sym_x in prices.columns else prices.iloc[:, 0]
+                py = prices[sym_y] if sym_y in prices.columns else prices.iloc[:, 1]
+                px = px.dropna().iloc[-lookback_days:]
+                py = py.dropna().iloc[-lookback_days:]
+
+                if len(px) < 60 or len(py) < 60:
+                    continue
+
+                # Simple OLS spread + z-score (no leakage — uses full window)
+                beta = float(np.cov(px.values, py.values)[0, 1] / np.var(px.values))
+                spread = py - beta * px
+                spread_std = float(spread.std())
+                if spread_std == 0:
+                    continue
+                z_score = float((spread.iloc[-1] - spread.mean()) / spread_std)
+
+                pipeline = SignalPipeline(pair_id=PairId(sym_x, sym_y))
+                decision = pipeline.evaluate(
+                    z_score=z_score,
+                    spread_series=spread,
+                    prices_x=px,
+                    prices_y=py,
+                    as_of=datetime.now(timezone.utc),
+                )
+                decisions.append(decision)
+
+            except Exception as exc:
+                logger.warning(
+                    "_collect_signal_decisions: %s/%s failed: %s",
+                    sym_x or "?", sym_y or "?", exc,
+                )
+
+        elapsed = _time.time() - t0
+        logger.info(
+            "_collect_signal_decisions: %d decisions from %d pairs in %.1fs",
+            len(decisions), len(pairs), elapsed,
+        )
+        return decisions
+
+    def run_portfolio_allocation_cycle(
+        self,
+        signal_decisions: Optional[list] = None,
+        capital: float = 1_000_000.0,
+    ) -> Optional[TaskResult]:
+        """
+        Run one portfolio allocation cycle with safety gating.
+
+        Resolves:
+        - P1-PORTINT: Portfolio bridge called from operational code
+        - P1-SAFE: Runtime safety check injected as callback
+        - P0-KS: Kill-switch with control-plane callback used
+
+        Parameters
+        ----------
+        signal_decisions : list[SignalDecision], optional
+            If None, returns immediately (no signals to allocate).
+        capital : float
+            Total capital for allocation.
+
+        Returns
+        -------
+        TaskResult or None
+        """
+        import time as _time
+        t0 = _time.time()
+
+        if not signal_decisions:
+            return None
+
+        try:
+            from core.portfolio_bridge import bridge_signals_to_allocator
+
+            # ── P1-SAFE: Inject runtime safety check ─────────────
+            safety_fn = None
+            try:
+                from runtime.state import get_runtime_state_manager
+                safety_fn = get_runtime_state_manager().is_safe_to_trade
+            except ImportError:
+                logger.debug("runtime.state unavailable — safety_check=None")
+
+            # ── P0-KS: Use kill-switch factory with control-plane ─
+            kill_switch_state = None
+            try:
+                from portfolio.risk_ops import make_kill_switch_manager_with_control_plane
+                ksm = make_kill_switch_manager_with_control_plane()
+                kill_switch_state = ksm.state
+            except (ImportError, Exception) as e:
+                logger.debug("Kill-switch factory unavailable: %s", e)
+
+            allocations, diagnostics = bridge_signals_to_allocator(
+                signal_decisions,
+                capital=capital,
+                safety_check=safety_fn,
+                kill_switch=kill_switch_state,
+            )
+
+            elapsed = _time.time() - t0
+            n_funded = sum(1 for a in allocations if a.approved)
+
+            logger.info(
+                "Portfolio allocation: %d funded / %d total, %.1fs",
+                n_funded, len(allocations), elapsed,
+            )
+
+            return TaskResult(
+                task_name="portfolio_allocation",
+                status="success",
+                duration_sec=round(elapsed, 2),
+                output={
+                    "n_funded": n_funded,
+                    "n_total": len(allocations),
+                    "n_intents_received": diagnostics.n_intents_received,
+                    "safety_check_used": safety_fn is not None,
+                    "kill_switch_used": kill_switch_state is not None,
+                },
+            )
+
+        except Exception as e:
+            elapsed = _time.time() - t0
+            logger.warning("Portfolio allocation failed: %s", e)
+            return TaskResult(
+                task_name="portfolio_allocation",
+                status="failed",
+                duration_sec=round(elapsed, 2),
+                error=str(e),
+            )
 
 
 # ============================================================================

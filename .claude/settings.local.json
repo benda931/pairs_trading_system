@@ -291,7 +291,13 @@
       "Bash(python -m pytest tests/ --tb=no -q)",
       "Bash(find core:*)",
       "Bash(python -c \"from root.dashboard import *; print\\(''''Dashboard imports OK''''\\)\")",
-      "Bash(.venv/Scripts/python -m pytest tests/test_remediation.py::TestP1AgentDispatch::test_orchestrator_agent_dispatch_returns_task_result -v --tb=short)"
+      "Bash(.venv/Scripts/python -m pytest tests/test_remediation.py::TestP1AgentDispatch::test_orchestrator_agent_dispatch_returns_task_result -v --tb=short)",
+      "Bash(ls -la /c/Users/omrib/OneDrive/Desktop/pairs_trading_system/scripts/*.py)",
+      "Bash(timeout 12 .venv/Scripts/streamlit run root/dashboard.py)",
+      "Bash(curl -s http://localhost:8501)",
+      "Bash(curl -s http://localhost:8501/_stcore/health)",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\" http://localhost:8501/)",
+      "Bash(curl -s http://localhost:8502/)"
     ]
   }
 }

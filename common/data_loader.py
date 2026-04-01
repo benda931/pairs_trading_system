@@ -971,16 +971,22 @@ def load_price_data(
     # P1-SURV2: Stale data surveillance hook — SURV-DI-001
     try:
         age_hours = _compute_data_age_hours(df)
-        if age_hours is not None and get_surveillance_engine is not None:
-            surv = get_surveillance_engine()
-            surv.detect(
-                rule_id="SURV-DI-001",
-                entity_type="symbol",
-                entity_id=symbol,
-                metric_value=age_hours,
-            )
-    except Exception:
-        pass  # Surveillance errors never break data loading
+        if age_hours is not None:
+            if age_hours > 48:
+                logger.warning(
+                    "SURV-DI-001: stale price data for %s — age=%.1fh (threshold 48h)",
+                    symbol, age_hours,
+                )
+            if get_surveillance_engine is not None:
+                surv = get_surveillance_engine()
+                surv.detect(
+                    rule_id="SURV-DI-001",
+                    entity_type="symbol",
+                    entity_id=symbol,
+                    metric_value=age_hours,
+                )
+    except Exception as _surv_exc:
+        logger.debug("SURV-DI-001 hook error (non-fatal): %s", _surv_exc)
 
     return df
 

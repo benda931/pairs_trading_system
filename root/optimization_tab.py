@@ -6822,7 +6822,7 @@ def _render_optimization_analytics_section(TABLE_HEIGHT: int, df: pd.DataFrame, 
     כולל:
     - Pareto Frontier (Score/Sharpe/DD) + גרפים + artifact ל-DuckDB.
     - DSR & Overfitting diagnostics (Top-K אסטרטגיות).
-    - Walk-Forward Analysis & Robustness (per strategy) + artifact.
+    - Temporal Stability Check (in-sample calendar segments, NOT true walk-forward) + artifact.
 
     df: opt_df / opt_df_batch עבור זוג אחד (או Batch במידת הצורך).
     """
@@ -7130,11 +7130,16 @@ def _render_optimization_analytics_section(TABLE_HEIGHT: int, df: pd.DataFrame, 
         except Exception as e:
             st.caption(f"DSR diagnostics failed: {e}")
 
-    # ------------------ 8.3 Walk-Forward & Robustness ------------------
+    # ------------------ 8.3 Temporal Stability Check (ADR-007) ------------------
     with st.expander(
-        "3️⃣ Walk-Forward & Robustness (per strategy)",
+        "3️⃣ Temporal Stability Check — In-Sample Calendar Segments",
         expanded=not FOCUS,
     ):
+        st.caption(
+            "⚠️ **Calendar segment testing only** — not true out-of-sample walk-forward validation. "
+            "Parameters are optimized on the full sample; segments test temporal stability only. "
+            "See ADR-007 for backtest realism limitations."
+        )
         try:
             if Backtester is None:
                 st.caption("Backtester not available — cannot run Walk-Forward.")
