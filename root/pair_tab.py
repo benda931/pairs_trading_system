@@ -37,8 +37,8 @@ from common.utils import (
     calculate_correlation,
     calculate_zscore,
     calculate_half_life,
-    load_price_data,  # חשוב: להשתמש באותו loader כמו הדשבורד
 )
+from common.data_loader import load_price_data  # Canonical price loader (NOT common.utils stub)
 
 # Clear stale price data cache on module load (ensures fresh data after CSV fixes)
 try:
@@ -612,7 +612,7 @@ def _load_pair_prices_for_research(sym_a: str, sym_b: str, start: pd.Timestamp, 
     Helper קטן לטעינת מחירים לזוג, לטובת pair_recommender.
     אפשר להתאים אותו ל-MarketDataRouter / IBKR / Yahoo לפי מה שאתה משתמש.
     """
-    from common.utils import load_price_data  # או ה-router שלך
+    from common.data_loader import load_price_data  # Canonical price loader
 
     # דוגמה: load_price_data מחזיר DataFrame עם עמודות הסימבולים
     df = load_price_data(symbols=[sym_a, sym_b], start_date=start, end_date=end, freq="D")
@@ -850,6 +850,15 @@ def _render_pair_tab_core(
 
     if df_x.empty or df_y.empty:
         st.error("לא נמצאו נתוני מחיר לאחד מהסימבולים.")
+        with st.expander("🔧 Debug info"):
+            st.write(f"sym_x={sym_x}, sym_y={sym_y}")
+            st.write(f"start_date={start_date}, end_date={end_date}")
+            st.write(f"df_x: {len(df_x)} rows, empty={df_x.empty}")
+            st.write(f"df_y: {len(df_y)} rows, empty={df_y.empty}")
+            if not df_x.empty:
+                st.write(f"df_x index: {df_x.index[0]} → {df_x.index[-1]}")
+            if not df_y.empty:
+                st.write(f"df_y index: {df_y.index[0]} → {df_y.index[-1]}")
         return
 
     s1 = _get_price_series(df_x)
