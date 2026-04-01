@@ -14,7 +14,7 @@ An institutional-grade **statistical arbitrage platform** for equities pairs tra
 platform where correlation/distance are used for discovery, cointegration/stability/half-life
 for validation, and residual mean reversion is the primary alpha abstraction.
 
-## Current Integration Status (as of 2026-03-31)
+## Current Integration Status (as of 2026-04-01)
 
 > **IMPORTANT — READ BEFORE CONTRIBUTING**
 >
@@ -25,14 +25,20 @@ for validation, and residual mean reversion is the primary alpha abstraction.
 >
 > **System B (Infrastructure):** `research/`, `portfolio/`, `ml/`, `agents/`, `runtime/`, `governance/`,
 > `orchestration/`, `audit/`, `surveillance/`, `attestations/`, `controls/`, `policies/`, `retention/`,
-> `reporting/` — professionally designed, comprehensively tested in isolation, and **not yet integrated
-> with System A**. These packages exist as validated infrastructure awaiting integration.
+> `reporting/` — professionally designed, comprehensively tested in isolation, with **partial integration
+> with System A** (see status below). These packages exist as validated infrastructure; most awaiting
+> further integration.
 >
 > **Integration status:**
 > - ML platform: designed and tested; zero models trained; ModelScorer never called from signal path
-> - Agents: registered; never dispatched from any operational workflow
-> - Portfolio allocator: implemented; never receives real signals from System A
-> - Runtime/control plane: implemented; `is_safe_to_trade()` never called from any execution path
+> - **Agents: 1 of 40 agents dispatched from operational code.**
+>   `DataIntegrityAgent` (`agents/monitoring_agents.py`) is dispatched by `PairsOrchestrator.run_daily_pipeline()`
+>   after each `data_refresh` task via `monitoring/workflow.py` (WorkflowEngine) with alert bus integration.
+>   39 remaining agents are registered in the registry but dispatched from nowhere (scaffold-only).
+>   See `monitoring/workflow.py`, `core/orchestrator.py:run_agent_data_integrity_check()`.
+> - Portfolio allocator: `bridge_signals_to_allocator()` wired; receives real signals from signal pipeline.
+>   Dashboard UI panel in `root/portfolio_tab.py` allows manual dispatch.
+> - Runtime/control plane: `is_safe_to_trade()` wired via `bridge_signals_to_allocator()` safety_check param.
 > - Governance/audit: implemented; no operational decision is gated by any governance check
 > - Walk-forward: `root/optimization_tab.py` does calendar stability validation (not true WF);
 >   true walk-forward lives in `research/walk_forward.py` and is not yet wired to the optimizer

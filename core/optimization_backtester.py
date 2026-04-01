@@ -1578,6 +1578,16 @@ def _bt_build_signal_frame(
     max_holding = int(params["max_holding_days"])
     max_abs_pos = float(params["max_position_abs"])
 
+    # ── Execution lag (P0-EXEC) ───────────────────────────────────
+    # bar_lag controls how many bars after a signal the fill is assumed.
+    #   bar_lag=0 → same-close execution (legacy, optimistic)
+    #   bar_lag=1 → next-bar execution (default, realistic)
+    # The signal is computed at bar i; the position change takes effect
+    # at bar i + bar_lag.  This is implemented via a pending_action queue.
+    bar_lag = int(params.get("bar_lag", 1))
+    # pending_action: (target_bar_index, new_position_value, is_entry)
+    pending_action: Optional[tuple] = None
+
     # ── Canonical signal pipeline integration (P1-PIPE) ──────────
     # When use_signal_pipeline=True, entry/exit decisions are delegated to
     # core.signal_pipeline.SignalPipeline which applies regime classification,
@@ -1625,9 +1635,25 @@ def _bt_build_signal_frame(
 
         prev_pos = current_pos
 
+        # ── Apply pending action from previous bar(s) (P0-EXEC) ──
+        # When bar_lag > 0, signals are generated at bar i but fills
+        # happen at bar i + bar_lag.  This prevents look-ahead bias.
+        if pending_action is not None:
+            target_bar, new_pos_val, is_entry = pending_action
+            if i >= target_bar:
+                if is_entry and current_pos == 0.0:
+                    current_pos = new_pos_val
+                    current_trade_id += 1
+                    current_hold = 0
+                    entry_equity_anchor = 1.0
+                elif not is_entry:
+                    current_pos = 0.0
+                pending_action = None
+
         # If not valid (too low sigma) or NaN → prefer to flatten
         if not valid or np.isnan(z):
             current_pos = 0.0
+            pending_action = None  # Cancel pending on invalid data
 
         # ── Pipeline path: delegate to canonical signal pipeline ──
         elif use_pipeline and _pipeline is not None:
@@ -1639,18 +1665,21 @@ def _bt_build_signal_frame(
                 conviction=0.5,
                 mr_score=0.5,
             )
-            new_pos = bar_decision.action * max_abs_pos
-            if current_pos == 0.0 and new_pos != 0.0:
-                # New entry
-                current_trade_id += 1
-                current_hold = 0
-                entry_equity_anchor = 1.0
-                current_pos = new_pos
-            elif current_pos != 0.0 and new_pos == 0.0:
-                # Exit
-                current_pos = 0.0
+            desired_pos = bar_decision.action * max_abs_pos
+            if current_pos == 0.0 and desired_pos != 0.0:
+                if bar_lag <= 0:
+                    current_pos = desired_pos
+                    current_trade_id += 1
+                    current_hold = 0
+                    entry_equity_anchor = 1.0
+                else:
+                    pending_action = (i + bar_lag, desired_pos, True)
+            elif current_pos != 0.0 and desired_pos == 0.0:
+                if bar_lag <= 0:
+                    current_pos = 0.0
+                else:
+                    pending_action = (i + bar_lag, 0.0, False)
             elif current_pos != 0.0:
-                # Hold (update holding counter)
                 current_hold += 1
 
             # Refresh regime cache periodically with recent data
@@ -1674,29 +1703,33 @@ def _bt_build_signal_frame(
 
         # ── Legacy path: direct z-score thresholds ────────────────
         else:
-            if current_pos == 0.0:
-                # Entry rules
+            if current_pos == 0.0 and pending_action is None:
+                # Entry rules — signal at bar i, fill at bar i + bar_lag
                 if z <= -z_open:
-                    current_pos = +max_abs_pos  # long spread
-                    current_trade_id += 1
-                    current_hold = 0
-                    entry_equity_anchor = 1.0
+                    if bar_lag <= 0:
+                        current_pos = +max_abs_pos
+                        current_trade_id += 1
+                        current_hold = 0
+                        entry_equity_anchor = 1.0
+                    else:
+                        pending_action = (i + bar_lag, +max_abs_pos, True)
                 elif z >= z_open:
-                    current_pos = -max_abs_pos  # short spread
-                    current_trade_id += 1
-                    current_hold = 0
-                    entry_equity_anchor = 1.0
-            else:
+                    if bar_lag <= 0:
+                        current_pos = -max_abs_pos
+                        current_trade_id += 1
+                        current_hold = 0
+                        entry_equity_anchor = 1.0
+                    else:
+                        pending_action = (i + bar_lag, -max_abs_pos, True)
+            elif current_pos != 0.0:
                 # We are in a trade → check exit conditions
                 current_hold += 1
 
-                # For long spread: expect z to mean-revert upwards towards 0
                 if current_pos > 0:
                     exit_revert = (z >= -z_close)
                     exit_stop = (z <= -abs(stop_z))
                     exit_take = (take_z > 0.0 and z >= -abs(take_z))
                 else:
-                    # For short spread: expect z to revert down towards 0
                     exit_revert = (z <= z_close)
                     exit_stop = (z >= abs(stop_z))
                     exit_take = (take_z > 0.0 and z <= abs(take_z))
@@ -1704,7 +1737,10 @@ def _bt_build_signal_frame(
                 exit_time = (current_hold >= max_holding)
 
                 if exit_revert or exit_stop or exit_take or exit_time:
-                    current_pos = 0.0
+                    if bar_lag <= 0:
+                        current_pos = 0.0
+                    else:
+                        pending_action = (i + bar_lag, 0.0, False)
 
         # Set arrays
         pos[i] = current_pos

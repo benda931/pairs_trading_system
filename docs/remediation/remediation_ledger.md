@@ -16,7 +16,7 @@
 | ID | Title | Severity | Status | Strategy | Evidence Files |
 |----|-------|----------|--------|----------|---------------|
 | P0-WF | Walk-forward uses calendar segments not true WF | P0 | IN_PROGRESS | Downgrade + min_seg floor | root/optimization_tab.py:7116-7248 |
-| P0-EXEC | Same-close execution timing (signals computed & executed at close[t]) | P0 | IN_PROGRESS | Document semantics + add lag param | core/optimization_backtester.py:1613-1770 |
+| P0-EXEC | Execution lag via bar_lag parameter | P0 | COMPLETE | bar_lag consumed in backtester: signals at bar i, fills at bar i+bar_lag via pending_action queue. Default bar_lag=1 (next-bar). bar_lag=0 for legacy same-close. | core/optimization_backtester.py |
 | P0-KS | Two disconnected kill-switches with no synchronization | P0 | IN_PROGRESS | Canonicalize via control_plane bridge | portfolio/risk_ops.py, control_plane/engine.py |
 | P0-DOCS | Documentation overstates ML integration, agent orchestration, governance enforcement | P0 | IN_PROGRESS | Truthfulness markers in CLAUDE.md + docs | CLAUDE.md, docs/ |
 
@@ -35,7 +35,7 @@
 | ID | Title | Severity | Status | Strategy | Evidence Files |
 |----|-------|----------|--------|----------|---------------|
 | P1-ML | Meta-label ML overlay: training + inference + pipeline wiring | P1 | COMPLETE | MetaLabelModel training script (scripts/train_meta_label.py), wired to SignalPipeline via ml_quality_hook. Deterministic fallback preserved. 7 integration tests. | scripts/train_meta_label.py, ml/models/meta_labeler.py, core/signal_pipeline.py |
-| P1-AGENTS | DataIntegrityAgent dispatched from orchestrator | P1 | COMPLETE | run_daily_pipeline() dispatches DataIntegrityAgent after data_refresh. Typed AgentTask/AgentResult contracts, audit trail, READ_ONLY permissions. Other 32 agents remain scaffold. | core/orchestrator.py, agents/registry.py, agents/monitoring_agents.py |
+| P1-AGENTS | DataIntegrityAgent dispatched via WorkflowEngine | P1 | COMPLETE | run_daily_pipeline() dispatches DataIntegrityAgent via WorkflowEngine (monitoring/workflow.py) after data_refresh. WorkflowDefinition (BOUNDED_SAFE, single-step, no approval gate), typed AgentTask/AgentResult, audit trail, alert bus integration, direct-dispatch fallback. CLI: scripts/run_data_integrity.py. 34 tests (test_agent_dispatch.py). 39 remaining agents are scaffold-only — registered but dispatched from nowhere. See monitoring/workflow.py docstring for full scaffold list. | monitoring/workflow.py, core/orchestrator.py, agents/monitoring_agents.py, tests/test_agent_dispatch.py |
 | P1-GOV | Governance never enforced at runtime | P1 | IN_PROGRESS | Wire one gate: model promotion | governance/engine.py, ml/registry/ |
 | P1-AUDIT | Audit chains empty for all operational decisions | P1 | DOWNGRADED | Truthful scaffold marking | audit/chain.py |
 | P1-SURV2 | SurveillanceEngine never called from operational code | P1 | IN_PROGRESS | Wire one rule: stale data | surveillance/engine.py |

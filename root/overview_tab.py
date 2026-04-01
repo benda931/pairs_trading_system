@@ -64,8 +64,12 @@ import streamlit as st
 
 try:  # Plotly אופציונלי (אם קיים)
     import plotly.express as px  # type: ignore
+    import plotly.graph_objects as go  # type: ignore
+    _PLOTLY = True
 except Exception:  # pragma: no cover
     px = None  # type: ignore
+    go = None  # type: ignore
+    _PLOTLY = False
 
 JSONDict = Dict[str, Any]
 
@@ -613,9 +617,9 @@ def render_overview_tab() -> None:
             ]
             cols_show = [c for c in cols_pref if c in diag_df.columns]
             if cols_show:
-                st.dataframe(diag_df[cols_show], width = "stretch")
+                st.dataframe(diag_df[cols_show], use_container_width=True)
             else:
-                st.dataframe(diag_df, width = "stretch")
+                st.dataframe(diag_df, use_container_width=True)
         else:
             st.info("אין PairDiagnostics שמורים לזוג הזה (עדיין).")
 
@@ -640,6 +644,60 @@ def render_overview_tab() -> None:
         st.error("Pair statistical quality: BAD — האיתותים הסטטיסטיים חלשים / לא עקביים.")
     else:
         st.warning("Pair statistical quality: CAUTION — יש סימנים מעורבים, שווה להעמיק לפני השקעה כבדה.")
+
+    # ── Pair quality radar chart ───────────────────────────────
+    if _PLOTLY and go is not None and diag:
+        try:
+            def _safe_float(v, default=0.0):
+                try:
+                    return float(v)
+                except Exception:
+                    return default
+
+            # Normalize each dimension to [0,1] where 1 = best
+            corr_raw     = _safe_float(diag.get("corr"), 0.5)
+            coint_p_raw  = _safe_float(diag.get("coint_pvalue"), 0.5)
+            hl_raw       = _safe_float(diag.get("halflife"), 60.0)
+            hurst_raw    = _safe_float(diag.get("hurst"), 0.5)
+            n_obs_raw    = _safe_float(diag.get("n_obs"), 0.0)
+            adf_p_raw    = _safe_float(diag.get("adf_pvalue"), 0.5)
+
+            corr_score  = max(0.0, min(1.0, corr_raw))
+            coint_score = max(0.0, min(1.0, 1.0 - coint_p_raw / 0.20))   # p<0.01 → 1.0
+            hl_score    = max(0.0, min(1.0, 1.0 - abs(hl_raw - 15) / 60))  # ~15d ideal
+            hurst_score = max(0.0, min(1.0, 1.0 - hurst_raw / 0.5))       # <0.5 = MR
+            nobs_score  = max(0.0, min(1.0, n_obs_raw / 500.0))
+            adf_score   = max(0.0, min(1.0, 1.0 - adf_p_raw / 0.20))
+
+            dims   = ["Correlation", "Cointegration", "Half-life", "Hurst (MR)", "N obs", "ADF"]
+            scores = [corr_score, coint_score, hl_score, hurst_score, nobs_score, adf_score]
+            scores_closed = scores + [scores[0]]
+            dims_closed   = dims + [dims[0]]
+
+            fig_radar = go.Figure(go.Scatterpolar(
+                r=scores_closed,
+                theta=dims_closed,
+                fill="toself",
+                fillcolor="rgba(66,165,245,0.20)",
+                line=dict(color="#42A5F5", width=2),
+                name="Pair Quality",
+            ))
+            fig_radar.update_layout(
+                polar=dict(
+                    radialaxis=dict(range=[0, 1], visible=True, color="#ECEFF1"),
+                    angularaxis=dict(color="#ECEFF1"),
+                    bgcolor="rgba(0,0,0,0)",
+                ),
+                showlegend=False,
+                height=320,
+                plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+                font=dict(color="#ECEFF1"),
+                margin=dict(l=30, r=30, t=30, b=30),
+                title="Pair Statistical Quality Radar (0=worst, 1=best)",
+            )
+            st.plotly_chart(fig_radar, use_container_width=True)
+        except Exception as _radar_err:
+            st.caption(f"Radar chart error: {_radar_err}")
 
     # ---------- 2. Recommender vs Optimization vs Backtest ----------
     st.markdown("### 2️⃣ Recommender vs Optimization vs Backtest")
@@ -680,9 +738,9 @@ def render_overview_tab() -> None:
                         kpis[name] = s[c]
                         break
             if kpis:
-                st.dataframe(pd.DataFrame([kpis]), width = "stretch")
+                st.dataframe(pd.DataFrame([kpis]), use_container_width=True)
             else:
-                st.dataframe(pd.DataFrame([s.to_dict()]), width = "stretch")
+                st.dataframe(pd.DataFrame([s.to_dict()]), use_container_width=True)
         else:
             st.info("אין שורת אופטימיזציה מתאימה לזוג הזה ב-opt_df.")
 
@@ -701,21 +759,21 @@ def render_overview_tab() -> None:
             m_show = {k: bt_metrics.get(k) for k in main_keys if k in bt_metrics}
             if not m_show:
                 m_show = bt_metrics
-            st.dataframe(pd.DataFrame([m_show]), width = "stretch")
+            st.dataframe(pd.DataFrame([m_show]), use_container_width=True)
         else:
             st.info("אין מדדי Backtest זמינים.")
 
     with col3:
         if rec_params:
             st.markdown("**Pair Rec. params**")
-            st.dataframe(pd.DataFrame([rec_params]), width = "stretch")
+            st.dataframe(pd.DataFrame([rec_params]), use_container_width=True)
         else:
             st.info("אין pair_rec_params לזוג הזה.")
 
     comp_df = _build_param_comparison_table(rec_params, opt_row, bt_cfg)
     if comp_df is not None:
         st.markdown("#### 🔍 השוואת פרמטרים (Recommender / Optimization / Backtest)")
-        st.dataframe(comp_df, width = "stretch")
+        st.dataframe(comp_df, use_container_width=True)
 
         # אם Plotly קיים — נציג deviation plot
         if px is not None:
@@ -729,7 +787,7 @@ def render_overview_tab() -> None:
                 title="סטיות פרמטרים בין Recommender / Opt / Backtest",
             )
             fig.update_layout(xaxis_tickangle=-45)
-            st.plotly_chart(fig, width = "stretch")
+            st.plotly_chart(fig, use_container_width=True)
     else:
         st.info("לא הצלחנו לבנות טבלת השוואת פרמטרים — חסרים פרמטרים חופפים בין המקורות.")
 
@@ -763,7 +821,7 @@ def render_overview_tab() -> None:
             show = {k: port_snap.get(k) for k in keys_pref if k in port_snap}
             if not show:
                 show = port_snap
-            st.dataframe(pd.DataFrame([show]), width = "stretch")
+            st.dataframe(pd.DataFrame([show]), use_container_width=True)
         else:
             st.info("אין portfolio_snapshot ב-session. טאב Portfolio כנראה לא רץ עדיין.")
 
@@ -851,6 +909,43 @@ def render_overview_tab() -> None:
     else:
         st.info("לא נמצאה ריצת Advisor אחרונה. אפשר להריץ בטאב **🧬 Fair Value API**.")
 
+    # ---------- 5.5: Portfolio Allocator Result ----------
+    alloc_key = "allocation_cycle_result"
+    alloc_data = st.session_state.get(alloc_key)
+    if isinstance(alloc_data, dict):
+        st.markdown("### 5.5️⃣ Portfolio Allocator Result (last cycle)")
+        allocations = alloc_data.get("allocations", [])
+        diag_alloc  = alloc_data.get("diagnostics")
+        if allocations:
+            funded   = [a for a in allocations if getattr(a, "approved", False)]
+            unfunded = [a for a in allocations if not getattr(a, "approved", False)]
+            ca1, ca2, ca3 = st.columns(3)
+            ca1.metric("Funded pairs",   len(funded))
+            ca2.metric("Unfunded pairs", len(unfunded))
+            total_cap = sum(getattr(a, "approved_capital", 0.0) or 0.0 for a in funded)
+            ca3.metric("Capital allocated", f"${total_cap:,.0f}")
+
+            # show pair-level funded table
+            if funded:
+                rows_f = []
+                for a in funded:
+                    opp = getattr(a, "opportunity", None)
+                    pid = str(getattr(opp, "pair_id", "N/A") if opp else "N/A")
+                    rows_f.append({
+                        "Pair": pid,
+                        "Capital $": f"${getattr(a, 'approved_capital', 0):,.0f}",
+                        "Weight %": f"{(getattr(a, 'approved_weight', 0) or 0)*100:.1f}%",
+                        "Score": f"{getattr(opp, 'composite_score', 0):.3f}" if opp else "",
+                    })
+                st.dataframe(pd.DataFrame(rows_f), use_container_width=True)
+        else:
+            st.caption("Allocator cycle ran but returned no decisions.")
+
+        if diag_alloc is not None:
+            with st.expander("Allocator diagnostics", expanded=False):
+                diag_dict = diag_alloc.__dict__ if hasattr(diag_alloc, "__dict__") else {}
+                st.json({k: v for k, v in diag_dict.items() if not k.startswith("_")})
+
     # ---------- 6. Investment Readiness Verdict ----------
     st.markdown("### 6️⃣ החלטה לפני השקעה (Investment Readiness)")
 
@@ -860,6 +955,36 @@ def render_overview_tab() -> None:
         port_q=port_quality,
         macro_q=macro_quality,
     )
+
+    # ── Visual verdict panel ──────────────────────────────────
+    _QUAL_COLOR = {"good": "#4CAF50", "caution": "#FFA726", "bad": "#EF5350"}
+    _QUAL_PCT   = {"good": 100, "caution": 50, "bad": 15}
+    _QUAL_LABEL = {"good": "✅ GOOD", "caution": "⚠️ CAUTION", "bad": "❌ BAD"}
+
+    dims_verdict = {
+        "Pair Stats":  pair_quality,
+        "Backtest":    bt_quality,
+        "Portfolio":   port_quality,
+        "Macro":       macro_quality,
+    }
+    vcols = st.columns(len(dims_verdict))
+    for vcol, (dim_name, dim_q) in zip(vcols, dims_verdict.items()):
+        color = _QUAL_COLOR[dim_q]
+        pct   = _QUAL_PCT[dim_q]
+        label = _QUAL_LABEL[dim_q]
+        vcol.markdown(
+            f"""
+<div style="text-align:center;padding:8px 4px;">
+  <div style="font-size:.75rem;color:#90A4AE;margin-bottom:4px;">{dim_name}</div>
+  <div style="font-size:1rem;font-weight:700;color:{color};">{label}</div>
+  <div style="background:#37474F;border-radius:4px;height:6px;margin-top:6px;">
+    <div style="width:{pct}%;background:{color};height:6px;border-radius:4px;"></div>
+  </div>
+</div>""",
+            unsafe_allow_html=True,
+        )
+
+    st.markdown("")  # spacer
 
     if verdict == "GO":
         st.success("✅ Overall verdict: **GO** — התנאים נראים טובים יחסית מבחינת סטטיסטיקה, Backtest, סיכון ומאקרו.")

@@ -364,16 +364,89 @@ class PairsOrchestrator:
         Dispatch the DataIntegrityAgent to validate price data quality.
 
         This is the first real agent dispatch from operational code (P1-AGENTS).
-        The agent is READ_ONLY — it does not mutate any state.  It returns
-        typed AgentResult with audit trail.
+        Two dispatch paths exist:
+
+        1. **WorkflowEngine path** (``monitoring.workflow.run_data_integrity_workflow``)
+           — full WorkflowRun lifecycle, step-level audit, artifact capture,
+           dashboard alert emission.  Used when the monitoring.workflow module
+           is available.
+
+        2. **Direct registry dispatch** (fallback)
+           — calls ``registry.dispatch()`` directly, still typed and audited,
+           but without WorkflowEngine lifecycle management.
+
+        The agent is READ_ONLY in both paths — it never mutates state.
 
         Returns
         -------
         TaskResult or None
-            TaskResult wrapping the AgentResult, or None if dispatch fails.
+            TaskResult wrapping the result, or None if dispatch fails.
         """
         import time as _time
         t0 = _time.time()
+
+        # ── Path 1: WorkflowEngine (preferred) ────────────────────
+        try:
+            from monitoring.workflow import run_data_integrity_workflow
+            from orchestration.contracts import WorkflowStatus
+
+            outcome = run_data_integrity_workflow(
+                triggered_by="orchestrator_daily_pipeline",
+                emit_alerts=True,
+            )
+
+            elapsed = _time.time() - t0
+
+            # outcome is WorkflowOutcome (preferred) or WorkflowRun (fallback)
+            outcome_status = getattr(outcome, "status", None)
+            outcome_run_id = getattr(outcome, "run_id", "unknown")
+            steps_completed = getattr(outcome, "steps_completed", None)
+            steps_failed    = getattr(outcome, "steps_failed", None)
+            artifact_count  = getattr(outcome, "artifact_count", None)
+
+            # WorkflowStatus.COMPLETED or WorkflowStatus value from wf_run
+            from orchestration.contracts import WorkflowStatus
+            is_success = (
+                outcome_status == WorkflowStatus.COMPLETED
+                if outcome_status is not None else True
+            )
+
+            self.bus.publish("agent_data_integrity", {
+                "path": "workflow_engine",
+                "workflow_status": outcome_status.value if outcome_status else "unknown",
+                "steps_completed": steps_completed,
+                "steps_failed": steps_failed,
+                "duration_sec": round(elapsed, 2),
+            })
+            logger.info(
+                "Agent data_integrity (WorkflowEngine): status=%s duration=%.1fs",
+                outcome_status.value if outcome_status else "unknown",
+                elapsed,
+            )
+            return TaskResult(
+                task_name="agent_data_integrity",
+                status="success" if is_success else "failed",
+                duration_sec=round(elapsed, 2),
+                output={
+                    "path": "workflow_engine",
+                    "workflow_run_id": outcome_run_id,
+                    "workflow_status": outcome_status.value if outcome_status else "unknown",
+                    "steps_completed": steps_completed,
+                    "steps_failed": steps_failed,
+                    "artifact_count": artifact_count,
+                },
+            )
+
+        except ImportError:
+            # monitoring.workflow not available — fall through to direct dispatch
+            logger.debug("monitoring.workflow unavailable, using direct dispatch")
+        except Exception as wf_err:
+            logger.warning(
+                "WorkflowEngine dispatch failed (%s) — falling back to direct dispatch",
+                wf_err,
+            )
+
+        # ── Path 2: Direct registry dispatch (fallback) ───────────
         try:
             from agents.registry import get_default_registry
             from core.contracts import AgentTask, AgentStatus
@@ -384,25 +457,41 @@ class PairsOrchestrator:
                 logger.warning("DataIntegrityAgent not registered — skipping")
                 return None
 
-            # Create typed task
             task = AgentTask(
                 task_id=f"orch_di_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}",
                 agent_name="data_integrity",
                 task_type="check_data_integrity",
-                payload={},   # Agent handles missing prices gracefully
+                payload={},
                 priority=3,
                 correlation_id=f"daily_pipeline_{datetime.now(timezone.utc).date()}",
             )
 
-            # Dispatch via registry (typed, audited)
             result = registry.dispatch(task)
 
             elapsed = _time.time() - t0
             status = "success" if result.status == AgentStatus.COMPLETED else "failed"
-            issues = result.output.get("issues_found", 0) if result.output else 0
+            issues: int = result.output.get("issues_found", 0) if result.output else 0
+            critical: list = result.output.get("critical_issues", []) if result.output else []
+
+            # ── Alert bus (best-effort) ────────────────────────────
+            if issues > 0:
+                try:
+                    from core.alert_bus import emit_dashboard_alert
+                    level = "error" if issues >= 3 else "warning"
+                    emit_dashboard_alert(
+                        level=level,
+                        source="orchestrator:data_integrity",
+                        message=f"Data integrity: {issues} critical issue(s) detected",
+                        details={
+                            "critical_issues": critical[:5],
+                            "audit_trail_size": len(result.audit_trail),
+                        },
+                    )
+                except Exception:
+                    pass   # alert bus is best-effort
 
             logger.info(
-                "Agent data_integrity: status=%s, issues=%d, duration=%.1fs",
+                "Agent data_integrity (direct): status=%s issues=%d duration=%.1fs",
                 status, issues, elapsed,
             )
 
@@ -411,17 +500,17 @@ class PairsOrchestrator:
                 status=status,
                 duration_sec=round(elapsed, 2),
                 output={
-                    "agent_name": "data_integrity",
+                    "path": "direct_dispatch",
                     "agent_status": result.status.value,
                     "issues_found": issues,
-                    "critical_issues": result.output.get("critical_issues", []) if result.output else [],
+                    "critical_issues": critical,
                     "audit_trail_size": len(result.audit_trail),
                 },
             )
 
         except Exception as e:
             elapsed = _time.time() - t0
-            logger.warning("Agent data_integrity dispatch failed: %s", e)
+            logger.warning("Agent data_integrity direct dispatch failed: %s", e)
             return TaskResult(
                 task_name="agent_data_integrity",
                 status="failed",

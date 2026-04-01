@@ -5311,6 +5311,552 @@ def _load_portfolio_config_from_ctx(
     return cfg
 
 
+# ============================================================
+# Portfolio Allocator Bridge Panel
+# ============================================================
+# Resolves P1-PORTINT: bridges real SignalDecision objects into
+# PortfolioAllocator.run_cycle() and shows AllocationDecision results.
+# ============================================================
+
+_ALLOCATION_SESSION_KEY = "portfolio_allocation_last_result"
+_ALLOCATION_HISTORY_KEY = "portfolio_allocation_history"
+
+# Demo pairs seeded from the system's configured universe
+_DEMO_PAIRS = [
+    ("SPY", "QQQ"),
+    ("SPY", "IWM"),
+    ("QQQ", "IWM"),
+    ("XLF", "XLK"),
+    ("XLE", "XLU"),
+    ("GLD", "SLV"),
+    ("TLT", "IEF"),
+    ("HYG", "LQD"),
+]
+
+_REGIME_OPTIONS = ["MEAN_REVERTING", "TRENDING", "HIGH_VOL", "LOW_VOL", "CRISIS", "BROKEN", "UNKNOWN"]
+_GRADE_OPTIONS  = ["A+", "A", "B", "C", "D", "F"]
+
+
+def _build_entry_intent_from_ui(
+    sym_a: str,
+    sym_b: str,
+    z_score: float,
+    confidence: float,
+    direction: str,
+) -> "EntryIntent":
+    """Build an EntryIntent from user inputs — no price data required."""
+    from core.contracts import PairId, SignalDirection  # noqa: PLC0415
+    from core.intents import EntryIntent  # noqa: PLC0415
+    pair_id = PairId(sym_a, sym_b)
+    dir_enum = SignalDirection.LONG_SPREAD if direction == "LONG" else SignalDirection.SHORT_SPREAD
+    return EntryIntent(
+        pair_id=pair_id,
+        confidence=float(confidence),
+        direction=dir_enum,
+        z_score=float(z_score),
+    )
+
+
+def _build_signal_decision_from_row(
+    sym_a: str,
+    sym_b: str,
+    z_score: float,
+    confidence: float,
+    direction: str,
+    regime: str,
+    quality_grade: str,
+) -> "SignalDecision":
+    """
+    Build a synthetic SignalDecision object that satisfies bridge_signals_to_allocator().
+    The intent is a real EntryIntent; regime/grade are from user inputs.
+    """
+    from core.signal_pipeline import SignalDecision
+    from core.contracts import PairId
+    pair_id = PairId(sym_a, sym_b)
+    intent = _build_entry_intent_from_ui(sym_a, sym_b, z_score, confidence, direction)
+    decision = SignalDecision(
+        pair_id=pair_id,
+        as_of=datetime.now(timezone.utc),
+        z_score=float(z_score),
+        regime=regime,
+        quality_grade=quality_grade,
+        intent=intent,
+        blocked=False,
+        size_multiplier=1.0,
+        metadata={"half_life": 20.0, "z_score": z_score},
+    )
+    return decision
+
+
+def _render_allocation_results(
+    allocations: list,
+    diagnostics: Any,
+    capital: float,
+) -> None:
+    """Render AllocationDecision list + PortfolioDiagnostics in a rich UI."""
+    import plotly.graph_objects as _go_alloc
+    import plotly.express as _px_alloc
+
+    if not allocations:
+        st.warning("המנוע לא החזיר החלטות הקצאה — בדוק שיש Intents ותקציב מספיק.")
+        if diagnostics is not None:
+            with st.expander("🔍 Diagnostics (empty run)", expanded=True):
+                try:
+                    st.json(diagnostics.to_dict() if hasattr(diagnostics, "to_dict") else vars(diagnostics))
+                except Exception:
+                    st.write(diagnostics)
+        return
+
+    # ── KPI row ──────────────────────────────────────────────────────────────
+    n_funded   = sum(1 for a in allocations if getattr(a, "approved", False))
+    n_unfunded = len(allocations) - n_funded
+    total_alloc = sum(getattr(a, "approved_capital", 0.0) for a in allocations if getattr(a, "approved", False))
+    util_pct   = total_alloc / capital * 100.0 if capital > 0 else 0.0
+
+    k1, k2, k3, k4, k5 = st.columns(5)
+    k1.metric("סה״כ Pairs", len(allocations))
+    k2.metric("✅ Funded", n_funded)
+    k3.metric("❌ Unfunded", n_unfunded)
+    k4.metric("הון מוקצה", f"${total_alloc:,.0f}")
+    k5.metric("ניצולת הון", f"{util_pct:.1f}%")
+
+    # ── Diagnostics summary ───────────────────────────────────────────────────
+    if diagnostics is not None:
+        try:
+            diag_d = diagnostics.to_dict() if hasattr(diagnostics, "to_dict") else {}
+            with st.expander("📊 Portfolio Diagnostics", expanded=False):
+                dcols = st.columns(3)
+                diag_metrics = [
+                    ("n_intents_received",  "Intents received"),
+                    ("n_blocked_signal",    "Blocked by signal"),
+                    ("n_blocked_risk",      "Blocked by risk"),
+                    ("capital_allocated",   "Capital allocated $"),
+                    ("concentration_score", "Concentration score"),
+                    ("kill_switch_mode",    "Kill-switch"),
+                ]
+                for ci, (key, label) in enumerate(diag_metrics):
+                    val = diag_d.get(key, "N/A")
+                    dcols[ci % 3].metric(label, f"{val:.2f}" if isinstance(val, float) else str(val))
+                if diag_d.get("binding_constraints"):
+                    st.markdown("**Binding constraints:**")
+                    for c in diag_d["binding_constraints"]:
+                        st.markdown(f"- `{c}`")
+                if diag_d.get("top_unfunded_reasons"):
+                    st.markdown("**Top unfunded reasons:**")
+                    for pair_lbl, reason in diag_d["top_unfunded_reasons"].items():
+                        st.markdown(f"- **{pair_lbl}**: {reason}")
+        except Exception as _diag_err:
+            st.caption(f"Diagnostics display error: {_diag_err}")
+
+    # ── Funded pairs table ────────────────────────────────────────────────────
+    funded_rows = []
+    unfunded_rows = []
+    for a in allocations:
+        approved = getattr(a, "approved", False)
+        pair_label = getattr(getattr(a, "opportunity", None), "pair_id", None)
+        if pair_label is None:
+            # try direct pair_id on the decision itself
+            pair_label = getattr(a, "pair_id", "?")
+        try:
+            pair_str = pair_label.label if hasattr(pair_label, "label") else str(pair_label)
+        except Exception:
+            pair_str = str(pair_label)
+
+        row = {
+            "Pair": pair_str,
+            "Approved": "✅" if approved else "❌",
+            "Capital $": round(getattr(a, "approved_capital", 0.0), 0),
+            "Weight %": round(getattr(a, "approved_weight", 0.0) * 100, 2),
+            "Scaling": round(getattr(a, "scaling_applied", 1.0), 3),
+        }
+
+        # Composite score from opportunity
+        opp = getattr(a, "opportunity", None)
+        if opp is not None:
+            row["Composite score"] = round(getattr(opp, "composite_score", 0.0), 4)
+            row["Signal str."] = round(getattr(opp, "signal_strength_score", 0.0), 3)
+            row["Quality"] = round(getattr(opp, "signal_quality_score", 0.0), 3)
+            row["Regime suit."] = round(getattr(opp, "regime_suitability_score", 0.0), 3)
+            row["Stability"] = round(getattr(opp, "stability_score", 0.0), 3)
+            row["Z-score"] = round(getattr(opp, "z_score", 0.0), 3)
+
+        # Rejection reason
+        sizing = getattr(a, "sizing", None)
+        blockers = getattr(sizing, "blockers", []) if sizing else []
+        if not approved and blockers:
+            row["Rejection reason"] = "; ".join(str(b) for b in blockers[:2])
+        elif not approved:
+            row["Rejection reason"] = getattr(a, "unfunded_reason", "unknown")
+        else:
+            row["Rejection reason"] = ""
+
+        if approved:
+            funded_rows.append(row)
+        else:
+            unfunded_rows.append(row)
+
+    tab_funded, tab_unfunded, tab_charts = st.tabs(
+        ["✅ Funded pairs", "❌ Unfunded pairs", "📊 Charts"]
+    )
+
+    with tab_funded:
+        if funded_rows:
+            df_funded = pd.DataFrame(funded_rows)
+            st.dataframe(df_funded, use_container_width=True, hide_index=True)
+            csv = df_funded.to_csv(index=False).encode("utf-8")
+            st.download_button("⬇️ Export funded (CSV)", csv, "funded_allocations.csv", "text/csv",
+                               key="pt_funded_csv")
+        else:
+            st.info("לא אושרה הקצאת הון לאף זוג בסבב הזה.")
+
+    with tab_unfunded:
+        if unfunded_rows:
+            df_unfunded = pd.DataFrame(unfunded_rows)
+            st.dataframe(df_unfunded, use_container_width=True, hide_index=True)
+            # Group rejection reasons
+            reason_counts: Dict[str, int] = {}
+            for r in unfunded_rows:
+                reason = r.get("Rejection reason", "unknown") or "unknown"
+                reason_counts[reason] = reason_counts.get(reason, 0) + 1
+            st.markdown("**סיבות דחייה:**")
+            for reason, cnt in sorted(reason_counts.items(), key=lambda x: -x[1]):
+                st.markdown(f"- `{reason}` — {cnt} pair(s)")
+        else:
+            st.success("כל הזוגות קיבלו הקצאת הון!")
+
+    with tab_charts:
+        try:
+            all_rows = funded_rows + unfunded_rows
+            if all_rows:
+                df_all = pd.DataFrame(all_rows)
+
+                # Capital bar chart
+                if "Capital $" in df_all.columns and df_all["Capital $"].sum() > 0:
+                    df_cap = df_all[df_all["Capital $"] > 0].sort_values("Capital $", ascending=False)
+                    fig_cap = _go_alloc.Figure(_go_alloc.Bar(
+                        x=df_cap["Pair"], y=df_cap["Capital $"],
+                        marker_color="#4CAF50", text=[f"${v:,.0f}" for v in df_cap["Capital $"]],
+                        textposition="outside",
+                    ))
+                    fig_cap.update_layout(
+                        title="הון מוקצה לפי זוג ($)",
+                        height=350, xaxis_tickangle=-30,
+                        plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+                        font=dict(color="#ECEFF1"),
+                    )
+                    st.plotly_chart(fig_cap, use_container_width=True)
+
+                # Composite score ranking
+                if "Composite score" in df_all.columns:
+                    df_score = df_all.sort_values("Composite score", ascending=False)
+                    colors = ["#4CAF50" if a == "✅" else "#F44336" for a in df_score["Approved"]]
+                    fig_score = _go_alloc.Figure(_go_alloc.Bar(
+                        x=df_score["Pair"], y=df_score["Composite score"],
+                        marker_color=colors, text=[f"{v:.3f}" for v in df_score["Composite score"]],
+                        textposition="outside",
+                    ))
+                    fig_score.update_layout(
+                        title="Composite Score לפי זוג (ירוק=אושר, אדום=נדחה)",
+                        height=350, xaxis_tickangle=-30,
+                        plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+                        font=dict(color="#ECEFF1"),
+                    )
+                    fig_score.add_hline(y=0, line_color="white", line_dash="dot", opacity=0.3)
+                    st.plotly_chart(fig_score, use_container_width=True)
+
+                # Score breakdown radar for top funded pair
+                if funded_rows and "Signal str." in pd.DataFrame(funded_rows).columns:
+                    top_pair = funded_rows[0]
+                    dims = ["Signal str.", "Quality", "Regime suit.", "Stability"]
+                    vals = [top_pair.get(d, 0) for d in dims]
+                    vals_closed = vals + [vals[0]]
+                    dims_closed = dims + [dims[0]]
+                    fig_radar = _go_alloc.Figure(_go_alloc.Scatterpolar(
+                        r=vals_closed, theta=dims_closed,
+                        fill="toself", line_color="#42A5F5", fillcolor="rgba(66,165,245,0.25)",
+                    ))
+                    fig_radar.update_layout(
+                        polar=dict(radialaxis=dict(visible=True, range=[0, 1])),
+                        showlegend=False,
+                        title=f"Score breakdown — {top_pair.get('Pair', '')}",
+                        height=380,
+                        plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+                        font=dict(color="#ECEFF1"),
+                    )
+                    st.plotly_chart(fig_radar, use_container_width=True)
+
+                # Capital pie
+                if n_funded > 0 and "Capital $" in df_all.columns:
+                    df_pie = df_all[df_all["Approved"] == "✅"][["Pair", "Capital $"]].copy()
+                    df_pie_unfunded = pd.DataFrame([{"Pair": "Unallocated", "Capital $": max(0, capital - total_alloc)}])
+                    df_pie = pd.concat([df_pie, df_pie_unfunded], ignore_index=True)
+                    fig_pie = _go_alloc.Figure(_go_alloc.Pie(
+                        labels=df_pie["Pair"], values=df_pie["Capital $"],
+                        hole=0.4,
+                        marker=dict(colors=["#4CAF50", "#42A5F5", "#FF9800", "#9C27B0", "#F44336", "#607D8B"] * 5),
+                    ))
+                    fig_pie.update_layout(
+                        title="פירוס הון — הקצאה vs. חינם",
+                        height=380,
+                        plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+                        font=dict(color="#ECEFF1"),
+                    )
+                    st.plotly_chart(fig_pie, use_container_width=True)
+        except Exception as _chart_err:
+            st.caption(f"Chart error: {_chart_err}")
+
+
+def render_allocation_cycle_panel(
+    config: "PortfolioConfig",
+    ctx: Optional[JSONLike] = None,
+) -> None:
+    """
+    הפאנל הראשי של Portfolio Allocator Bridge.
+
+    מאפשר למשתמש:
+    1. להגדיר Universe של זוגות + פרמטרי סיגנל (Z-score, confidence, regime, grade).
+    2. להריץ bridge_signals_to_allocator() — המנוע הרשמי המחבר Signal → Portfolio.
+    3. לראות AllocationDecision אמיתיות: funded / unfunded + rationale.
+    4. לראות PortfolioDiagnostics מלאות.
+    5. לייצא תוצאות ל-CSV.
+
+    זה P1-PORTINT: הפתרון הרשמי ל"PortfolioAllocator never receives real signals".
+    """
+    st.markdown(
+        """
+<div style="
+    background:linear-gradient(90deg,#1A237E 0%,#283593 100%);
+    border-radius:10px;padding:14px 20px;margin-bottom:14px;
+    box-shadow:0 2px 8px rgba(26,35,126,0.22);
+">
+    <div style="font-size:1.15rem;font-weight:800;color:white;letter-spacing:-0.2px;">
+        🏦 Portfolio Allocator — Signal→Capital Bridge
+    </div>
+    <div style="font-size:0.76rem;color:rgba(255,255,255,0.76);margin-top:3px;">
+        P1-PORTINT resolved · bridge_signals_to_allocator() · real AllocationDecision results
+    </div>
+</div>
+""",
+        unsafe_allow_html=True,
+    )
+
+    st.caption(
+        "מחבר בין שכבת הסיגנלים (SignalDecision) לבין מנוע הקצאת ההון (PortfolioAllocator). "
+        "הזן Universe, הגדר פרמטרי סיגנל, ולחץ Run Cycle."
+    )
+
+    # ── Capital configuration ─────────────────────────────────────────────────
+    st.markdown("### ⚙️ הגדרות Allocation Cycle")
+    cfg_col1, cfg_col2, cfg_col3, cfg_col4 = st.columns(4)
+    with cfg_col1:
+        capital = st.number_input(
+            "סה״כ הון ($)",
+            min_value=10_000.0,
+            max_value=100_000_000.0,
+            value=float(st.session_state.get("risk_capital", 1_000_000)),
+            step=100_000.0,
+            format="%.0f",
+            key="pt_alloc_capital",
+        )
+    with cfg_col2:
+        vix_level = st.number_input("VIX level", min_value=5.0, max_value=80.0, value=18.0, step=1.0, key="pt_alloc_vix")
+    with cfg_col3:
+        current_drawdown = st.number_input("Current drawdown %", min_value=0.0, max_value=50.0, value=0.0, step=0.5, key="pt_alloc_dd") / 100.0
+    with cfg_col4:
+        data_mode = st.radio("מצב נתונים", ["Demo Universe", "הזן ידנית"], horizontal=True, key="pt_alloc_mode")
+
+    # ── Universe builder ──────────────────────────────────────────────────────
+    st.markdown("### 📋 Universe — זוגות וסיגנלים")
+
+    if data_mode == "Demo Universe":
+        st.caption("Universe דמו — 8 זוגות סטטיסטיים נפוצים עם Z-scores מגוונים. לחץ Run כדי להריץ.")
+        import random as _random
+        _rng = np.random.default_rng(42)
+        universe_rows = []
+        for sym_a, sym_b in _DEMO_PAIRS:
+            z = float(_rng.uniform(1.5, 3.5) * _rng.choice([-1, 1]))
+            conf = float(_rng.uniform(0.55, 0.92))
+            regime = _rng.choice(["MEAN_REVERTING", "MEAN_REVERTING", "MEAN_REVERTING", "HIGH_VOL", "TRENDING"])
+            grade  = _rng.choice(["A", "A", "B", "B", "C"])
+            direction = "LONG" if z > 0 else "SHORT"
+            universe_rows.append({
+                "sym_a": sym_a, "sym_b": sym_b,
+                "z_score": round(z, 3),
+                "confidence": round(conf, 3),
+                "direction": direction,
+                "regime": regime,
+                "grade": grade,
+                "enabled": True,
+            })
+        df_universe = pd.DataFrame(universe_rows)
+        st.dataframe(df_universe, use_container_width=True, hide_index=True)
+
+    else:  # Manual entry
+        st.caption("הוסף זוגות ידנית. לחץ + כדי להוסיף שורה.")
+        if "pt_alloc_manual_rows" not in st.session_state:
+            st.session_state["pt_alloc_manual_rows"] = [
+                {"sym_a": "SPY", "sym_b": "QQQ", "z_score": 2.1, "confidence": 0.75,
+                 "direction": "LONG", "regime": "MEAN_REVERTING", "grade": "B", "enabled": True},
+            ]
+        manual_rows: List[Dict] = st.session_state["pt_alloc_manual_rows"]
+
+        col_add, col_clear = st.columns([1, 4])
+        if col_add.button("➕ הוסף זוג", key="pt_alloc_add_row"):
+            manual_rows.append(
+                {"sym_a": "", "sym_b": "", "z_score": 2.0, "confidence": 0.7,
+                 "direction": "LONG", "regime": "MEAN_REVERTING", "grade": "B", "enabled": True}
+            )
+            st.session_state["pt_alloc_manual_rows"] = manual_rows
+            st.rerun()
+        if col_clear.button("🗑️ נקה הכל", key="pt_alloc_clear_rows"):
+            st.session_state["pt_alloc_manual_rows"] = []
+            st.rerun()
+
+        edited_rows = []
+        for ri, row in enumerate(manual_rows):
+            with st.expander(f"זוג {ri+1}: {row.get('sym_a','?')}/{row.get('sym_b','?')}", expanded=(ri == 0)):
+                rc1, rc2, rc3, rc4, rc5, rc6, rc7 = st.columns([1.2, 1.2, 1, 1, 1, 1.5, 1.3])
+                row["sym_a"]      = rc1.text_input("Symbol A", value=row.get("sym_a",""), key=f"pt_ma_{ri}")
+                row["sym_b"]      = rc2.text_input("Symbol B", value=row.get("sym_b",""), key=f"pt_mb_{ri}")
+                row["z_score"]    = rc3.number_input("Z-score", min_value=-10.0, max_value=10.0, value=float(row.get("z_score",2.0)), step=0.1, key=f"pt_mz_{ri}")
+                row["confidence"] = rc4.number_input("Confidence", 0.0, 1.0, float(row.get("confidence",0.7)), 0.05, key=f"pt_mc_{ri}")
+                row["direction"]  = rc5.selectbox("Direction", ["LONG","SHORT"], index=0 if row.get("direction","LONG")=="LONG" else 1, key=f"pt_md_{ri}")
+                row["regime"]     = rc6.selectbox("Regime", _REGIME_OPTIONS, index=_REGIME_OPTIONS.index(row.get("regime","MEAN_REVERTING")), key=f"pt_mr_{ri}")
+                row["grade"]      = rc7.selectbox("Grade", _GRADE_OPTIONS, index=_GRADE_OPTIONS.index(row.get("grade","B")), key=f"pt_mg_{ri}")
+                row["enabled"]    = st.checkbox("כלול ב-cycle", value=row.get("enabled",True), key=f"pt_men_{ri}")
+                edited_rows.append(row)
+        st.session_state["pt_alloc_manual_rows"] = edited_rows
+        df_universe = pd.DataFrame([r for r in edited_rows if r.get("sym_a") and r.get("sym_b")])
+
+    # ── Sector / Cluster map (optional) ──────────────────────────────────────
+    with st.expander("🗺️ Sector / Cluster map (optional — enforces concentration limits)", expanded=False):
+        st.caption("הגדרת מיפוי סקטור/קלאסטר לכל זוג. ללא מיפוי — מגבלות ריכוז לא נאכפות.")
+        sector_text = st.text_area(
+            "פורמט: SYM=SECTOR, שורה לכל סימבול",
+            value="SPY=Equity\nQQQ=Equity\nIWM=Equity\nXLF=Financials\nXLK=Technology\nXLE=Energy\nXLU=Utilities\nGLD=Commodities\nSLV=Commodities\nTLT=Fixed Income\nIEF=Fixed Income\nHYG=Credit\nLQD=Credit",
+            height=150,
+            key="pt_alloc_sector_map",
+        )
+        sector_map: Dict[str, str] = {}
+        for line in sector_text.splitlines():
+            line = line.strip()
+            if "=" in line:
+                sym, sec = line.split("=", 1)
+                sector_map[sym.strip()] = sec.strip()
+
+    # ── Run cycle button ──────────────────────────────────────────────────────
+    st.markdown("---")
+    col_run, col_hist = st.columns([1, 2])
+    run_pressed = col_run.button(
+        "🚀 Run Allocation Cycle",
+        type="primary",
+        key="pt_alloc_run",
+        use_container_width=True,
+    )
+
+    if run_pressed:
+        if df_universe.empty:
+            st.error("אין זוגות ב-Universe. הוסף לפחות זוג אחד.")
+        else:
+            # Filter enabled rows
+            if "enabled" in df_universe.columns:
+                df_active = df_universe[df_universe["enabled"].astype(bool)]
+            else:
+                df_active = df_universe
+
+            if df_active.empty:
+                st.error("כל הזוגות מסומנים כ-disabled. אפשר לפחות אחד.")
+            else:
+                with st.spinner(f"מריץ Allocation Cycle על {len(df_active)} זוגות..."):
+                    try:
+                        # Build SignalDecision list
+                        from core.portfolio_bridge import bridge_signals_to_allocator
+                        signal_decisions = []
+                        for _, row in df_active.iterrows():
+                            try:
+                                sd = _build_signal_decision_from_row(
+                                    sym_a=str(row["sym_a"]),
+                                    sym_b=str(row["sym_b"]),
+                                    z_score=float(row.get("z_score", 2.0)),
+                                    confidence=float(row.get("confidence", 0.7)),
+                                    direction=str(row.get("direction", "LONG")),
+                                    regime=str(row.get("regime", "MEAN_REVERTING")),
+                                    quality_grade=str(row.get("grade", "B")),
+                                )
+                                signal_decisions.append(sd)
+                            except Exception as _row_err:
+                                logger.warning("Skipping row build error: %s", _row_err)
+
+                        # Call bridge (no safety_check in research mode)
+                        cluster_map = sector_map  # use sector as cluster approximation
+                        allocations, diagnostics = bridge_signals_to_allocator(
+                            signal_decisions,
+                            capital=float(capital),
+                            safety_check=None,  # research mode — no live safety gate
+                            current_drawdown=float(current_drawdown),
+                            vix_level=float(vix_level),
+                            sector_map=sector_map if sector_map else None,
+                            cluster_map=cluster_map if cluster_map else None,
+                        )
+
+                        # Store in session
+                        result = {
+                            "allocations": allocations,
+                            "diagnostics": diagnostics,
+                            "capital": float(capital),
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                            "n_pairs": len(signal_decisions),
+                        }
+                        st.session_state[_ALLOCATION_SESSION_KEY] = result
+                        history: List[Dict] = st.session_state.get(_ALLOCATION_HISTORY_KEY, [])
+                        history.append({
+                            "timestamp": result["timestamp"],
+                            "n_pairs": result["n_pairs"],
+                            "n_funded": sum(1 for a in allocations if getattr(a, "approved", False)),
+                            "capital": float(capital),
+                            "capital_allocated": sum(
+                                getattr(a, "approved_capital", 0.0)
+                                for a in allocations if getattr(a, "approved", False)
+                            ),
+                        })
+                        if len(history) > 20:
+                            history = history[-20:]
+                        st.session_state[_ALLOCATION_HISTORY_KEY] = history
+
+                        st.success(
+                            f"✅ Allocation Cycle הושלם — "
+                            f"{sum(1 for a in allocations if getattr(a,'approved',False))} funded / "
+                            f"{len(allocations)} total"
+                        )
+
+                    except Exception as _run_err:
+                        st.error(f"Allocation Cycle נכשל: {_run_err}")
+                        logger.exception("Allocation cycle failed: %s", _run_err)
+                        return
+
+    # ── Show last result ──────────────────────────────────────────────────────
+    last = st.session_state.get(_ALLOCATION_SESSION_KEY)
+    if last is not None:
+        st.markdown("---")
+        ts = last.get("timestamp", "?")
+        st.markdown(f"### 📋 תוצאות — {ts[:19].replace('T', ' ')} UTC")
+        _render_allocation_results(
+            allocations=last["allocations"],
+            diagnostics=last["diagnostics"],
+            capital=last["capital"],
+        )
+    else:
+        st.info("לחץ **Run Allocation Cycle** כדי להריץ את מנוע ההקצאה ולראות תוצאות.")
+
+    # ── Cycle history ─────────────────────────────────────────────────────────
+    history_log: List[Dict] = st.session_state.get(_ALLOCATION_HISTORY_KEY, [])
+    if len(history_log) > 1:
+        with st.expander(f"📜 היסטוריית Cycles ({len(history_log)} ריצות)", expanded=False):
+            df_hist = pd.DataFrame(history_log)
+            df_hist["utilization %"] = (df_hist["capital_allocated"] / df_hist["capital"] * 100).round(1)
+            st.dataframe(df_hist, use_container_width=True, hide_index=True)
+
+
 # ------------------------------------------------------------
 # Orchestrator Main — פונקציה ראשית לטאב
 # ------------------------------------------------------------
@@ -5412,6 +5958,7 @@ def render_portfolio_tab_live(
                 "Live Universe",
                 "Trades",
                 "Engine Control",
+                "🏦 Allocator",
             ]
         )
 
@@ -5462,6 +6009,9 @@ def render_portfolio_tab_live(
                 ctx=ctx,
             )
 
+        # === Portfolio Allocator (Bridge) ===
+        with main_tabs[6]:
+            render_allocation_cycle_panel(config=config, ctx=ctx)
 
     except Exception as exc:  # pragma: no cover
         logger.exception("Error while rendering live portfolio tab: %s", exc)

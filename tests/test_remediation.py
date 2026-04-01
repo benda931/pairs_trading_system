@@ -895,7 +895,10 @@ class TestP1AgentDispatch:
         )
         assert result.task_name == "agent_data_integrity"
         assert result.output is not None
-        assert "agent_status" in result.output
+        # Output can come from WorkflowEngine path or direct dispatch path
+        assert "agent_status" in result.output or "workflow_status" in result.output, (
+            f"P1-AGENTS: output must contain agent_status or workflow_status, got {list(result.output.keys())}"
+        )
 
     def test_agent_does_not_mutate_state(self):
         """P1-AGENTS: DataIntegrityAgent is READ_ONLY — no side effects."""
