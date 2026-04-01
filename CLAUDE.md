@@ -31,10 +31,11 @@ for validation, and residual mean reversion is the primary alpha abstraction.
 >
 > **Integration status:**
 > - ML platform: designed and tested; zero models trained; ModelScorer never called from signal path
-> - **Agents: 1 of 40 agents dispatched from operational code.**
->   `DataIntegrityAgent` (`agents/monitoring_agents.py`) is dispatched by `PairsOrchestrator.run_daily_pipeline()`
->   after each `data_refresh` task via `monitoring/workflow.py` (WorkflowEngine) with alert bus integration.
->   39 remaining agents are registered in the registry but dispatched from nowhere (scaffold-only).
+> - **Agents: 2 of 40 agents dispatched from operational code.**
+>   `SystemHealthAgent` dispatched after `health_check`; `DataIntegrityAgent` dispatched after `data_refresh`.
+>   Both via `PairsOrchestrator.run_daily_pipeline()` → `monitoring/workflow.py` (WorkflowEngine),
+>   BOUNDED_SAFE, no approval gate, alert bus integration, direct-dispatch fallback.
+>   38 remaining agents are registered in the registry but dispatched from nowhere (scaffold-only).
 >   See `monitoring/workflow.py`, `core/orchestrator.py:run_agent_data_integrity_check()`.
 > - Portfolio allocator: `bridge_signals_to_allocator()` wired; receives real signals from signal pipeline.
 >   Dashboard UI panel in `root/portfolio_tab.py` allows manual dispatch.

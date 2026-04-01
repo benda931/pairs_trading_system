@@ -316,11 +316,19 @@ class PairsOrchestrator:
         """
         Execute the full daily pipeline in dependency order.
 
-        Pipeline: health_check → data_refresh → agent_checks → compute_signals → risk_check
+        Pipeline:
+            health_check (bare)
+            → agent_system_health (WorkflowEngine, P1-AGENTS)
+            → data_refresh
+            → agent_data_integrity (WorkflowEngine, P1-AGENTS)
+            → compute_signals
+            → risk_check
 
-        The agent_checks step dispatches the DataIntegrityAgent to validate
-        price data quality after data refresh (P1-AGENTS).  This is the first
-        real agent dispatch from operational code.
+        Two agent dispatches:
+        1. SystemHealthAgent (after health_check): validates all core modules
+           are importable. Second real agent dispatch from operational code.
+        2. DataIntegrityAgent (after data_refresh): validates price data quality.
+           First real agent dispatch from operational code.
         """
         logger.info("=" * 60)
         logger.info("Starting daily pipeline at %s", datetime.now(timezone.utc).isoformat())
@@ -336,7 +344,14 @@ class PairsOrchestrator:
                 results.append(result)
                 self._results.append(result)
 
-            # After data_refresh, dispatch agent integrity check (P1-AGENTS)
+            # After health_check, dispatch SystemHealthAgent (P1-AGENTS)
+            if name == "health_check":
+                agent_result = self.run_agent_system_health_check()
+                if agent_result is not None:
+                    results.append(agent_result)
+                    self._results.append(agent_result)
+
+            # After data_refresh, dispatch DataIntegrityAgent (P1-AGENTS)
             if name == "data_refresh":
                 agent_result = self.run_agent_data_integrity_check()
                 if agent_result is not None:
@@ -358,6 +373,148 @@ class PairsOrchestrator:
         })
 
         return results
+
+    def run_agent_system_health_check(self) -> Optional[TaskResult]:
+        """
+        Dispatch the SystemHealthAgent to validate core module importability.
+
+        Second real agent dispatch from operational code (P1-AGENTS).
+        Mirrors the two-path pattern of run_agent_data_integrity_check:
+
+        1. **WorkflowEngine path** (``monitoring.workflow.run_system_health_workflow``)
+           — full WorkflowRun lifecycle, step-level audit, artifact capture,
+           dashboard alert emission.
+
+        2. **Direct registry dispatch** (fallback on ImportError / exception).
+
+        READ_ONLY in both paths — never mutates state.
+
+        Returns
+        -------
+        TaskResult or None
+        """
+        import time as _time
+        t0 = _time.time()
+
+        # ── Path 1: WorkflowEngine (preferred) ────────────────────
+        try:
+            from monitoring.workflow import run_system_health_workflow
+            from orchestration.contracts import WorkflowStatus
+
+            outcome = run_system_health_workflow(
+                triggered_by="orchestrator_daily_pipeline",
+                emit_alerts=True,
+            )
+
+            elapsed = _time.time() - t0
+
+            outcome_status = getattr(outcome, "status", None)
+            outcome_run_id = getattr(outcome, "run_id", "unknown")
+            steps_completed = getattr(outcome, "steps_completed", None)
+            steps_failed    = getattr(outcome, "steps_failed", None)
+
+            is_success = (
+                outcome_status == WorkflowStatus.COMPLETED
+                if outcome_status is not None else True
+            )
+
+            self.bus.publish("agent_system_health", {
+                "path": "workflow_engine",
+                "workflow_status": outcome_status.value if outcome_status else "unknown",
+                "steps_completed": steps_completed,
+                "steps_failed": steps_failed,
+                "duration_sec": round(elapsed, 2),
+            })
+            logger.info(
+                "Agent system_health (WorkflowEngine): status=%s duration=%.1fs",
+                outcome_status.value if outcome_status else "unknown",
+                elapsed,
+            )
+            return TaskResult(
+                task_name="agent_system_health",
+                status="success" if is_success else "failed",
+                duration_sec=round(elapsed, 2),
+                output={
+                    "path": "workflow_engine",
+                    "workflow_run_id": outcome_run_id,
+                    "workflow_status": outcome_status.value if outcome_status else "unknown",
+                    "steps_completed": steps_completed,
+                    "steps_failed": steps_failed,
+                },
+            )
+
+        except ImportError:
+            logger.debug("monitoring.workflow unavailable, using direct dispatch for system_health")
+        except Exception as wf_err:
+            logger.warning(
+                "WorkflowEngine dispatch failed for system_health (%s) — falling back",
+                wf_err,
+            )
+
+        # ── Path 2: Direct registry dispatch (fallback) ───────────
+        try:
+            from agents.registry import get_default_registry
+            from core.contracts import AgentTask, AgentStatus
+
+            registry = get_default_registry()
+            agent = registry.get_agent("system_health")
+            if agent is None:
+                logger.warning("SystemHealthAgent not registered — skipping")
+                return None
+
+            task = AgentTask(
+                task_id=f"orch_sh_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}",
+                agent_name="system_health",
+                task_type="health_sweep",
+                payload={},
+                priority=3,
+                correlation_id=f"daily_pipeline_{datetime.now(timezone.utc).date()}",
+            )
+
+            result = registry.dispatch(task)
+            elapsed = _time.time() - t0
+            status = "success" if result.status == AgentStatus.COMPLETED else "failed"
+            unhealthy: list = result.output.get("unhealthy_components", []) if result.output else []
+            overall_healthy: bool = result.output.get("overall_healthy", True) if result.output else True
+
+            if not overall_healthy and unhealthy:
+                try:
+                    from core.alert_bus import emit_dashboard_alert
+                    emit_dashboard_alert(
+                        level="error",
+                        source="orchestrator:system_health",
+                        message=f"System health: {len(unhealthy)} component(s) unhealthy",
+                        details={"unhealthy_components": unhealthy[:10]},
+                    )
+                except Exception:
+                    pass
+
+            logger.info(
+                "Agent system_health (direct): status=%s unhealthy=%d duration=%.1fs",
+                status, len(unhealthy), elapsed,
+            )
+            return TaskResult(
+                task_name="agent_system_health",
+                status=status,
+                duration_sec=round(elapsed, 2),
+                output={
+                    "path": "direct_dispatch",
+                    "agent_status": result.status.value,
+                    "overall_healthy": overall_healthy,
+                    "unhealthy_components": unhealthy,
+                    "audit_trail_size": len(result.audit_trail),
+                },
+            )
+
+        except Exception as e:
+            elapsed = _time.time() - t0
+            logger.warning("Agent system_health direct dispatch failed: %s", e)
+            return TaskResult(
+                task_name="agent_system_health",
+                status="failed",
+                duration_sec=round(elapsed, 2),
+                error=str(e),
+            )
 
     def run_agent_data_integrity_check(self) -> Optional[TaskResult]:
         """

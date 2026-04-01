@@ -3,8 +3,8 @@
 tests/test_agent_dispatch.py — Agent Dispatch Integration Tests
 ===============================================================
 
-Tests for the DataIntegrityAgent workflow — the first real agent dispatch
-from operational code (P1-AGENTS).
+Tests for the DataIntegrityAgent and SystemHealthAgent workflows — the first
+two real agent dispatches from operational code (P1-AGENTS).
 
 These tests verify:
 1.  Workflow definition is structurally sound (WorkflowDefinition validates)
@@ -15,6 +15,9 @@ These tests verify:
 6.  Orchestrator can call the workflow via both paths (WorkflowEngine / direct)
 7.  Workflow is safe when prices=None (graceful no-data path)
 8.  CLI script entry point is importable
+9.  SystemHealthAgent workflow is structurally sound (mirrors §1)
+10. WorkflowEngine dispatches SystemHealthAgent and returns outcome (mirrors §2)
+11. Orchestrator run_agent_system_health_check() returns TaskResult (mirrors §6)
 """
 
 from __future__ import annotations
@@ -460,7 +463,7 @@ class TestScaffoldOnlyAgents:
     """
 
     # Agents that ARE legitimately dispatched from operational code
-    OPERATIONAL_AGENTS = frozenset({"data_integrity"})
+    OPERATIONAL_AGENTS = frozenset({"data_integrity", "system_health"})
 
     def test_scaffold_agents_are_registered(self, registry):
         """All expected scaffold agents must be present in the registry."""
@@ -474,12 +477,16 @@ class TestScaffoldOnlyAgents:
                 f"Scaffold agent {name!r} must be registered even if not dispatched"
             )
 
-    def test_daily_pipeline_source_dispatches_only_data_integrity(self):
-        """run_daily_pipeline source must reference only approved agents."""
+    def test_daily_pipeline_source_dispatches_only_approved_agents(self):
+        """run_daily_pipeline source must reference only approved agent dispatches."""
         import inspect
         from core.orchestrator import PairsOrchestrator
 
         source = inspect.getsource(PairsOrchestrator.run_daily_pipeline)
+
+        # These calls must be present — the two approved dispatches
+        assert "run_agent_data_integrity_check" in source
+        assert "run_agent_system_health_check" in source
 
         # Agents that must NOT appear in the pipeline source (scaffold only)
         disallowed_in_pipeline = [
@@ -517,4 +524,187 @@ class TestCLIScript:
         spec.loader.exec_module(mod)
         assert callable(getattr(mod, "main", None)), (
             "scripts/run_data_integrity.py must expose a callable main() function"
+        )
+
+
+# ══════════════════════════════════════════════════════════════════
+# 9. SystemHealthAgent — WorkflowDefinition structural soundness
+# ══════════════════════════════════════════════════════════════════
+
+
+@pytest.fixture(scope="module")
+def system_health_workflow_definition():
+    from monitoring.workflow import build_system_health_workflow
+    return build_system_health_workflow()
+
+
+class TestSystemHealthWorkflowDefinition:
+
+    def test_definition_is_not_none(self, system_health_workflow_definition):
+        assert system_health_workflow_definition is not None
+
+    def test_definition_has_one_step(self, system_health_workflow_definition):
+        assert len(system_health_workflow_definition.steps) == 1
+
+    def test_step_agent_is_system_health(self, system_health_workflow_definition):
+        step = system_health_workflow_definition.steps[0]
+        assert step.agent_name == "system_health", (
+            f"Expected agent_name='system_health', got {step.agent_name!r}"
+        )
+
+    def test_step_task_type_is_health_sweep(self, system_health_workflow_definition):
+        step = system_health_workflow_definition.steps[0]
+        assert step.task_type == "health_sweep"
+
+    def test_step_is_bounded_safe(self, system_health_workflow_definition):
+        from orchestration.contracts import RiskClass
+        step = system_health_workflow_definition.steps[0]
+        assert step.risk_class == RiskClass.BOUNDED_SAFE
+
+    def test_no_approval_gate(self, system_health_workflow_definition):
+        for step in system_health_workflow_definition.steps:
+            assert not step.requires_approval_before
+            assert not step.requires_approval_after
+
+    def test_on_failure_is_skip(self, system_health_workflow_definition):
+        step = system_health_workflow_definition.steps[0]
+        assert step.on_failure == "skip"
+
+    def test_workflow_is_idempotent(self, system_health_workflow_definition):
+        assert system_health_workflow_definition.idempotent is True
+
+
+# ══════════════════════════════════════════════════════════════════
+# 10. SystemHealthAgent — WorkflowEngine dispatch
+# ══════════════════════════════════════════════════════════════════
+
+
+class TestSystemHealthWorkflowDispatch:
+
+    def test_run_returns_outcome_with_run_id(self):
+        from monitoring.workflow import run_system_health_workflow
+        outcome = run_system_health_workflow(triggered_by="test_suite", emit_alerts=False)
+        assert outcome is not None
+        assert hasattr(outcome, "run_id"), (
+            "Outcome must have run_id attribute (WorkflowOutcome or WorkflowRun)"
+        )
+
+    def test_outcome_status_is_terminal(self):
+        from monitoring.workflow import run_system_health_workflow
+        from orchestration.contracts import WorkflowStatus
+        outcome = run_system_health_workflow(triggered_by="test_suite", emit_alerts=False)
+        status = getattr(outcome, "status", None)
+        if status is not None:
+            assert status in (WorkflowStatus.COMPLETED, WorkflowStatus.FAILED), (
+                f"Outcome status must be terminal, got: {status}"
+            )
+
+    def test_steps_count_sums_to_one(self):
+        from monitoring.workflow import run_system_health_workflow
+        outcome = run_system_health_workflow(triggered_by="test_suite", emit_alerts=False)
+        completed = getattr(outcome, "steps_completed", None)
+        failed = getattr(outcome, "steps_failed", None)
+        if completed is not None and failed is not None:
+            assert completed + failed == 1, (
+                f"Single-step workflow: completed+failed must equal 1, "
+                f"got completed={completed} failed={failed}"
+            )
+
+    def test_agent_result_output_has_required_keys(self, registry):
+        """SystemHealthAgent output must contain all required output keys."""
+        from core.contracts import AgentTask
+        task = AgentTask(
+            task_id="test_sh_output_keys_001",
+            agent_name="system_health",
+            task_type="health_sweep",
+            payload={},
+        )
+        result = registry.dispatch(task)
+        assert isinstance(result.output, dict)
+        required = {"component_health", "overall_healthy", "unhealthy_components", "warnings"}
+        missing = required - set(result.output.keys())
+        assert not missing, f"SystemHealthAgent output missing keys: {missing}"
+
+    def test_agent_result_audit_trail_non_empty(self, registry):
+        from core.contracts import AgentTask
+        task = AgentTask(
+            task_id="test_sh_audit_001",
+            agent_name="system_health",
+            task_type="health_sweep",
+            payload={},
+        )
+        result = registry.dispatch(task)
+        assert isinstance(result.audit_trail, list)
+        assert len(result.audit_trail) > 0
+
+    def test_agent_result_output_no_trade_keys(self, registry):
+        from core.contracts import AgentTask
+        FORBIDDEN = {"order", "orders", "trade", "trades", "kill_switch_trigger",
+                     "risk_limit_override", "force_exit", "execute"}
+        task = AgentTask(
+            task_id="test_sh_no_exec_001",
+            agent_name="system_health",
+            task_type="health_sweep",
+            payload={},
+        )
+        result = registry.dispatch(task)
+        actual = set(result.output.keys()) if result.output else set()
+        assert not (actual & FORBIDDEN), f"Forbidden keys in output: {actual & FORBIDDEN}"
+
+
+# ══════════════════════════════════════════════════════════════════
+# 11. SystemHealthAgent — Orchestrator integration
+# ══════════════════════════════════════════════════════════════════
+
+
+class TestSystemHealthOrchestratorIntegration:
+
+    def test_orchestrator_method_present(self):
+        from core.orchestrator import PairsOrchestrator
+        orch = PairsOrchestrator()
+        assert hasattr(orch, "run_agent_system_health_check"), (
+            "Orchestrator must expose run_agent_system_health_check()"
+        )
+
+    def test_orchestrator_dispatch_returns_task_result(self):
+        from core.orchestrator import PairsOrchestrator, TaskResult
+        orch = PairsOrchestrator()
+        result = orch.run_agent_system_health_check()
+        assert result is not None
+        assert isinstance(result, TaskResult)
+        assert result.task_name == "agent_system_health"
+
+    def test_orchestrator_result_output_has_path_key(self):
+        from core.orchestrator import PairsOrchestrator
+        orch = PairsOrchestrator()
+        result = orch.run_agent_system_health_check()
+        assert result is not None
+        assert result.output is not None
+        assert "path" in result.output
+        assert result.output["path"] in ("workflow_engine", "direct_dispatch")
+
+    def test_maybe_emit_health_alerts_does_not_raise_on_empty(self):
+        from monitoring.workflow import _maybe_emit_health_alerts
+        _maybe_emit_health_alerts(step_output={}, run_id="test_sh_run_001")
+
+    def test_maybe_emit_health_alerts_does_not_raise_on_unhealthy(self):
+        from monitoring.workflow import _maybe_emit_health_alerts
+        _maybe_emit_health_alerts(
+            step_output={
+                "overall_healthy": False,
+                "unhealthy_components": ["core.signals_engine", "ml.inference.scorer"],
+                "warnings": [],
+            },
+            run_id="test_sh_run_unhealthy",
+        )
+
+    def test_maybe_emit_health_alerts_does_not_raise_on_warnings_only(self):
+        from monitoring.workflow import _maybe_emit_health_alerts
+        _maybe_emit_health_alerts(
+            step_output={
+                "overall_healthy": True,
+                "unhealthy_components": [],
+                "warnings": ["core.sql_store: slow import (2500ms)"],
+            },
+            run_id="test_sh_run_warnings",
         )
