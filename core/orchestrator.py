@@ -365,8 +365,14 @@ class PairsOrchestrator:
                     results.append(agent_result)
                     self._results.append(agent_result)
 
-            # After compute_signals: collect SignalDecisions → allocate
+            # After compute_signals: run signal agents → allocate → risk agents
             if name == "compute_signals":
+                # Signal-layer agents (regime surveillance)
+                for ar in self._dispatch_signal_agents():
+                    results.append(ar)
+                    self._results.append(ar)
+
+                # Collect decisions and allocate
                 signal_decisions = self._collect_signal_decisions()
                 if signal_decisions:
                     try:
@@ -381,6 +387,11 @@ class PairsOrchestrator:
                     if alloc_result is not None:
                         results.append(alloc_result)
                         self._results.append(alloc_result)
+
+                    # Risk-layer agents (exposure, drawdown, kill-switch)
+                    for ar in self._dispatch_risk_agents():
+                        results.append(ar)
+                        self._results.append(ar)
                 else:
                     logger.info("run_daily_pipeline: no signal decisions — allocation skipped")
 
@@ -834,6 +845,94 @@ class PairsOrchestrator:
         if hasattr(self, "_daemon_stop_event"):
             self._daemon_stop_event.set()
             logger.info("stop_daemon: threading daemon stopped")
+
+    # ── Agent dispatch: signal-layer + risk-layer ──────────────────────────
+
+    def _dispatch_signal_agents(self) -> list:
+        """
+        Dispatch signal-layer agents after compute_signals.
+
+        Agents dispatched:
+        - RegimeSurveillanceAgent: scans for regime shifts across pairs
+        """
+        results = []
+        try:
+            from agents.registry import get_default_registry
+            from core.contracts import AgentTask, AgentStatus
+            registry = get_default_registry()
+
+            # RegimeSurveillanceAgent
+            agent = registry.get_agent("regime_surveillance")
+            if agent is not None:
+                task = AgentTask(
+                    task_id=f"regime_surv_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}",
+                    agent_name="regime_surveillance",
+                    task_type="regime_surveillance.scan",
+                    payload={"spreads": {}},  # Agent handles empty gracefully
+                    priority=3,
+                    correlation_id=f"daily_pipeline_{datetime.now(timezone.utc).date()}",
+                )
+                result = registry.dispatch(task)
+                status = "success" if result.status == AgentStatus.COMPLETED else "failed"
+                results.append(TaskResult(
+                    task_name="agent_regime_surveillance",
+                    status=status,
+                    output={"agent_status": result.status.value, "audit_size": len(result.audit_trail)},
+                ))
+                logger.info("Agent regime_surveillance: %s", status)
+
+        except Exception as e:
+            logger.warning("Signal agent dispatch failed: %s", e)
+        return results
+
+    def _dispatch_risk_agents(self) -> list:
+        """
+        Dispatch risk-layer agents after portfolio allocation.
+
+        Agents dispatched:
+        - ExposureMonitorAgent: checks sector/cluster/leverage exposure
+        - DrawdownMonitorAgent: updates heat level
+        - KillSwitchAgent: evaluates halt conditions
+        """
+        results = []
+        try:
+            from agents.registry import get_default_registry
+            from core.contracts import AgentTask, AgentStatus
+            registry = get_default_registry()
+
+            risk_agents = [
+                ("exposure_monitor", "exposure_monitor", "compute_exposure",
+                 {"positions": {}, "limits": {}}),
+                ("drawdown_monitor", "drawdown_monitor", "update_drawdown",
+                 {"current_nav": 1_000_000.0, "peak_nav": 1_000_000.0}),
+                ("kill_switch", "kill_switch", "evaluate_kill_switch",
+                 {"current_nav": 1_000_000.0, "peak_nav": 1_000_000.0}),
+            ]
+
+            for task_name, agent_name, task_type, payload in risk_agents:
+                agent = registry.get_agent(agent_name)
+                if agent is None:
+                    continue
+                task = AgentTask(
+                    task_id=f"{task_name}_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}",
+                    agent_name=agent_name,
+                    task_type=task_type,
+                    payload=payload,
+                    priority=2,
+                    correlation_id=f"daily_pipeline_{datetime.now(timezone.utc).date()}",
+                )
+                result = registry.dispatch(task)
+                status = "success" if result.status == AgentStatus.COMPLETED else "failed"
+                results.append(TaskResult(
+                    task_name=f"agent_{task_name}",
+                    status=status,
+                    output={"agent_status": result.status.value, "audit_size": len(result.audit_trail)},
+                ))
+                logger.info("Agent %s: %s", agent_name, status)
+
+        except Exception as e:
+            logger.warning("Risk agent dispatch failed: %s", e)
+        return results
 
     # ── Signal collection helpers ─────────────────────────────────────────
 

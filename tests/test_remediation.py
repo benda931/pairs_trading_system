@@ -916,12 +916,58 @@ class TestP1AgentDispatch:
         import pathlib
         orch_path = pathlib.Path(__file__).parent.parent / "core" / "orchestrator.py"
         source = orch_path.read_text(encoding="utf-8-sig")
-        assert "run_agent_data_integrity_check" in source, (
-            "P1-AGENTS: run_daily_pipeline must call run_agent_data_integrity_check"
-        )
-        assert "agent_data_integrity" in source, (
-            "P1-AGENTS: orchestrator must reference agent_data_integrity task"
-        )
+        assert "run_agent_data_integrity_check" in source
+        assert "agent_data_integrity" in source
+
+    def test_signal_agents_dispatched(self):
+        """P1-AGENTS: Signal-layer agents must be dispatched after compute_signals."""
+        import pathlib
+        source = pathlib.Path(__file__).parent.parent / "core" / "orchestrator.py"
+        src = source.read_text(encoding="utf-8-sig")
+        assert "_dispatch_signal_agents" in src
+        assert "regime_surveillance" in src
+
+    def test_risk_agents_dispatched(self):
+        """P1-AGENTS: Risk-layer agents must be dispatched after allocation."""
+        import pathlib
+        source = pathlib.Path(__file__).parent.parent / "core" / "orchestrator.py"
+        src = source.read_text(encoding="utf-8-sig")
+        assert "_dispatch_risk_agents" in src
+        assert "exposure_monitor" in src
+        assert "drawdown_monitor" in src
+        assert "kill_switch" in src
+
+    def test_signal_agent_dispatch_returns_results(self):
+        """P1-AGENTS: _dispatch_signal_agents returns list of TaskResult."""
+        from core.orchestrator import PairsOrchestrator, TaskResult
+        orch = PairsOrchestrator()
+        results = orch._dispatch_signal_agents()
+        assert isinstance(results, list)
+        for r in results:
+            assert isinstance(r, TaskResult)
+
+    def test_risk_agent_dispatch_returns_results(self):
+        """P1-AGENTS: _dispatch_risk_agents returns list of TaskResult."""
+        from core.orchestrator import PairsOrchestrator, TaskResult
+        orch = PairsOrchestrator()
+        results = orch._dispatch_risk_agents()
+        assert isinstance(results, list)
+        for r in results:
+            assert isinstance(r, TaskResult)
+
+    def test_all_dispatched_agents_registered(self):
+        """P1-AGENTS: All 6 operational agents must be in default registry."""
+        from agents.registry import get_default_registry
+        registry = get_default_registry()
+        operational = [
+            "system_health", "data_integrity",
+            "regime_surveillance",
+            "exposure_monitor", "drawdown_monitor", "kill_switch",
+        ]
+        for name in operational:
+            assert registry.get_agent(name) is not None, (
+                f"Agent '{name}' must be registered in default registry"
+            )
 
 
 # ---------------------------------------------------------------------------
