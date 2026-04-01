@@ -4874,6 +4874,8 @@ def render_optimization_tab(
         - experiment_name, opt_mode, meta_optimization_enabled וכו'.
     """
 
+    global SETTINGS  # noqa: PLW0603 — needed because SETTINGS may be reassigned below
+
     # Run-control flags – תמיד יהיו מוגדרים כדי למנוע UnboundLocalError
     dry_run: bool = False
     run_single: bool = False
