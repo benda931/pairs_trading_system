@@ -32,15 +32,22 @@ market-neutral, regime-aware, factor-aware relative-value system where:
 | Streamlit dashboard (15 tabs) | **Operational** | `root/` |
 | FMP / Yahoo Finance data integration | **Operational** | `common/` |
 
+## What Is Integrated (Wired into Operational Paths)
+
+| Capability | Status | Module |
+|---|---|---|
+| Regime-aware signal pipeline | **Default** backtester path (`use_signal_pipeline=True`) | `core/signal_pipeline.py` |
+| Portfolio construction and allocation | **Receives real signals** via `bridge_signals_to_allocator()` in daily pipeline | `portfolio/`, `core/portfolio_bridge.py` |
+| Agent dispatch (2 of 40) | SystemHealthAgent + DataIntegrityAgent dispatched from `run_daily_pipeline()` | `agents/`, `core/orchestrator.py` |
+| Runtime safety gating | `is_safe_to_trade()` injected in portfolio allocation cycle | `runtime/state.py` |
+
 ## What Is Infrastructure (Scaffolded, Not Yet Integrated)
 
 | Capability | Status | Module |
 |---|---|---|
-| Regime-aware signal pipeline | Implemented, not called from backtest path | `core/signal_pipeline.py` |
-| Portfolio construction and allocation | Implemented, never receives real signals | `portfolio/` |
-| ML platform (features, labels, inference) | Designed and tested, zero models trained | `ml/` |
-| Agent orchestration (33 agents) | Registered and tested, never dispatched operationally | `agents/` |
-| Governance, audit, surveillance | Implemented, not enforced at runtime | `governance/`, `audit/`, `surveillance/` |
+| ML platform (features, labels, inference) | Designed and tested, zero models trained in production | `ml/` |
+| Agent orchestration (38 of 40 agents) | Registered and tested, not dispatched operationally | `agents/` |
+| Governance, audit, surveillance | Implemented, not enforced at runtime (except model promotion gate) | `governance/`, `audit/`, `surveillance/` |
 | Runtime control plane | Implemented, no live system exists | `runtime/`, `control_plane/` |
 
 See `CLAUDE.md` "Current Integration Status" for the authoritative status register.
