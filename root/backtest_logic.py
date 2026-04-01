@@ -81,10 +81,10 @@ from volatility import (  # type: ignore
 )
 from common.utils import (  # type: ignore
     get_implied_volatility,
-    load_price_data,
     calculate_historical_volatility,
     calculate_beta,
 )
+from common.data_loader import load_price_data  # Canonical loader (NOT common.utils stub)
 
 # נסה להתחבר למנוע הבקטסט הראשי – לא חובה (המנוע המקומי עדיין זמין)
 try:
