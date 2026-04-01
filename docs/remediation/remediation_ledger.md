@@ -31,7 +31,7 @@
 | P1-SAFE | Runtime safety gating | P1 | COMPLETE | Orchestrator injects is_safe_to_trade via safety_check callback. Dashboard uses None (research mode). |
 | P1-SURV | Survivorship bias docs | P1 | COMPLETE | Explicit inline comment in universe.py |
 | P1-ML | Meta-label ML overlay wired to orchestrator | P1 | WIRED (opt-in) | Orchestrator loads models/meta_label_latest.pkl if present and passes as ml_quality_hook to SignalPipeline. Without model file, deterministic fallback continues. Train via: `python scripts/train_meta_label.py --save-path models/meta_label_latest.pkl` |
-| P1-AGENTS | Agent dispatch (6 of 40) | P1 | COMPLETE | run_daily_pipeline() dispatches 6 agents: SystemHealth + DataIntegrity (monitoring), RegimeSurveillance (signal-layer), ExposureMonitor + DrawdownMonitor + KillSwitch (risk-layer). |
+| P1-AGENTS | Agent dispatch (13 daily + 3 research) | P1 | COMPLETE | Daily pipeline dispatches 13 agents: monitoring (2), signal-layer (4: regime, analyst, lifecycle, exit), risk-layer (7: exposure, drawdown, kill-switch, capital, derisking, drift, alerts). Research agents (3) dispatched on demand via dispatch_research_agents(). |
 | P1-GOV | Governance gate | P1 | WIRED (opt-in) | Called in promote(). CRITICAL raises ValueError. Non-critical falls through. |
 | P1-AUDIT | Audit chains | P1 | DOWNGRADED | Scaffold |
 | P1-SURV2 | Stale data surveillance | P1 | COMPLETE | detect("SURV-DI-001") in load_price_data() |

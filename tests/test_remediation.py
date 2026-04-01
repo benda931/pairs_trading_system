@@ -956,18 +956,33 @@ class TestP1AgentDispatch:
             assert isinstance(r, TaskResult)
 
     def test_all_dispatched_agents_registered(self):
-        """P1-AGENTS: All 6 operational agents must be in default registry."""
+        """P1-AGENTS: All 13 operational agents must be in default registry."""
         from agents.registry import get_default_registry
         registry = get_default_registry()
         operational = [
+            # Monitoring (2)
             "system_health", "data_integrity",
-            "regime_surveillance",
+            # Signal-layer (4)
+            "regime_surveillance", "signal_analyst",
+            "trade_lifecycle", "exit_oversight",
+            # Risk-layer (7)
             "exposure_monitor", "drawdown_monitor", "kill_switch",
+            "capital_budget", "derisking",
+            "drift_monitoring", "alert_aggregation",
         ]
         for name in operational:
             assert registry.get_agent(name) is not None, (
                 f"Agent '{name}' must be registered in default registry"
             )
+
+    def test_research_agent_dispatch(self):
+        """P1-AGENTS: dispatch_research_agents returns results."""
+        from core.orchestrator import PairsOrchestrator, TaskResult
+        orch = PairsOrchestrator()
+        results = orch.dispatch_research_agents(symbols=["AAPL", "MSFT"])
+        assert isinstance(results, list)
+        for r in results:
+            assert isinstance(r, TaskResult)
 
 
 # ---------------------------------------------------------------------------

@@ -854,6 +854,9 @@ class PairsOrchestrator:
 
         Agents dispatched:
         - RegimeSurveillanceAgent: scans for regime shifts across pairs
+        - SignalAnalystAgent: classifies signal state per pair
+        - TradeLifecycleAgent: inspects lifecycle states for stale/blocked
+        - ExitOversightAgent: flags exit opportunities on open positions
         """
         results = []
         try:
@@ -861,25 +864,39 @@ class PairsOrchestrator:
             from core.contracts import AgentTask, AgentStatus
             registry = get_default_registry()
 
-            # RegimeSurveillanceAgent
-            agent = registry.get_agent("regime_surveillance")
-            if agent is not None:
+            signal_agents = [
+                ("regime_surveillance", "regime_surveillance.scan",
+                 {"spreads": {}}),
+                ("signal_analyst", "signal_analyst.classify",
+                 {"pair_id": "ALL", "spread": None}),
+                ("trade_lifecycle", "lifecycle.inspect",
+                 {"states": {}}),
+                ("exit_oversight", "exit_oversight.scan",
+                 {"open_positions": {}}),
+            ]
+
+            ts = datetime.now(timezone.utc)
+            for agent_name, task_type, payload in signal_agents:
+                agent = registry.get_agent(agent_name)
+                if agent is None:
+                    continue
                 task = AgentTask(
-                    task_id=f"regime_surv_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}",
-                    agent_name="regime_surveillance",
-                    task_type="regime_surveillance.scan",
-                    payload={"spreads": {}},  # Agent handles empty gracefully
+                    task_id=f"{agent_name}_{ts.strftime('%Y%m%d_%H%M%S')}",
+                    agent_name=agent_name,
+                    task_type=task_type,
+                    payload=payload,
                     priority=3,
-                    correlation_id=f"daily_pipeline_{datetime.now(timezone.utc).date()}",
+                    correlation_id=f"daily_pipeline_{ts.date()}",
                 )
                 result = registry.dispatch(task)
                 status = "success" if result.status == AgentStatus.COMPLETED else "failed"
                 results.append(TaskResult(
-                    task_name="agent_regime_surveillance",
+                    task_name=f"agent_{agent_name}",
                     status=status,
-                    output={"agent_status": result.status.value, "audit_size": len(result.audit_trail)},
+                    output={"agent_status": result.status.value,
+                            "audit_size": len(result.audit_trail)},
                 ))
-                logger.info("Agent regime_surveillance: %s", status)
+                logger.info("Agent %s: %s", agent_name, status)
 
         except Exception as e:
             logger.warning("Signal agent dispatch failed: %s", e)
@@ -893,6 +910,10 @@ class PairsOrchestrator:
         - ExposureMonitorAgent: checks sector/cluster/leverage exposure
         - DrawdownMonitorAgent: updates heat level
         - KillSwitchAgent: evaluates halt conditions
+        - CapitalBudgetAgent: checks capital availability
+        - DeRiskingAgent: computes de-risking when stressed
+        - DriftMonitoringAgent: checks feature/model drift
+        - AlertAggregationAgent: deduplicates and prioritises alerts
         """
         results = []
         try:
@@ -900,38 +921,114 @@ class PairsOrchestrator:
             from core.contracts import AgentTask, AgentStatus
             registry = get_default_registry()
 
+            ts = datetime.now(timezone.utc)
             risk_agents = [
-                ("exposure_monitor", "exposure_monitor", "compute_exposure",
+                ("exposure_monitor", "compute_exposure",
                  {"positions": {}, "limits": {}}),
-                ("drawdown_monitor", "drawdown_monitor", "update_drawdown",
+                ("drawdown_monitor", "update_drawdown",
                  {"current_nav": 1_000_000.0, "peak_nav": 1_000_000.0}),
-                ("kill_switch", "kill_switch", "evaluate_kill_switch",
+                ("kill_switch", "evaluate_kill_switch",
                  {"current_nav": 1_000_000.0, "peak_nav": 1_000_000.0}),
+                ("capital_budget", "check_capital_budget",
+                 {"pairs": [], "total_capital": 1_000_000.0}),
+                ("derisking", "compute_derisking",
+                 {"drawdown_state": {}, "active_allocations": []}),
+                ("drift_monitoring", "drift_sweep",
+                 {}),
+                ("alert_aggregation", "aggregate_alerts",
+                 {"alerts": []}),
             ]
 
-            for task_name, agent_name, task_type, payload in risk_agents:
+            for agent_name, task_type, payload in risk_agents:
                 agent = registry.get_agent(agent_name)
                 if agent is None:
                     continue
                 task = AgentTask(
-                    task_id=f"{task_name}_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}",
+                    task_id=f"{agent_name}_{ts.strftime('%Y%m%d_%H%M%S')}",
                     agent_name=agent_name,
                     task_type=task_type,
                     payload=payload,
                     priority=2,
-                    correlation_id=f"daily_pipeline_{datetime.now(timezone.utc).date()}",
+                    correlation_id=f"daily_pipeline_{ts.date()}",
                 )
                 result = registry.dispatch(task)
                 status = "success" if result.status == AgentStatus.COMPLETED else "failed"
                 results.append(TaskResult(
-                    task_name=f"agent_{task_name}",
+                    task_name=f"agent_{agent_name}",
                     status=status,
-                    output={"agent_status": result.status.value, "audit_size": len(result.audit_trail)},
+                    output={"agent_status": result.status.value,
+                            "audit_size": len(result.audit_trail)},
                 ))
                 logger.info("Agent %s: %s", agent_name, status)
 
         except Exception as e:
             logger.warning("Risk agent dispatch failed: %s", e)
+        return results
+
+    def dispatch_research_agents(self, symbols: list[str] | None = None) -> list:
+        """
+        Dispatch research-layer agents on demand (not in daily pipeline).
+
+        Use for: universe curation, candidate discovery, relationship validation,
+        spread specification, regime research, signal research, and summarization.
+
+        Parameters
+        ----------
+        symbols : list[str], optional
+            Symbols to research. Defaults to active pairs.
+
+        Returns
+        -------
+        list[TaskResult]
+        """
+        results = []
+        if symbols is None:
+            try:
+                from common.data_loader import load_pairs
+                pairs = load_pairs()
+                symbols = sorted({s for p in pairs for s in p.get("symbols", [])})
+            except Exception:
+                symbols = []
+
+        try:
+            from agents.registry import get_default_registry
+            from core.contracts import AgentTask, AgentStatus
+            registry = get_default_registry()
+
+            ts = datetime.now(timezone.utc)
+            research_agents = [
+                ("universe_curator", "curate_universe",
+                 {"symbols": symbols}),
+                ("candidate_discovery", "discover_candidates",
+                 {"symbols": symbols}),
+                ("research_summarization", "summarize_research_run",
+                 {}),
+            ]
+
+            for agent_name, task_type, payload in research_agents:
+                agent = registry.get_agent(agent_name)
+                if agent is None:
+                    continue
+                task = AgentTask(
+                    task_id=f"{agent_name}_{ts.strftime('%Y%m%d_%H%M%S')}",
+                    agent_name=agent_name,
+                    task_type=task_type,
+                    payload=payload,
+                    priority=5,
+                    correlation_id=f"research_run_{ts.date()}",
+                )
+                result = registry.dispatch(task)
+                status = "success" if result.status == AgentStatus.COMPLETED else "failed"
+                results.append(TaskResult(
+                    task_name=f"agent_{agent_name}",
+                    status=status,
+                    output={"agent_status": result.status.value,
+                            "audit_size": len(result.audit_trail)},
+                ))
+                logger.info("Research agent %s: %s", agent_name, status)
+
+        except Exception as e:
+            logger.warning("Research agent dispatch failed: %s", e)
         return results
 
     # ── Signal collection helpers ─────────────────────────────────────────
