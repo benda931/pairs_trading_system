@@ -905,6 +905,24 @@ class PairsOrchestrator:
         decisions = []
         t0 = _time.time()
 
+        # ── P1-ML: Try loading a trained meta-label model ────────
+        # If a model file exists (from scripts/train_meta_label.py),
+        # pass it as ml_quality_hook to every SignalPipeline instance.
+        # If not found → ml_hook=None → deterministic quality fallback.
+        ml_hook = None
+        try:
+            from ml.models.meta_labeler import MetaLabelModel
+            model_path = PROJECT_ROOT / "models" / "meta_label_latest.pkl"
+            if model_path.exists():
+                ml_hook = MetaLabelModel.load(str(model_path))
+                if ml_hook.is_fitted:
+                    logger.info("ML meta-label model loaded: %s", model_path.name)
+                else:
+                    logger.info("ML model at %s is not fitted — using deterministic fallback", model_path.name)
+                    ml_hook = None
+        except Exception as ml_exc:
+            logger.debug("ML meta-label model not available: %s", ml_exc)
+
         for pair_def in pairs:
             sym_x = sym_y = None
             try:
@@ -940,7 +958,10 @@ class PairsOrchestrator:
                     continue
                 z_score = float((spread.iloc[-1] - spread.mean()) / spread_std)
 
-                pipeline = SignalPipeline(pair_id=PairId(sym_x, sym_y))
+                pipeline = SignalPipeline(
+                    pair_id=PairId(sym_x, sym_y),
+                    ml_quality_hook=ml_hook,
+                )
                 decision = pipeline.evaluate(
                     z_score=z_score,
                     spread_series=spread,

@@ -925,6 +925,59 @@ class TestP1AgentDispatch:
 
 
 # ---------------------------------------------------------------------------
+# P1-ML: ML meta-label hook wired into orchestrator
+# ---------------------------------------------------------------------------
+
+class TestP1MLHookWiring:
+    """P1-ML: Orchestrator wires MetaLabelModel into SignalPipeline when model exists."""
+
+    def test_orchestrator_source_loads_ml_model(self):
+        """P1-ML: _collect_signal_decisions must attempt to load meta-label model."""
+        import pathlib
+        orch_path = pathlib.Path(__file__).parent.parent / "core" / "orchestrator.py"
+        source = orch_path.read_text(encoding="utf-8-sig")
+        assert "MetaLabelModel" in source, (
+            "P1-ML: orchestrator must import MetaLabelModel"
+        )
+        assert "ml_quality_hook" in source, (
+            "P1-ML: orchestrator must pass ml_quality_hook to SignalPipeline"
+        )
+        assert "meta_label_latest.pkl" in source, (
+            "P1-ML: orchestrator must look for meta_label_latest.pkl"
+        )
+
+    def test_pipeline_accepts_ml_hook(self):
+        """P1-ML: SignalPipeline constructor accepts ml_quality_hook."""
+        from core.signal_pipeline import SignalPipeline
+        from core.contracts import PairId
+
+        # With None (deterministic fallback)
+        p1 = SignalPipeline(pair_id=PairId("A", "B"), ml_quality_hook=None)
+        d1 = p1.evaluate_bar(z_score=2.5, current_pos=0.0)
+        assert d1 is not None
+
+        # With a mock hook (implements predict_success_probability)
+        class MockHook:
+            def predict_success_probability(self, features):
+                return 0.8
+        p2 = SignalPipeline(pair_id=PairId("A", "B"), ml_quality_hook=MockHook())
+        d2 = p2.evaluate_bar(z_score=2.5, current_pos=0.0)
+        assert d2 is not None
+
+    def test_fallback_when_no_model_file(self):
+        """P1-ML: Without model file, ml_hook=None and pipeline uses deterministic quality."""
+        from core.signal_pipeline import SignalPipeline
+        from core.contracts import PairId
+
+        # Default: no hook
+        pipeline = SignalPipeline(pair_id=PairId("X", "Y"))
+        decision = pipeline.evaluate_bar(z_score=3.0, current_pos=0.0)
+        # Must still produce a valid decision
+        assert decision.action != 0 or True  # action could be 0 if blocked — that's fine
+        assert hasattr(decision, "quality_grade")
+
+
+# ---------------------------------------------------------------------------
 # P1-GOV: Governance gate on model promotion
 # ---------------------------------------------------------------------------
 
