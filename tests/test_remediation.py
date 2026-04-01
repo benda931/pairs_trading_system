@@ -984,6 +984,42 @@ class TestP1AgentDispatch:
         for r in results:
             assert isinstance(r, TaskResult)
 
+    def test_ml_agent_dispatch(self):
+        """P1-AGENTS: dispatch_ml_agents returns results."""
+        from core.orchestrator import PairsOrchestrator, TaskResult
+        orch = PairsOrchestrator()
+        results = orch.dispatch_ml_agents()
+        assert isinstance(results, list)
+        for r in results:
+            assert isinstance(r, TaskResult)
+
+    def test_governance_agent_dispatch(self):
+        """P1-AGENTS: dispatch_governance_agents returns results."""
+        from core.orchestrator import PairsOrchestrator, TaskResult
+        orch = PairsOrchestrator()
+        results = orch.dispatch_governance_agents()
+        assert isinstance(results, list)
+        for r in results:
+            assert isinstance(r, TaskResult)
+
+    def test_portfolio_agent_dispatch(self):
+        """P1-AGENTS: dispatch_portfolio_agents returns results."""
+        from core.orchestrator import PairsOrchestrator, TaskResult
+        orch = PairsOrchestrator()
+        results = orch.dispatch_portfolio_agents()
+        assert isinstance(results, list)
+        for r in results:
+            assert isinstance(r, TaskResult)
+
+    def test_all_40_agents_registered(self):
+        """P1-AGENTS: All 40 agents must be in default registry."""
+        from agents.registry import get_default_registry
+        registry = get_default_registry()
+        agents = registry.list_agents()
+        assert len(agents) >= 40, (
+            f"Expected at least 40 agents, got {len(agents)}"
+        )
+
 
 # ---------------------------------------------------------------------------
 # P1-ML: ML meta-label hook wired into orchestrator

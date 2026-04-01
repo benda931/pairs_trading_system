@@ -965,47 +965,21 @@ class PairsOrchestrator:
             logger.warning("Risk agent dispatch failed: %s", e)
         return results
 
-    def dispatch_research_agents(self, symbols: list[str] | None = None) -> list:
-        """
-        Dispatch research-layer agents on demand (not in daily pipeline).
-
-        Use for: universe curation, candidate discovery, relationship validation,
-        spread specification, regime research, signal research, and summarization.
-
-        Parameters
-        ----------
-        symbols : list[str], optional
-            Symbols to research. Defaults to active pairs.
-
-        Returns
-        -------
-        list[TaskResult]
-        """
+    def _dispatch_agents_batch(
+        self,
+        agents_spec: list[tuple[str, str, dict]],
+        correlation_prefix: str = "pipeline",
+        priority: int = 4,
+    ) -> list:
+        """Generic agent batch dispatcher. Returns list[TaskResult]."""
         results = []
-        if symbols is None:
-            try:
-                from common.data_loader import load_pairs
-                pairs = load_pairs()
-                symbols = sorted({s for p in pairs for s in p.get("symbols", [])})
-            except Exception:
-                symbols = []
-
         try:
             from agents.registry import get_default_registry
             from core.contracts import AgentTask, AgentStatus
             registry = get_default_registry()
-
             ts = datetime.now(timezone.utc)
-            research_agents = [
-                ("universe_curator", "curate_universe",
-                 {"symbols": symbols}),
-                ("candidate_discovery", "discover_candidates",
-                 {"symbols": symbols}),
-                ("research_summarization", "summarize_research_run",
-                 {}),
-            ]
 
-            for agent_name, task_type, payload in research_agents:
+            for agent_name, task_type, payload in agents_spec:
                 agent = registry.get_agent(agent_name)
                 if agent is None:
                     continue
@@ -1014,8 +988,8 @@ class PairsOrchestrator:
                     agent_name=agent_name,
                     task_type=task_type,
                     payload=payload,
-                    priority=5,
-                    correlation_id=f"research_run_{ts.date()}",
+                    priority=priority,
+                    correlation_id=f"{correlation_prefix}_{ts.date()}",
                 )
                 result = registry.dispatch(task)
                 status = "success" if result.status == AgentStatus.COMPLETED else "failed"
@@ -1025,11 +999,86 @@ class PairsOrchestrator:
                     output={"agent_status": result.status.value,
                             "audit_size": len(result.audit_trail)},
                 ))
-                logger.info("Research agent %s: %s", agent_name, status)
-
+                logger.info("Agent %s: %s", agent_name, status)
         except Exception as e:
-            logger.warning("Research agent dispatch failed: %s", e)
+            logger.warning("Agent batch dispatch failed: %s", e)
         return results
+
+    def dispatch_research_agents(self, symbols: list[str] | None = None) -> list:
+        """
+        Dispatch all research-layer agents on demand.
+
+        Agents: universe_curator, candidate_discovery, universe_discovery,
+        pair_validation, relationship_validation, spread_fit, spread_specification,
+        regime_research, signal_research, experiment_coordinator, research_summarization
+        """
+        if symbols is None:
+            try:
+                from common.data_loader import load_pairs
+                pairs = load_pairs()
+                symbols = sorted({s for p in pairs for s in p.get("symbols", [])})
+            except Exception:
+                symbols = []
+
+        pair_ids = [f"{symbols[i]}/{symbols[i+1]}" for i in range(0, len(symbols) - 1, 2)] if len(symbols) >= 2 else []
+
+        return self._dispatch_agents_batch([
+            ("universe_curator", "curate_universe", {"symbols": symbols}),
+            ("universe_discovery", "discover_pairs", {"symbols": symbols}),
+            ("candidate_discovery", "discover_candidates", {"symbols": symbols}),
+            ("pair_validation", "validate_pairs", {"pair_ids": pair_ids}),
+            ("relationship_validation", "validate_relationships", {"pair_ids": pair_ids}),
+            ("spread_fit", "fit_spreads", {"pair_ids": pair_ids}),
+            ("spread_specification", "specify_spreads", {"pair_ids": pair_ids, "prices": {}}),
+            ("regime_research", "classify_regimes", {"spreads": {}}),
+            ("signal_research", "analyze_signal_quality", {"spreads": {}, "signals": {}}),
+            ("experiment_coordinator", "plan_experiment", {"experiment_type": "pair_scan"}),
+            ("research_summarization", "summarize_research_run", {}),
+        ], correlation_prefix="research", priority=5)
+
+    def dispatch_ml_agents(self) -> list:
+        """
+        Dispatch all ML-layer agents on demand.
+
+        Agents: feature_steward, label_governance, model_research,
+        meta_labeling, regime_modeling, model_risk, promotion_review
+        """
+        return self._dispatch_agents_batch([
+            ("feature_steward", "audit_feature_health", {}),
+            ("label_governance", "check_label_leakage", {}),
+            ("model_research", "evaluate_model", {}),
+            ("meta_labeling", "assess_meta_label", {}),
+            ("regime_modeling", "evaluate_regime_model", {}),
+            ("model_risk", "assess_model_risk", {}),
+            ("promotion_review", "check_promotion_criteria", {}),
+        ], correlation_prefix="ml_review", priority=4)
+
+    def dispatch_governance_agents(self) -> list:
+        """
+        Dispatch all governance-layer agents on demand.
+
+        Agents: policy_review, audit_trail_validation, approval_recommendation,
+        change_impact, promotion_gate, orchestration_reliability,
+        incident_triage, postmortem_drafting
+        """
+        return self._dispatch_agents_batch([
+            ("policy_review", "check_policy_compliance", {}),
+            ("audit_trail_validation", "validate_audit_trail", {}),
+            ("approval_recommendation", "recommend_approval", {}),
+            ("change_impact", "assess_change_impact", {}),
+            ("promotion_gate", "check_promotion_eligibility", {}),
+            ("orchestration_reliability", "check_workflow_health", {}),
+            ("incident_triage", "classify_severity",
+             {"title": "daily_check", "description": "routine", "affected_components": [], "detected_by": "orchestrator"}),
+            ("postmortem_drafting", "analyze_incident_pattern", {}),
+        ], correlation_prefix="governance_review", priority=4)
+
+    def dispatch_portfolio_agents(self) -> list:
+        """Dispatch portfolio construction agent on demand."""
+        return self._dispatch_agents_batch([
+            ("portfolio_construction", "run_allocation_cycle",
+             {"intents": [], "capital": 1_000_000.0}),
+        ], correlation_prefix="portfolio", priority=3)
 
     # ── Signal collection helpers ─────────────────────────────────────────
 
