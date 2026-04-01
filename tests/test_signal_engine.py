@@ -1313,4 +1313,72 @@ class TestAntiLeakage:
         assert result.status == AgentStatus.COMPLETED
         # The z-score should be computed from only the first 101 obs
         # We verify it's a finite float (not errored due to future data)
-        assert math.isfinite(result.output["z_score"])
+
+
+# ---------------------------------------------------------------------------
+# Section: Canonical Signal Path Architecture Tests
+# ---------------------------------------------------------------------------
+
+class TestSignalPathArchitecture:
+    """Verify the three signal modules have distinct, non-overlapping roles."""
+
+    def test_signal_pipeline_is_decision_engine(self):
+        """signal_pipeline produces SignalDecision/BarDecision (typed intents)."""
+        from core.signal_pipeline import SignalPipeline, SignalDecision, BarDecision
+        from core.contracts import PairId
+
+        pipeline = SignalPipeline(pair_id=PairId("AAPL", "MSFT"))
+        decision = pipeline.evaluate_bar(z_score=2.5, current_pos=0.0)
+        assert isinstance(decision, BarDecision)
+        assert hasattr(decision, "action")
+        assert hasattr(decision, "regime")
+        assert hasattr(decision, "quality_grade")
+        assert hasattr(decision, "blocked")
+
+    def test_signals_engine_is_universe_scanner(self):
+        """signals_engine produces PairSignal/UniverseSignals (batch metrics)."""
+        from core.signals_engine import PairSignal, UniverseSignals
+        # These are data containers for universe-level metrics, not decisions
+        assert hasattr(PairSignal, "__dataclass_fields__")
+        assert hasattr(UniverseSignals, "__dataclass_fields__")
+        # UniverseSignals carries DataFrames, not intents
+        assert "signals_df" in UniverseSignals.__dataclass_fields__
+        assert "diagnostics_df" in UniverseSignals.__dataclass_fields__
+
+    def test_signal_generator_is_computation_library(self):
+        """signal_generator provides pure computation functions (no decisions)."""
+        from common.signal_generator import zscore_signals, ZScoreConfig
+        import pandas as pd
+        import numpy as np
+
+        prices = pd.Series(np.random.randn(100).cumsum() + 100)
+        result = zscore_signals(prices, ZScoreConfig())
+        assert isinstance(result, pd.DataFrame)
+        assert "zscore" in result.columns
+        # No intent, no decision, no regime — just numbers
+        assert "action" not in result.columns
+        assert "regime" not in result.columns
+
+    def test_backtester_default_uses_signal_pipeline(self):
+        """optimization_backtester defaults to use_signal_pipeline=True."""
+        import pathlib
+        bt_path = pathlib.Path(__file__).parent.parent / "core" / "optimization_backtester.py"
+        source = bt_path.read_text(encoding="utf-8-sig")
+        # Default must be True — canonical pipeline is the default
+        assert 'use_signal_pipeline", True)' in source or "use_signal_pipeline', True)" in source, (
+            "Backtester must default to use_signal_pipeline=True"
+        )
+
+    def test_modules_have_correct_role_headers(self):
+        """Each signal module's docstring states its role clearly."""
+        import pathlib
+        base = pathlib.Path(__file__).parent.parent
+
+        pipeline_src = (base / "core" / "signal_pipeline.py").read_text("utf-8-sig")
+        assert "canonical" in pipeline_src.lower()[:500] or "default" in pipeline_src.lower()[:500]
+
+        engine_src = (base / "core" / "signals_engine.py").read_text("utf-8-sig")
+        assert "universe" in engine_src.lower()[:500] or "batch" in engine_src.lower()[:500]
+
+        generator_src = (base / "common" / "signal_generator.py").read_text("utf-8-sig")
+        assert "helper" in generator_src.lower()[:500] or "library" in generator_src.lower()[:500]

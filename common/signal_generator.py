@@ -1,11 +1,15 @@
 # -*- coding: utf-8 -*-
 """
-common/signal_generator.py — Hedge-Fund-Grade Signal Engine
-===========================================================
+common/signal_generator.py — Low-Level Signal Computation Library
+=================================================================
 
-מודול יצירת סיגנלים מקצועי למערכת המסחר הזוגי שלך.
+Role: Pure computation functions for technical indicators.
+This is a HELPER LIBRARY, not a decision engine.
 
-תומך ב־:
+For trade decisions, use:
+    core/signal_pipeline.py → SignalPipeline.evaluate() or evaluate_bar()
+
+Supported signal families:
     - Z-score / Spread Z-score
     - Bollinger Bands
     - CUSUM

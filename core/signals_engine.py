@@ -1,17 +1,25 @@
 # -*- coding: utf-8 -*-
 """
-core/signals_engine.py — High-Level Signals Engine for Pairs Trading
-====================================================================
+core/signals_engine.py — Universe-Level Batch Signal Scanner
+============================================================
 
-שכבת-על מעל common.signal_generator.SignalGenerator:
+Role: Batch computation of signal metrics across ALL pairs in the universe.
+Used for dashboard displays, universe scanning, SQL storage, and diagnostics.
 
-- עבודה ברמת זוג (PairSignal) וברמת יקום (UniverseSignals).
-- פרופילים לוגיים של אותות (SignalProfile) – mean_reversion / short_term / vol_arb / slow_mean_reversion.
-- אינטגרציה קלה עם לוגיקת MR (Z/β/HL), איכות (quality_score) ו־edge.
+This module is NOT the trade-decision engine.  For entry/exit decisions, use:
+    core/signal_pipeline.py → SignalPipeline.evaluate() or evaluate_bar()
 
-שימו לב:
-- מנוע הסיגנלים הטכני (Z-score, Bollinger, RSI, CUSUM וכו') יושב ב־common.signal_generator.
-- כאן אנחנו מגדירים את ה-*שימוש* בסיגנלים ברמת קרן (scans, dashboards, universe).
+Architecture:
+    common/signal_generator.py   Low-level signal computation (z-score, Bollinger, RSI)
+         ↓ (upstream dependency)
+    core/signals_engine.py       Universe scanning (this module) — PairSignal, UniverseSignals
+         ↓ (parallel, not upstream)
+    core/signal_pipeline.py      Trade-decision engine — SignalDecision, EntryIntent, ExitIntent
+
+Callers:
+    - orchestrator.task_compute_signals() → compute_universe_signals()
+    - sql_store → summarize_universe_signals()
+    - app_context → lazy module import for dashboard enrichment
 """
 
 from __future__ import annotations
