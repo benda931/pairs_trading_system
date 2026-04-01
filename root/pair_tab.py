@@ -1525,6 +1525,18 @@ def render_pair_tab(
             except Exception:
                 pairs_candidates = []
 
+    # 3.3b – מתוך pairs.json (via load_pairs) — canonical pair source
+    if not pairs_candidates:
+        try:
+            from common.data_loader import load_pairs as _load_pairs_file
+            raw_pairs = _load_pairs_file()
+            for rp in raw_pairs:
+                syms = rp.get("symbols", []) if isinstance(rp, dict) else []
+                if len(syms) >= 2:
+                    pairs_candidates.append(f"{syms[0]}/{syms[1]}")
+        except Exception:
+            pass
+
     # 3.4 – מתוך app_ctx עצמו (אם מכיל universe / ranked_pairs על האובייקט)
     if not pairs_candidates and app_ctx is not None:
         try:

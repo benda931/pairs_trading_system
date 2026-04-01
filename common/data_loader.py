@@ -238,6 +238,7 @@ def _clean_df(df: pd.DataFrame) -> pd.DataFrame:
     """
     Standardise a raw price DataFrame:
 
+    - flatten MultiIndex columns (yfinance >= 0.2.x returns these)
     - normalise column names (open/high/low/close/adj_close/volume)
     - ensure DatetimeIndex when possible
     - sort by index, drop duplicates
@@ -246,6 +247,21 @@ def _clean_df(df: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame()
 
     df = df.copy()
+
+    # ── Handle yfinance MultiIndex columns ───────────────────────
+    # yfinance >= 0.2.x returns columns like ('Close', 'AAPL') when
+    # downloading a single ticker.  Flatten to just 'Close'.
+    if isinstance(df.columns, pd.MultiIndex):
+        # Take the first level (Price type: Close, Open, High, Low, Volume)
+        df.columns = df.columns.get_level_values(0)
+        # Drop the 'Price'/'Ticker' metadata rows if they leaked in
+        if df.index.name == "Date":
+            pass  # Already has DatetimeIndex from yfinance
+        # Remove any rows where all values are the ticker name (string)
+        first_val = df.iloc[0, 0] if len(df) > 0 else None
+        if isinstance(first_val, str):
+            df = df.iloc[1:]  # Drop the "Ticker" label row
+
     df = _standardise_price_columns(df)
     df = _ensure_datetime_index(df)
 
