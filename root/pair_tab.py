@@ -40,6 +40,14 @@ from common.utils import (
     load_price_data,  # חשוב: להשתמש באותו loader כמו הדשבורד
 )
 
+# Clear stale price data cache on module load (ensures fresh data after CSV fixes)
+try:
+    from common.data_loader import _load_symbol_full_cached
+    if hasattr(_load_symbol_full_cached, "cache_clear"):
+        _load_symbol_full_cached.cache_clear()
+except Exception:
+    pass
+
 
 
 try:
@@ -140,6 +148,15 @@ def _fetch_leg_history(symbol: str, start_date: date, end_date: date, refresh: b
     ניסיון ראשון: MarketDataRouter (IBKR / ספקים אחרים).
     אם אין Router / אין דאטה → fallback ל-load_price_data ההיסטורי.
     """
+    # Clear LRU cache on refresh to pick up fixed CSV files
+    if refresh:
+        try:
+            from common.data_loader import _load_symbol_full_cached
+            if hasattr(_load_symbol_full_cached, "cache_clear"):
+                _load_symbol_full_cached.cache_clear()
+        except Exception:
+            pass
+
     router = st.session_state.get("md_router")
     preferred_source = st.session_state.get("data_source_preferred")
 
@@ -1454,6 +1471,11 @@ def render_pair_tab(
                 end_date = ed
     except Exception:
         pass
+
+    # Sanity: if start_date == end_date (broken context), reset to 1 year
+    if start_date >= end_date:
+        start_date = today.replace(year=today.year - 1)
+        end_date = today
 
     # ב. nav_payload יכול לדרוס תאריכים (למשל מה-Home / Matrix / Macro)
     nav_source = None

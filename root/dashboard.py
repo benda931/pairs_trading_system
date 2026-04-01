@@ -1264,7 +1264,7 @@ def _build_base_dashboard_context(
     # fallback סופי: dict פשוט
     if ctx_obj is None:
         ctx_obj = {
-            "start_date": today,
+            "start_date": today.replace(year=today.year - 1),
             "end_date": today,
             "env": env,
             "profile": profile,
