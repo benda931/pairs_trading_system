@@ -1,69 +1,68 @@
 # Integration Status Register
-**Date:** 2026-03-31
-**Authoritative source:** This document and CLAUDE.md "Current Integration Status"
+**Date:** 2026-04-01
+**Truth Audit:** Reconciled against actual code paths (not doc claims)
 
-This register tracks what is truly operational vs scaffolded infrastructure.
+## Status Key
+- **Operational** = Runs by default in real code paths
+- **Opt-in** = Code exists, tested, requires explicit flag/parameter to activate
+- **Available** = Defined and tested; no operational code invokes it
+- **Scaffold** = Infrastructure exists; no integration
 
-## System A (Operational)
+## System A (Operational by Default)
 
-These modules are actively used for backtesting, optimization, and dashboard rendering.
+| Module | Status | Notes |
+|--------|--------|-------|
+| `core/contracts.py` | **Operational** | Single source of truth for all domain types |
+| `core/optimization_backtester.py` | **Operational** | bar_lag=1 by default (P0-EXEC COMPLETE) |
+| `core/signals_engine.py` | **Operational** | Legacy coordinator; deprecation planned (P3-SIGMIG) |
+| `core/sql_store.py` | **Operational** | DuckDB persistence |
+| `core/orchestrator.py` | **Operational** | Pipeline defined, but run_daily_pipeline() has no trigger |
+| `common/signal_generator.py` | **Operational** | Z-score computation |
+| `common/data_loader.py` | **Operational** | Includes SURV-DI-001 surveillance hook (P1-SURV2 COMPLETE) |
+| `common/fmp_client.py` | **Operational** | FMP API connected |
+| `research/` | **Operational** | Discovery, validation, spread construction, walk-forward |
+| `root/dashboard.py` | **Operational** | 15 tabs, Streamlit UI |
+| `root/optimization_tab.py` | **Operational** | 63-day WF floor (P0-WF COMPLETE) |
 
-| Module | Description | Status |
-|--------|-------------|--------|
-| `core/contracts.py` | Domain types, enums, protocols | **Operational** |
-| `core/optimization_backtester.py` | Z-score mean-reversion backtester | **Operational** |
-| `core/signals_engine.py` | Signal computation (legacy coordinator) | **Operational** (deprecation planned per P3-SIGMIG) |
-| `core/pair_ranking.py` | Pair scoring for research | **Operational** (research scripts only) |
-| `core/sql_store.py` | DuckDB/SQLite persistence | **Operational** |
-| `core/orchestrator.py` | Daily pipeline orchestrator | **Operational** |
-| `common/signal_generator.py` | Z-score/Bollinger/RSI computation | **Operational** |
-| `common/data_loader.py` | Price data loading and caching | **Operational** |
-| `common/fmp_client.py` | FMP API client | **Operational** |
-| `research/discovery_pipeline.py` | Pair discovery orchestration | **Operational** |
-| `research/pair_validator.py` | Statistical validation | **Operational** |
-| `research/spread_constructor.py` | OLS/Rolling OLS/Kalman spreads | **Operational** |
-| `root/dashboard.py` | Streamlit dashboard (15 tabs) | **Operational** |
-| `root/optimization_tab.py` | Parameter optimization UI | **Operational** |
-| `root/backtest.py` | Backtest tab rendering | **Operational** |
+## Opt-In Integrations (tested, require explicit enablement)
 
-## System B (Infrastructure — Individually Tested, Not Integrated with System A)
+| Module | Flag/Mechanism | Default | Notes |
+|--------|---------------|---------|-------|
+| `core/signal_pipeline.py` | `use_signal_pipeline=True` in params | **True** | Default changed — SignalPipeline.evaluate_bar() is now the default backtester path (P1-PIPE COMPLETE) |
+| `portfolio/risk_ops.py` kill-switch callback | `control_plane_callback=fn` | **None** | Factory exists, never called operationally (P0-KS) |
+| `ml/registry/registry.py` governance gate | Governance check in promote() | **Active but advisory** | CRITICAL blocks; non-critical falls through (P1-GOV) |
 
-These modules are professionally designed, comprehensively tested in isolation,
-and awaiting integration with System A.
+## Available but Not Called Operationally
 
-| Module | Description | Tests | Integration Status |
-|--------|-------------|-------|--------------------|
-| `core/signal_pipeline.py` | Canonical signal pipeline (ADR-006) | Tested + Wired | **Integrated**: backtester calls `evaluate_bar()` when `use_signal_pipeline=True` (P1-PIPE COMPLETE) |
-| `core/threshold_engine.py` | Regime-conditioned thresholds | Tested | **Not called** from operational path |
-| `core/signal_quality.py` | Signal quality grading (A+ to F) | Tested | **Not called** from operational path |
-| `core/regime_engine.py` | Regime classification engine | Tested | **Not called** from operational path |
-| `core/lifecycle.py` | Trade lifecycle state machine | Tested | **Not called** from operational path |
-| `portfolio/allocator.py` | Portfolio construction engine | 82+ tests pass | **Integrated**: receives real EntryIntents via `core/portfolio_bridge.py` (P1-PORTINT COMPLETE) |
-| `portfolio/ranking.py` | Opportunity ranking (7 dimensions) | Tested | Only called from agents (not System A) |
-| `portfolio/risk_ops.py` | Drawdown/kill-switch managers | Tested | Kill-switch bridge incomplete (P0-KS) |
-| `ml/features/` | 61 feature definitions | Tested | No feature compute-correctness tests |
-| `ml/labels/` | 26 label definitions | Tested | No training pipeline exists |
-| `ml/inference/scorer.py` | ModelScorer with fallback | Tested | Always returns neutral 0.5 (no models) |
-| `ml/registry/` | Champion/challenger registry | Tested | Governance gate not enforced (P1-GOV) |
-| `agents/` | 33 registered agents | 91 tests pass | **Never dispatched** from operational workflow |
-| `governance/engine.py` | Governance policy engine | 100 tests pass | **Not enforced** at runtime (P1-GOV) |
-| `audit/chain.py` | Hash-linked audit chain | Tested | **All chains empty** (P1-AUDIT) |
-| `surveillance/engine.py` | 12 surveillance rules | Tested | **detect() never called** operationally (P1-SURV2) |
-| `runtime/state.py` | Runtime state manager | 113 tests pass | **Integrated**: `is_safe_to_trade()` callable via portfolio bridge `safety_check` callback (P1-SAFE COMPLETE). Architecture boundary preserved — core/ does not import runtime/. |
-| `control_plane/engine.py` | Control plane operations | Tested | No operational callers |
+| Module | What Exists | Why Not Called |
+|--------|-------------|---------------|
+| `core/portfolio_bridge.py` | bridge_signals_to_allocator() | Called from dashboard UI only, not backend (P1-PORTINT) |
+| `core/portfolio_bridge.py` safety_check | safety_check callback parameter | No caller injects is_safe_to_trade (P1-SAFE) |
+| `scripts/train_meta_label.py` | ML training + inference | No model wired to SignalPipeline operationally (P1-ML) |
+| `core/orchestrator.py` agent dispatch | 2 agents in run_daily_pipeline() | Pipeline itself has no CLI/cron trigger (P1-AGENTS) |
 
-## Known Backtest Limitations (ADR-007)
+## Scaffold (Individually Tested, No Operational Integration)
 
-| Limitation | Impact | Mitigation |
-|------------|--------|------------|
-| Same-close execution | Sharpe/PnL structurally optimistic | Documented; `bar_lag` param exists but not consumed |
-| Calendar-segment "walk-forward" | Not true expanding-window WF | 63-day floor; use `WalkForwardHarness` for rigor |
-| Flat cost model | Understates transaction costs | Document as limitation |
-| No survivorship filtering | Universe may include delisted stocks | `EligibilityFilter` mitigates partially |
+| Module | Tests | Notes |
+|--------|-------|-------|
+| `core/threshold_engine.py` | Tested | Called only through signal_pipeline (which is opt-in) |
+| `core/signal_quality.py` | Tested | Called only through signal_pipeline (which is opt-in) |
+| `core/regime_engine.py` | Tested | Called only through signal_pipeline (which is opt-in) |
+| `core/lifecycle.py` | Tested | Called only through signal_pipeline (which is opt-in) |
+| `portfolio/allocator.py` | 82+ tests | Called only through portfolio_bridge (dashboard manual) |
+| `ml/inference/scorer.py` | Tested | Always returns neutral 0.5 (no models trained) |
+| `agents/` (33 agents) | 91+ tests | 2 wired to pipeline, but pipeline never triggered |
+| `governance/engine.py` | 100 tests | Not enforced at runtime except in promote() |
+| `audit/chain.py` | Tested | All chains empty |
+| `surveillance/engine.py` | Tested | 12 rules; only SURV-DI-001 called operationally |
+| `runtime/state.py` | 113 tests | is_safe_to_trade() defined, never called |
+| `control_plane/engine.py` | Tested | No operational callers |
 
-## Cross-References
+## Backtest Limitations (ADR-007)
 
-- **Remediation findings:** `docs/remediation/remediation_ledger.md`
-- **Migration status:** `docs/migration/migration_ledger.md`
-- **Architecture decisions:** `docs/adr/ADR-001` through `ADR-007`
-- **CLAUDE.md:** Full platform handbook with extension guides
+| Limitation | Status | Notes |
+|------------|--------|-------|
+| Execution timing | **FIXED** | bar_lag=1 default (next-bar fill) |
+| Calendar WF | **HONESTLY LABELED** | 63-day floor, docstring warns "NOT true walk-forward" |
+| Flat cost model | DEFERRED | Acceptable for daily-frequency research |
+| Survivorship bias | DOCUMENTED | EligibilityFilter with explicit residual-risk comment |
