@@ -316,7 +316,12 @@
       "Bash(do echo:*)",
       "Bash(.venv/Scripts/python scripts/run_auto_improve.py --dry-run --cycle data)",
       "Bash(.venv/Scripts/python scripts/run_auto_improve.py --cycle data)",
-      "Bash(.venv/Scripts/python scripts/run_auto_improve.py)"
+      "Bash(.venv/Scripts/python scripts/run_auto_improve.py)",
+      "Bash(.venv/Scripts/python scripts/run_alpha_pipeline.py --top-n 15 --trials 20)",
+      "Bash(.venv/Scripts/python scripts/run_backtest.py)",
+      "Bash(.venv/Scripts/python scripts/run_backtest.py --pair XLI-XLB)",
+      "Bash(.venv/Scripts/python scripts/run_full_alpha.py --universe top30 --trials 30 --min-sharpe 0.3)",
+      "Bash(.venv/Scripts/python scripts/train_xgboost_model.py --all-alpha)"
     ]
   }
 }
