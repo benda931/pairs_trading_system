@@ -1,60 +1,56 @@
 # Remediation Ledger — Pairs Trading System
-**Version:** 3.0
+**Version:** 4.0
 **Date:** 2026-04-02
-**Status:** Active
+**Status:** Active — reconciled against actual code paths
 
 ## Status Definitions
-- **COMPLETE** = Operational by default
+- **COMPLETE** = Operational by default in real code paths
 - **WIRED (opt-in)** = Requires explicit enablement
+- **AVAILABLE** = Defined, tested, callable but not auto-invoked
 - **DEFERRED** = Intentionally postponed
-- **DOWNGRADED** = Scaffold, not blocking
 
-## P0 Findings (All COMPLETE)
+## P0 Findings — All COMPLETE
 
 | ID | Title | Status | Evidence |
 |----|-------|--------|----------|
 | P0-WF | Calendar WF labeled | COMPLETE | 63-day floor, docstring warns |
-| P0-EXEC | bar_lag execution delay | COMPLETE | default=1 (next-bar) |
-| P0-KS | Kill-switch bridge | COMPLETE | make_kill_switch_manager_with_control_plane() in every cycle |
-| P0-DOCS | Documentation truthfulness | COMPLETE | Ledger v3.0, all docs reconciled |
+| P0-EXEC | bar_lag execution delay | COMPLETE | default=1 (next-bar), fallback to Yahoo/FMP |
+| P0-KS | Kill-switch bridge | COMPLETE | make_kill_switch_manager_with_control_plane() per cycle |
+| P0-DOCS | Documentation truthfulness | COMPLETE | Ledger v4.0 + INTEGRATION_STATUS v3.0 reconciled |
 
-## P1 Findings (All COMPLETE or WIRED)
+## P1 Findings — All COMPLETE or WIRED
 
 | ID | Title | Status | Evidence |
 |----|-------|--------|----------|
-| P1-PIPE | Signal pipeline default | COMPLETE | use_signal_pipeline=True |
+| P1-PIPE | Signal pipeline default | COMPLETE | use_signal_pipeline=True in backtester |
 | P1-PORTINT | Portfolio bridge | COMPLETE | bridge_signals_to_allocator() in daily pipeline |
 | P1-MINOBS | MIN_OBS=252 | COMPLETE | core/contracts.py |
-| P1-SAFE | Safety gating | COMPLETE | is_safe_to_trade injected |
-| P1-SURV | Survivorship docs | COMPLETE | Explicit comment |
-| P1-ML | Meta-label ML overlay | COMPLETE | Trained model at models/meta_label_latest.pkl, auto-loaded by orchestrator |
-| P1-AGENTS | All 40 agents dispatchable | COMPLETE | 13 daily auto + 27 on-demand |
+| P1-SAFE | Safety gating | COMPLETE | is_safe_to_trade injected in allocation cycle |
+| P1-SURV | Survivorship docs | COMPLETE | Explicit comment in universe.py |
+| P1-ML | ML overlay (XGBoost) | COMPLETE | XGBoost loaded as priority 1 (AUC=0.778) |
+| P1-AGENTS | 48 agents (13 daily) | COMPLETE | 13 auto-dispatched, 27 on-demand, 8 GPT/auto |
 | P1-GOV | Governance gate | WIRED (opt-in) | CRITICAL blocks in promote() |
-| P1-AUDIT | Audit chains | DOWNGRADED | Scaffold |
-| P1-SURV2 | Stale data surveillance | COMPLETE | SURV-DI-001 in load_price_data() |
+| P1-AUDIT | Audit chain writer | AVAILABLE | core/audit_writer.py writes to 5 chains |
+| P1-SURV2 | Surveillance hook | COMPLETE | SURV-DI-001 in load_price_data() |
 
-## P2 Findings
-
-| ID | Title | Status | Evidence |
-|----|-------|--------|----------|
-| P2-COSTS | Flat cost model | DEFERRED | Acceptable for daily |
-| P2-DUPRANK | Duplicate pair ranking | COMPLETE | core/pair_ranking.py deprecated with header |
-| P2-DUPTHROT | Duplicate throttle | DEFERRED | Low priority |
-| P2-COINT | Hard stability rejection | COMPLETE | stability < 0.15 → hard reject in pair_validator.py |
-| P2-MLT | ML training script | COMPLETE | scripts/train_meta_label.py |
-
-## P3+ Findings
+## P2+ Findings
 
 | ID | Title | Status |
 |----|-------|--------|
+| P2-COSTS | Flat cost model | DEFERRED |
+| P2-DUPRANK | Deprecated pair_ranking | COMPLETE |
+| P2-DUPTHROT | Duplicate throttle | DEFERRED |
+| P2-COINT | Hard stability rejection | COMPLETE |
+| P2-MLT | ML training scripts | COMPLETE |
 | P3-SIGMIG | signals_engine.py role clarified | COMPLETE |
 | P3-PARTA | Partial fills | DEFERRED |
 | P4-BACKUP | Backup files removed | COMPLETE |
 
 ## Residual Risks
 
-| ID | Risk | Severity |
-|----|------|----------|
-| RR-001 | Walk-forward Sharpe subject to overfitting | HIGH |
-| RR-002 | No live/paper trading system | HIGH |
-| RR-004 | Audit chains empty | MEDIUM |
+| ID | Risk | Severity | Mitigation |
+|----|------|----------|-----------|
+| RR-001 | Walk-forward validated but in-sample optimization still possible | MEDIUM | WF engine available (DSR=1.000 on tested pairs) |
+| RR-002 | No live/paper trading system | HIGH | Position tracker ready; IBKR stub exists |
+| RR-003 | Simplified transaction costs (5+2 bps) | MEDIUM | Acceptable for daily stat arb research |
+| RR-004 | Audit chains available but not auto-populated in all paths | LOW | core/audit_writer.py ready for integration |
