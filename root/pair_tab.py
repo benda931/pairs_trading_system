@@ -205,11 +205,23 @@ def _fetch_leg_history(symbol: str, start_date: date, end_date: date, refresh: b
     try:
         df = df.copy()
         idx = pd.to_datetime(df.index)
+        df.index = idx
+
+        # Sanity: if start >= end, use last 252 trading days
+        if start_date >= end_date:
+            return df.tail(252)
+
         mask = (idx >= pd.Timestamp(start_date)) & (idx <= pd.Timestamp(end_date))
-        return df.loc[mask]
+        filtered = df.loc[mask]
+
+        # If filtering returned empty but we have data, return last 252 days
+        if filtered.empty and not df.empty:
+            return df.tail(252)
+
+        return filtered
     except Exception:
-        # אם חיתוך התאריכים נכשל – נחזיר את הדאטה כמו שהוא
-        return df
+        # If date slicing fails, return last 252 days
+        return df.tail(252) if not df.empty else df
 
 
 def _split_pair_label(label: str) -> Tuple[Optional[str], Optional[str]]:

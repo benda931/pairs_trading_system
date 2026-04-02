@@ -962,15 +962,30 @@ def compute_feature_flags(app_ctx: "AppContext") -> FeatureFlags:
     # - אפשר לבטל/להדליק ידנית דרך env var: PAIRS_FORCE_ALL_TABS
     raw_force = os.getenv("PAIRS_FORCE_ALL_TABS")
     if raw_force is None:
-        # ברירת מחדל: להראות הכל ב-dev/research
-        force_all_tabs = env in ("dev", "research")
+        # Changed: default to False — only show tabs that actually have data
+        # Set PAIRS_FORCE_ALL_TABS=1 to show all tabs including broken ones
+        force_all_tabs = False
     else:
         force_all_tabs = raw_force.strip().lower() not in ("0", "false", "no", "off")
 
-    # אם force_all_tabs=True → לא נסתמך על capabilities כדי להדליק/לכבות טאבים
+    # If force_all_tabs=True → show everything regardless of capabilities
     if force_all_tabs:
         for k in tabs_flags.keys():
             tabs_flags[k] = True
+
+    # Explicitly disable tabs that are known broken without SqlStore data
+    # These can be re-enabled by setting PAIRS_FORCE_ALL_TABS=1
+    if not force_all_tabs:
+        broken_without_data = {
+            "matrix",                # Needs .npz upload
+            "comparison_matrices",   # Needs SqlStore profiles
+            "insights",              # Needs backtest history
+            "smart_scan",            # Needs SqlStore dq_pairs
+            "fair_value",            # Needs separate API server
+        }
+        for k in broken_without_data:
+            if k in tabs_flags:
+                tabs_flags[k] = False
 
     flags: FeatureFlags = {
         "env": env,
@@ -1385,6 +1400,41 @@ def bootstrap_session(app_ctx: "AppContext", feature_flags: FeatureFlags) -> Non
     _ensure_session_default(SESSION_KEY_MACRO_CTX, {})
     _ensure_session_default(SESSION_KEY_RISK_CTX, {})
     _ensure_session_default(SESSION_KEY_EXPERIMENT_CTX, {})
+
+    # Auto-load latest backtest equity curves for Risk tab
+    if "risk_hist_df" not in st.session_state:
+        try:
+            from pathlib import Path as _P
+            eq_files = sorted(_P(PROJECT_ROOT / "logs" / "backtests").glob("equity_curves_*.csv"))
+            if eq_files:
+                import pandas as _pd
+                eq_df = _pd.read_csv(eq_files[-1], index_col=0, parse_dates=True)
+                if not eq_df.empty and len(eq_df.columns) > 0:
+                    # Use the first pair as equity, or portfolio if available
+                    col = "PORTFOLIO" if "PORTFOLIO" in eq_df.columns else eq_df.columns[0]
+                    risk_df = _pd.DataFrame({
+                        "date": eq_df.index,
+                        "equity": eq_df[col].values,
+                        "pnl": eq_df[col].diff().fillna(0).values,
+                    })
+                    risk_df = risk_df.set_index("date")
+                    st.session_state["risk_hist_df"] = risk_df
+                    logger.info("Auto-loaded risk_hist_df from %s (%d rows)", eq_files[-1].name, len(risk_df))
+        except Exception as exc:
+            logger.debug("Could not auto-load equity curves: %s", exc)
+
+    # Auto-load latest alpha pipeline results for Portfolio tab
+    if "alpha_pairs_config" not in st.session_state:
+        try:
+            from pathlib import Path as _P
+            alpha_file = _P(PROJECT_ROOT / "logs" / "alpha_results" / "alpha_pairs_latest.json")
+            if alpha_file.exists():
+                import json as _json
+                alpha_data = _json.loads(alpha_file.read_text())
+                st.session_state["alpha_pairs_config"] = alpha_data
+                logger.info("Auto-loaded %d alpha pair configs", len(alpha_data))
+        except Exception as exc:
+            logger.debug("Could not auto-load alpha configs: %s", exc)
 
     logger.info(
         "Session bootstrap complete: env=%s, profile=%s, run_id=%s, "
