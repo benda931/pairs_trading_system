@@ -87,10 +87,19 @@ def backtest_pair(
     sigma = spread.rolling(lookback, min_periods=lookback // 2).std().replace(0, np.nan)
     z = ((spread - mu) / sigma).fillna(0.0)
 
-    # ── Simulate trading ─────────────────────────────────────────
+    # ── Simulate trading (realistic dollar-neutral sizing) ──────
+    #
+    # Position sizing: each leg gets notional = capital * risk_per_trade.
+    # For a dollar-neutral pair: long leg_Y notional, short leg_X * beta notional.
+    # PnL = notional * (spread_return), where spread_return = d(spread)/spread_entry.
+    #
+    # This prevents inflated returns from micro-spreads (VOO/SPY, BND/AGG).
+    risk_per_trade = 0.20  # Risk 20% of equity per trade (realistic for pairs)
+
     equity = capital
     position = 0.0  # +1 = long spread, -1 = short spread, 0 = flat
     entry_spread = 0.0
+    trade_notional = 0.0
     holding_days = 0
     pending_entry = None  # (target_bar_idx, direction)
 
@@ -102,6 +111,8 @@ def backtest_pair(
     for i in range(lookback, len(z)):
         z_val = z.iloc[i]
         spread_val = spread.iloc[i]
+        px_val = px.iloc[i]
+        py_val = py.iloc[i]
         date_val = z.index[i]
 
         if np.isnan(z_val):
@@ -115,23 +126,35 @@ def backtest_pair(
             if i >= target_idx:
                 position = direction
                 entry_spread = spread_val
+                # Notional: risk_per_trade fraction of current equity per leg
+                trade_notional = equity * risk_per_trade
                 holding_days = 0
-                cost = capital * (commission_bps / 10000) * 2  # Round trip estimate at entry
+                # Commission: bps on notional * 4 legs (2 entry, 2 exit)
+                cost = trade_notional * 2 * (commission_bps / 10000)
                 equity -= cost
                 current_trade = {
                     "entry_date": str(date_val.date()),
                     "entry_z": float(z_val),
                     "entry_spread": float(spread_val),
+                    "entry_px": float(px_val),
+                    "entry_py": float(py_val),
                     "direction": "LONG" if direction > 0 else "SHORT",
+                    "notional": round(trade_notional, 2),
                     "entry_equity": equity,
                 }
                 pending_entry = None
 
-        # Mark to market PnL
+        # Mark to market PnL (realistic: based on return of spread)
         pnl_today = 0.0
-        if position != 0:
-            spread_change = spread_val - (spread.iloc[i - 1] if i > 0 else spread_val)
-            pnl_today = position * spread_change * (capital / spread.std())
+        if position != 0 and i > lookback:
+            # Return-based PnL: how much did the spread move as % of price
+            prev_px = px.iloc[i - 1]
+            prev_py = py.iloc[i - 1]
+            ret_y = (py_val - prev_py) / prev_py if prev_py != 0 else 0
+            ret_x = (px_val - prev_px) / prev_px if prev_px != 0 else 0
+            # Spread return for long spread: long Y, short X*beta
+            spread_ret = ret_y - beta * ret_x
+            pnl_today = position * spread_ret * trade_notional
             equity += pnl_today
             holding_days += 1
 
@@ -141,14 +164,18 @@ def backtest_pair(
                 if bar_lag <= 0:
                     position = 1.0
                     entry_spread = spread_val
+                    trade_notional = equity * risk_per_trade
                     holding_days = 0
-                    cost = capital * (commission_bps / 10000) * 2
+                    cost = trade_notional * 2 * (commission_bps / 10000)
                     equity -= cost
                     current_trade = {
                         "entry_date": str(date_val.date()),
                         "entry_z": float(z_val),
                         "entry_spread": float(spread_val),
+                        "entry_px": float(px_val),
+                        "entry_py": float(py_val),
                         "direction": "LONG",
+                        "notional": round(trade_notional, 2),
                         "entry_equity": equity,
                     }
                 else:
@@ -157,14 +184,18 @@ def backtest_pair(
                 if bar_lag <= 0:
                     position = -1.0
                     entry_spread = spread_val
+                    trade_notional = equity * risk_per_trade
                     holding_days = 0
-                    cost = capital * (commission_bps / 10000) * 2
+                    cost = trade_notional * 2 * (commission_bps / 10000)
                     equity -= cost
                     current_trade = {
                         "entry_date": str(date_val.date()),
                         "entry_z": float(z_val),
                         "entry_spread": float(spread_val),
+                        "entry_px": float(px_val),
+                        "entry_py": float(py_val),
                         "direction": "SHORT",
+                        "notional": round(trade_notional, 2),
                         "entry_equity": equity,
                     }
                 else:
@@ -182,8 +213,8 @@ def backtest_pair(
             exit_time = holding_days >= max_holding
 
             if exit_revert or exit_stop or exit_time:
-                # Close trade
-                cost = capital * (commission_bps / 10000) * 2
+                # Close trade — exit commission
+                cost = trade_notional * 2 * (commission_bps / 10000)
                 equity -= cost
 
                 if current_trade:
@@ -282,10 +313,60 @@ def backtest_benchmark(start_idx, end_idx, capital: float = 100_000.0) -> pd.Ser
     return capital * (spy / spy.iloc[0])
 
 
+def compute_portfolio_equity(results: list[dict], capital: float = 100_000.0) -> dict:
+    """Combine all pair equity curves into a portfolio-level result."""
+    curves = {}
+    for r in results:
+        if "equity_curve" in r and r["equity_curve"] is not None and len(r["equity_curve"]) > 0:
+            curves[r["pair"]] = r["equity_curve"]
+
+    if not curves:
+        return {"error": "No equity curves"}
+
+    # Equal-weight portfolio: allocate capital / n_pairs to each
+    n = len(curves)
+    weight = 1.0 / n
+
+    # Combine returns
+    all_returns = pd.DataFrame({
+        pair: eq.pct_change().fillna(0) for pair, eq in curves.items()
+    })
+    # Fill missing dates with 0 (pair not trading)
+    all_returns = all_returns.fillna(0)
+
+    # Portfolio return = equal-weighted average of pair returns
+    port_ret = all_returns.mean(axis=1)
+    port_eq = capital * (1 + port_ret).cumprod()
+
+    # Metrics
+    total_return = float((port_eq.iloc[-1] / capital - 1) * 100) if len(port_eq) > 0 else 0
+    sharpe = float(port_ret.mean() / port_ret.std() * np.sqrt(252)) if port_ret.std() > 0 else 0
+    dd = (port_eq - port_eq.cummax()) / port_eq.cummax()
+    max_dd = float(dd.min() * 100)
+    downside = port_ret[port_ret < 0]
+    sortino = float(port_ret.mean() / downside.std() * np.sqrt(252)) if len(downside) > 5 and downside.std() > 0 else 0
+    n_years = len(port_ret) / 252
+    cagr = float((port_eq.iloc[-1] / capital) ** (1 / max(n_years, 0.01)) - 1) * 100 if port_eq.iloc[-1] > 0 else 0
+
+    return {
+        "pair": f"PORTFOLIO ({n} pairs)",
+        "sharpe": round(sharpe, 3),
+        "sortino": round(sortino, 3),
+        "cagr": round(cagr, 2),
+        "max_dd": round(max_dd, 2),
+        "total_return": round(total_return, 2),
+        "n_trades": sum(r.get("n_trades", 0) for r in results),
+        "win_rate": round(sum(1 for r in results for t in r.get("trade_log", []) if t.get("pnl", 0) > 0)
+                         / max(sum(r.get("n_trades", 0) for r in results), 1) * 100, 1),
+        "equity_curve": port_eq,
+        "n_pairs": n,
+    }
+
+
 def print_results(results: list[dict], benchmark: pd.Series | None = None) -> None:
     """Print formatted backtest results."""
     print("\n" + "=" * 80)
-    print("  📊 BACKTEST RESULTS")
+    print("  📊 BACKTEST RESULTS — INDIVIDUAL PAIRS")
     print("=" * 80)
 
     if not results:
@@ -450,6 +531,31 @@ def main():
         benchmark = None
 
     print_results(results, benchmark)
+
+    # Portfolio-level result
+    portfolio = compute_portfolio_equity(results, args.capital)
+    if not portfolio.get("error"):
+        print("\n" + "=" * 80)
+        print("  📊 PORTFOLIO-LEVEL RESULT (equal-weight)")
+        print("=" * 80)
+        print(f"\n  Sharpe:  {portfolio['sharpe']:.2f}")
+        print(f"  Sortino: {portfolio['sortino']:.2f}")
+        print(f"  CAGR:    {portfolio['cagr']:.1f}%")
+        print(f"  MaxDD:   {portfolio['max_dd']:.1f}%")
+        print(f"  Return:  {portfolio['total_return']:.1f}%")
+        print(f"  Pairs:   {portfolio['n_pairs']}")
+        print(f"  Trades:  {portfolio['n_trades']}")
+
+        if benchmark is not None and len(benchmark) > 0:
+            spy_ret = (benchmark.iloc[-1] / benchmark.iloc[0] - 1) * 100
+            spy_sharpe = float(benchmark.pct_change().dropna().mean() / benchmark.pct_change().dropna().std() * np.sqrt(252))
+            alpha_ret = portfolio["total_return"] - spy_ret
+            alpha_sharpe = portfolio["sharpe"] - spy_sharpe
+            emoji = "🏆" if alpha_sharpe > 0 else "⚠️"
+            print(f"\n  {emoji} vs SPY: Return alpha={alpha_ret:+.1f}%  Sharpe alpha={alpha_sharpe:+.2f}")
+
+        results.append(portfolio)  # Include in save
+
     save_results(results, benchmark)
 
 
