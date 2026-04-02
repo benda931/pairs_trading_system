@@ -841,48 +841,64 @@ class OptimizationBacktester:
     # -----------------------------------------
     def run(self) -> Dict[str, float]:
         """
-        Execute the backtest and return the minimal perf dict.
+        Execute the backtest and return performance dict.
 
-        ⚠️ CURRENTLY (Part 1/6):
-        This is a SAFE PLACEHOLDER so that:
-        - the dashboard can import and display System Health,
-        - you can finish pasting Parts 2–6 without breaking anything.
-
-        Once Parts 2–6 are pasted, this method will:
-        - load price data
-        - build the spread
-        - generate signals & positions
-        - simulate PnL and equity
-        - compute full BacktestResult
-        and return `result.to_perf_dict()`.
+        Delegates to scripts.run_backtest.backtest_pair() which provides:
+        - Realistic position sizing (20% per trade)
+        - Return-based PnL (not spread-dollar)
+        - bar_lag=1 execution delay
+        - Commission costs
+        - Full equity curve and trade log
         """
-        logger.error(
-            "OptimizationBacktester.run() called while only Part 1/6 of "
-            "core/optimization_backtester.py is present. "
-            "Paste Parts 2–6 for a full production backtest."
-        )
+        try:
+            from scripts.run_backtest import backtest_pair
 
-        # Minimal zero-risk placeholder so the UI doesn't explode:
-        placeholder = BacktestResult(
-            sharpe=0.0,
-            profit=0.0,
-            max_drawdown=0.0,
-            sortino=0.0,
-            calmar=0.0,
-            win_rate=0.0,
-            n_trades=0,
-            avg_trade_pnl=0.0,
-            exposure=0.0,
-            turnover=0.0,
-            equity_curve=None,
-            stats={
-                "placeholder": True,
-                "reason": "Backtester not fully implemented (only Part 1/6 present).",
-                "config": self.config.to_dict(),
-                "params": dict(self.params),
-            },
-        )
-        return placeholder.to_perf_dict()
+            result = backtest_pair(
+                self.config.symbol_a,
+                self.config.symbol_b,
+                z_open=float(self.params.get("z_open", 2.0)),
+                z_close=float(self.params.get("z_close", 0.5)),
+                stop_z=float(self.params.get("stop_z", 4.0)),
+                lookback=int(self.params.get("lookback", 60)),
+                max_holding=int(self.params.get("max_holding_days", 60)),
+                capital=self.config.initial_capital,
+                commission_bps=self.config.commission_bps + self.config.slippage_bps,
+                bar_lag=int(self.params.get("bar_lag", 1)),
+                start_date=self.config.start,
+                end_date=self.config.end,
+            )
+
+            if result.get("error"):
+                logger.warning("Backtest failed for %s/%s: %s",
+                               self.config.symbol_a, self.config.symbol_b, result["error"])
+                return BacktestResult(sharpe=0, profit=0, max_drawdown=0, n_trades=0,
+                                      stats={"error": result["error"]}).to_perf_dict()
+
+            return BacktestResult(
+                sharpe=result.get("sharpe", 0),
+                profit=result.get("total_return", 0),
+                max_drawdown=result.get("max_dd", 0),
+                sortino=result.get("sortino", 0),
+                calmar=0,
+                win_rate=result.get("win_rate", 0),
+                n_trades=result.get("n_trades", 0),
+                avg_trade_pnl=result.get("avg_trade_pnl", 0),
+                exposure=0,
+                turnover=0,
+                equity_curve=result.get("equity_curve"),
+                stats={
+                    "params": result.get("params", {}),
+                    "profit_factor": result.get("profit_factor", 0),
+                    "total_pnl": result.get("total_pnl", 0),
+                },
+            ).to_perf_dict()
+
+        except Exception as exc:
+            logger.error("OptimizationBacktester.run() failed: %s", exc)
+            return BacktestResult(
+                sharpe=0, profit=0, max_drawdown=0, n_trades=0,
+                stats={"error": str(exc)},
+            ).to_perf_dict()
 
 
 # Alias for existing code that imports `Backtester`
@@ -2869,8 +2885,46 @@ def _bt_run_professional_plus(self: "OptimizationBacktester") -> Dict[str, float
     return perf
 
 
-# Override .run with the extended professional+ pipeline
-OptimizationBacktester.run = _bt_run_professional_plus  # type: ignore[assignment]
+# Override .run with the extended professional+ pipeline (with Yahoo/FMP fallback)
+_original_run_pro_plus = _bt_run_professional_plus
+
+def _bt_run_with_fallback(self) -> Dict[str, float]:
+    """Wrapper: try professional+ run, fall back to scripts.run_backtest on data failure."""
+    result = _original_run_pro_plus(self)
+
+    # If pro+ returned zeros (data load failed), try Yahoo/FMP fallback
+    if result.get("Sharpe", 0) == 0 and result.get("Profit", 0) == 0:
+        try:
+            from scripts.run_backtest import backtest_pair
+            bt_result = backtest_pair(
+                self.config.symbol_a, self.config.symbol_b,
+                z_open=float(self.params.get("z_open", 2.0)),
+                z_close=float(self.params.get("z_close", 0.5)),
+                stop_z=float(self.params.get("stop_z", 4.0)),
+                lookback=int(self.params.get("lookback", 60)),
+                capital=self.config.initial_capital,
+                bar_lag=int(self.params.get("bar_lag", 1)),
+            )
+            if not bt_result.get("error") and bt_result.get("n_trades", 0) > 0:
+                logger.info(
+                    "Backtest fallback via Yahoo/FMP for %s/%s: Sharpe=%.2f",
+                    self.config.symbol_a, self.config.symbol_b, bt_result["sharpe"],
+                )
+                return BacktestResult(
+                    sharpe=bt_result.get("sharpe", 0),
+                    profit=bt_result.get("total_return", 0),
+                    max_drawdown=bt_result.get("max_dd", 0),
+                    sortino=bt_result.get("sortino", 0),
+                    win_rate=bt_result.get("win_rate", 0),
+                    n_trades=bt_result.get("n_trades", 0),
+                    equity_curve=bt_result.get("equity_curve"),
+                ).to_perf_dict()
+        except Exception as exc:
+            logger.debug("Yahoo/FMP fallback also failed: %s", exc)
+
+    return result
+
+OptimizationBacktester.run = _bt_run_with_fallback  # type: ignore[assignment]
 
 # =========================
 # PART 6/6: Debug Snapshots, Export & Convenience Helper
