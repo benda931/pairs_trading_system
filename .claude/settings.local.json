@@ -297,7 +297,26 @@
       "Bash(curl -s http://localhost:8501)",
       "Bash(curl -s http://localhost:8501/_stcore/health)",
       "Bash(curl -s -o /dev/null -w \"%{http_code}\" http://localhost:8501/)",
-      "Bash(curl -s http://localhost:8502/)"
+      "Bash(curl -s http://localhost:8502/)",
+      "Bash(ls data/*.json)",
+      "Bash(ls data/*.csv)",
+      "Bash(ls data/pairs*)",
+      "Bash(find . -name *.parquet -not -path ./.venv/*)",
+      "Bash(.venv/Scripts/python -m pytest tests/test_signal_engine.py::TestSignalPathArchitecture -v --tb=short)",
+      "Bash(.venv/Scripts/python -m pytest tests/test_remediation.py::TestP1MLHookWiring -v --tb=short)",
+      "Bash(rm -rf .streamlit/cache)",
+      "Bash(rm -rf __pycache__)",
+      "Bash(find . -name \"__pycache__\" -not -path \"./.venv/*\" -exec rm -rf {} +)",
+      "Bash(while read:*)",
+      "Bash(do taskkill:*)",
+      "Bash(grep -l \"load_price_data\\\\|_load_symbol_full\" root/*.py)",
+      "Bash(grep -n \"from common.utils import.*load_price_data\" root/*.py)",
+      "Bash(grep -rn \"from common.utils import.*load_price_data\\\\|from common\\\\.utils import.*load_price\" root/*.py)",
+      "Bash(grep -rn \"from common.utils import\" root/*.py)",
+      "Bash(do echo:*)",
+      "Bash(.venv/Scripts/python scripts/run_auto_improve.py --dry-run --cycle data)",
+      "Bash(.venv/Scripts/python scripts/run_auto_improve.py --cycle data)",
+      "Bash(.venv/Scripts/python scripts/run_auto_improve.py)"
     ]
   }
 }

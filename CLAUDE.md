@@ -37,9 +37,13 @@ for validation, and residual mean reversion is the primary alpha abstraction.
 >   BOUNDED_SAFE, no approval gate, alert bus integration, direct-dispatch fallback.
 >   38 remaining agents are registered in the registry but dispatched from nowhere (scaffold-only).
 >   See `monitoring/workflow.py`, `core/orchestrator.py:run_agent_data_integrity_check()`.
-> - Portfolio allocator: `bridge_signals_to_allocator()` wired; receives real signals from signal pipeline.
->   Dashboard UI panel in `root/portfolio_tab.py` allows manual dispatch.
-> - Runtime/control plane: `is_safe_to_trade()` wired via `bridge_signals_to_allocator()` safety_check param.
+> - Portfolio allocator: `bridge_signals_to_allocator()` called from `run_daily_pipeline()` via
+>   `run_portfolio_allocation_cycle()` on every operational run (P1-PORTINT COMPLETE).
+>   Dashboard UI panel in `root/portfolio_tab.py` also allows manual dispatch.
+> - Runtime/control plane: `is_safe_to_trade()` injected as safety_check in every `run_portfolio_allocation_cycle()` call (P1-SAFE COMPLETE).
+>   Kill-switch: `make_kill_switch_manager_with_control_plane()` called per cycle (P0-KS COMPLETE).
+> - CLI pipeline trigger: `python scripts/run_daily_pipeline.py` runs the full pipeline end-to-end.
+>   Daemon mode: `start_daemon()` on PairsOrchestrator schedules daily runs (APScheduler or threading.Timer fallback).
 > - Governance/audit: implemented; no operational decision is gated by any governance check
 > - Walk-forward: `root/optimization_tab.py` does calendar stability validation (not true WF); UI now labeled
 >   "Temporal Stability Check — In-Sample Calendar Segments" with ADR-007 disclaimer (P0-WF COMPLETE).
@@ -825,8 +829,8 @@ Full documentation: `docs/agent_architecture.md`
 
 > **Integration Status:** Runtime infrastructure (RuntimeStateManager, ControlPlaneEngine,
 > AlertEngine, ReconciliationEngine) is implemented and tested. As of 2026-03-31, no live
-> or paper trading system exists. `is_safe_to_trade()` is never called from signal generation
-> or execution paths. See `docs/remediation/remediation_ledger.md:P1-SAFE`.
+> or paper trading system exists. `is_safe_to_trade()` is called via safety_check in
+> `run_portfolio_allocation_cycle()` (P1-SAFE COMPLETE). See `docs/remediation/remediation_ledger.md`.
 
 Full documentation: `docs/production_architecture.md`
 
