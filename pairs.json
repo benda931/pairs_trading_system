@@ -1,681 +1,1042 @@
 [
   {
     "id": "XLY-XLC",
-    "symbols": ["XLY", "XLC"],
+    "symbols": [
+      "XLY",
+      "XLC"
+    ],
     "category": "us_sector",
     "priority": 0.9,
     "note": "Consumer Discretionary vs Communication Services"
   },
   {
     "id": "XLY-XLP",
-    "symbols": ["XLY", "XLP"],
+    "symbols": [
+      "XLY",
+      "XLP"
+    ],
     "category": "us_sector_def_vs_cyc",
     "priority": 0.98,
     "note": "Classic Discretionary vs Staples (defensive vs cyclical)"
   },
   {
     "id": "XLI-XLB",
-    "symbols": ["XLI", "XLB"],
+    "symbols": [
+      "XLI",
+      "XLB"
+    ],
     "category": "us_sector_cyclicals",
     "priority": 0.9,
     "note": "Industrials vs Materials"
   },
   {
     "id": "XLY-XLI",
-    "symbols": ["XLY", "XLI"],
+    "symbols": [
+      "XLY",
+      "XLI"
+    ],
     "category": "us_sector_cyclicals",
     "priority": 0.85,
     "note": "Consumer Discretionary vs Industrials"
   },
   {
     "id": "XLC-XLK",
-    "symbols": ["XLC", "XLK"],
+    "symbols": [
+      "XLC",
+      "XLK"
+    ],
     "category": "us_sector_growth",
     "priority": 0.9,
     "note": "Communication Services vs Technology"
   },
   {
     "id": "XLY-XLK",
-    "symbols": ["XLY", "XLK"],
+    "symbols": [
+      "XLY",
+      "XLK"
+    ],
     "category": "us_sector_growth",
     "priority": 0.88,
     "note": "Consumer Discretionary vs Technology"
   },
   {
     "id": "XLY-XLV",
-    "symbols": ["XLY", "XLV"],
+    "symbols": [
+      "XLY",
+      "XLV"
+    ],
     "category": "us_sector_barbell",
     "priority": 0.82,
     "note": "Discretionary vs Health Care (growth vs defensive)"
   },
   {
     "id": "XBI-XRT",
-    "symbols": ["XBI", "XRT"],
+    "symbols": [
+      "XBI",
+      "XRT"
+    ],
     "category": "us_sector_thematic",
     "priority": 0.7,
     "note": "Biotech vs Retail"
   },
   {
     "id": "XBI-XLB",
-    "symbols": ["XBI", "XLB"],
+    "symbols": [
+      "XBI",
+      "XLB"
+    ],
     "category": "us_sector_thematic",
     "priority": 0.7,
     "note": "Biotech vs Materials"
   },
   {
     "id": "XLV-XLI",
-    "symbols": ["XLV", "XLI"],
+    "symbols": [
+      "XLV",
+      "XLI"
+    ],
     "category": "us_sector_barbell",
     "priority": 0.8,
     "note": "Health Care vs Industrials"
   },
   {
     "id": "XLV-XLB",
-    "symbols": ["XLV", "XLB"],
+    "symbols": [
+      "XLV",
+      "XLB"
+    ],
     "category": "us_sector_barbell",
     "priority": 0.8,
     "note": "Health Care vs Materials"
   },
   {
     "id": "XLP-XLRE",
-    "symbols": ["XLP", "XLRE"],
+    "symbols": [
+      "XLP",
+      "XLRE"
+    ],
     "category": "us_sector_defensive",
     "priority": 0.82,
     "note": "Staples vs Real Estate"
   },
   {
     "id": "XLP-XLK",
-    "symbols": ["XLP", "XLK"],
+    "symbols": [
+      "XLP",
+      "XLK"
+    ],
     "category": "us_sector_def_vs_growth",
     "priority": 0.88,
     "note": "Staples vs Tech"
   },
   {
     "id": "XLRE-XLV",
-    "symbols": ["XLRE", "XLV"],
+    "symbols": [
+      "XLRE",
+      "XLV"
+    ],
     "category": "us_sector_defensive",
     "priority": 0.78,
     "note": "Real Estate vs Health Care"
   },
   {
     "id": "XLRE-XLI",
-    "symbols": ["XLRE", "XLI"],
+    "symbols": [
+      "XLRE",
+      "XLI"
+    ],
     "category": "us_sector_cyclicals",
     "priority": 0.78,
     "note": "Real Estate vs Industrials"
   },
   {
     "id": "XLC-XLY",
-    "symbols": ["XLC", "XLY"],
+    "symbols": [
+      "XLC",
+      "XLY"
+    ],
     "category": "us_sector_consumer_media",
     "priority": 0.86,
     "note": "Communication Services vs Discretionary"
   },
   {
     "id": "XLC-XLV",
-    "symbols": ["XLC", "XLV"],
+    "symbols": [
+      "XLC",
+      "XLV"
+    ],
     "category": "us_sector_barbell",
     "priority": 0.78,
     "note": "Communication vs Health Care"
   },
   {
     "id": "XBI-XLK",
-    "symbols": ["XBI", "XLK"],
+    "symbols": [
+      "XBI",
+      "XLK"
+    ],
     "category": "us_sector_growth_thematic",
     "priority": 0.76,
     "note": "Biotech vs Technology"
   },
   {
     "id": "XBI-XLRE",
-    "symbols": ["XBI", "XLRE"],
+    "symbols": [
+      "XBI",
+      "XLRE"
+    ],
     "category": "us_sector_thematic",
     "priority": 0.7,
     "note": "Biotech vs Real Estate"
   },
   {
     "id": "XLI-XLK",
-    "symbols": ["XLI", "XLK"],
+    "symbols": [
+      "XLI",
+      "XLK"
+    ],
     "category": "us_sector_cyclicals",
     "priority": 0.85,
     "note": "Industrials vs Technology"
   },
   {
     "id": "XLI-XLP",
-    "symbols": ["XLI", "XLP"],
+    "symbols": [
+      "XLI",
+      "XLP"
+    ],
     "category": "us_sector_def_vs_cyc",
     "priority": 0.86,
     "note": "Industrials vs Staples"
   },
   {
     "id": "XLK-XLB",
-    "symbols": ["XLK", "XLB"],
+    "symbols": [
+      "XLK",
+      "XLB"
+    ],
     "category": "us_sector_cyclicals",
     "priority": 0.82,
     "note": "Technology vs Materials"
   },
   {
     "id": "XLK-XLV",
-    "symbols": ["XLK", "XLV"],
+    "symbols": [
+      "XLK",
+      "XLV"
+    ],
     "category": "us_sector_barbell",
     "priority": 0.82,
     "note": "Technology vs Health Care"
   },
   {
     "id": "XLV-XLP",
-    "symbols": ["XLV", "XLP"],
+    "symbols": [
+      "XLV",
+      "XLP"
+    ],
     "category": "us_sector_defensive",
     "priority": 0.85,
     "note": "Health Care vs Staples"
   },
   {
     "id": "XLP-XLB",
-    "symbols": ["XLP", "XLB"],
+    "symbols": [
+      "XLP",
+      "XLB"
+    ],
     "category": "us_sector_def_vs_cyc",
     "priority": 0.8,
     "note": "Staples vs Materials"
   },
   {
     "id": "XLB-XLRE",
-    "symbols": ["XLB", "XLRE"],
+    "symbols": [
+      "XLB",
+      "XLRE"
+    ],
     "category": "us_sector_cyclicals",
     "priority": 0.78,
     "note": "Materials vs Real Estate"
   },
   {
     "id": "XLRE-XLK",
-    "symbols": ["XLRE", "XLK"],
+    "symbols": [
+      "XLRE",
+      "XLK"
+    ],
     "category": "us_sector_growth_real_estate",
     "priority": 0.8,
     "note": "Real Estate vs Technology"
   },
   {
     "id": "XRT-XLU",
-    "symbols": ["XRT", "XLU"],
+    "symbols": [
+      "XRT",
+      "XLU"
+    ],
     "category": "us_sector_def_vs_cyc",
     "priority": 0.75,
     "note": "Retail vs Utilities"
   },
   {
     "id": "XBI-XLP",
-    "symbols": ["XBI", "XLP"],
+    "symbols": [
+      "XBI",
+      "XLP"
+    ],
     "category": "us_sector_def_vs_thematic",
     "priority": 0.72,
     "note": "Biotech vs Staples"
   },
   {
     "id": "XRT-XLK",
-    "symbols": ["XRT", "XLK"],
+    "symbols": [
+      "XRT",
+      "XLK"
+    ],
     "category": "us_sector_growth_consumer",
     "priority": 0.8,
     "note": "Retail vs Technology"
   },
   {
     "id": "XRT-XLB",
-    "symbols": ["XRT", "XLB"],
+    "symbols": [
+      "XRT",
+      "XLB"
+    ],
     "category": "us_sector_cyclicals",
     "priority": 0.76,
     "note": "Retail vs Materials"
   },
   {
     "id": "XLU-XLP",
-    "symbols": ["XLU", "XLP"],
+    "symbols": [
+      "XLU",
+      "XLP"
+    ],
     "category": "us_sector_defensive",
     "priority": 0.84,
     "note": "Utilities vs Staples"
   },
   {
     "id": "XLU-XLRE",
-    "symbols": ["XLU", "XLRE"],
+    "symbols": [
+      "XLU",
+      "XLRE"
+    ],
     "category": "us_sector_defensive",
     "priority": 0.8,
     "note": "Utilities vs Real Estate"
   },
   {
     "id": "XBI-XLF",
-    "symbols": ["XBI", "XLF"],
+    "symbols": [
+      "XBI",
+      "XLF"
+    ],
     "category": "us_sector_thematic",
     "priority": 0.7,
     "note": "Biotech vs Financials"
   },
   {
     "id": "XBI-VGT",
-    "symbols": ["XBI", "VGT"],
+    "symbols": [
+      "XBI",
+      "VGT"
+    ],
     "category": "us_sector_growth_thematic",
     "priority": 0.76,
     "note": "Biotech vs Vanguard Tech"
   },
   {
     "id": "VPU-XLY",
-    "symbols": ["VPU", "XLY"],
+    "symbols": [
+      "VPU",
+      "XLY"
+    ],
     "category": "us_sector_def_vs_cyc",
     "priority": 0.78,
     "note": "Utilities (Vanguard) vs Discretionary"
   },
   {
     "id": "VPU-XLC",
-    "symbols": ["VPU", "XLC"],
+    "symbols": [
+      "VPU",
+      "XLC"
+    ],
     "category": "us_sector_def_vs_growth",
     "priority": 0.76,
     "note": "Utilities (Vanguard) vs Communication"
   },
   {
     "id": "XLF-KBE",
-    "symbols": ["XLF", "KBE"],
+    "symbols": [
+      "XLF",
+      "KBE"
+    ],
     "category": "us_sector_financials",
     "priority": 0.9,
     "note": "Financials vs Banks"
   },
   {
     "id": "XLF-VHT",
-    "symbols": ["XLF", "VHT"],
+    "symbols": [
+      "XLF",
+      "VHT"
+    ],
     "category": "us_sector_barbell",
     "priority": 0.78,
     "note": "Financials vs Vanguard Health Care"
   },
   {
     "id": "XLY-XLU",
-    "symbols": ["XLY", "XLU"],
+    "symbols": [
+      "XLY",
+      "XLU"
+    ],
     "category": "us_sector_def_vs_cyc",
     "priority": 0.86,
     "note": "Discretionary vs Utilities"
   },
   {
     "id": "XLC-XLI",
-    "symbols": ["XLC", "XLI"],
+    "symbols": [
+      "XLC",
+      "XLI"
+    ],
     "category": "us_sector_cyclicals",
     "priority": 0.78,
     "note": "Communication vs Industrials"
   },
   {
     "id": "XLP-XLB",
-    "symbols": ["XLP", "XLB"],
+    "symbols": [
+      "XLP",
+      "XLB"
+    ],
     "category": "us_sector_def_vs_cyc",
     "priority": 0.8,
     "note": "Staples vs Materials"
   },
   {
     "id": "XLI-XLV",
-    "symbols": ["XLI", "XLV"],
+    "symbols": [
+      "XLI",
+      "XLV"
+    ],
     "category": "us_sector_barbell",
     "priority": 0.8,
     "note": "Industrials vs Health Care"
   },
   {
     "id": "XLB-XLK",
-    "symbols": ["XLB", "XLK"],
+    "symbols": [
+      "XLB",
+      "XLK"
+    ],
     "category": "us_sector_cyclicals",
     "priority": 0.82,
     "note": "Materials vs Tech"
   },
   {
     "id": "XLRE-XLP",
-    "symbols": ["XLRE", "XLP"],
+    "symbols": [
+      "XLRE",
+      "XLP"
+    ],
     "category": "us_sector_defensive",
     "priority": 0.82,
     "note": "Real Estate vs Staples"
   },
   {
     "id": "XRT-XLC",
-    "symbols": ["XRT", "XLC"],
+    "symbols": [
+      "XRT",
+      "XLC"
+    ],
     "category": "us_sector_thematic",
     "priority": 0.76,
     "note": "Retail vs Communication"
   },
   {
     "id": "XLU-XLT",
-    "symbols": ["XLU", "XLT"],
+    "symbols": [
+      "XLU",
+      "XLT"
+    ],
     "category": "us_sector_defensive",
     "priority": 0.7,
     "note": "Utilities vs Telecom (proxy)"
   },
   {
     "id": "XBI-XLE",
-    "symbols": ["XBI", "XLE"],
+    "symbols": [
+      "XBI",
+      "XLE"
+    ],
     "category": "us_sector_thematic",
     "priority": 0.7,
     "note": "Biotech vs Energy"
   },
   {
     "id": "XLK-XLE",
-    "symbols": ["XLK", "XLE"],
+    "symbols": [
+      "XLK",
+      "XLE"
+    ],
     "category": "us_sector_barbell",
     "priority": 0.78,
     "note": "Tech vs Energy"
   },
   {
     "id": "XLV-XLRE",
-    "symbols": ["XLV", "XLRE"],
+    "symbols": [
+      "XLV",
+      "XLRE"
+    ],
     "category": "us_sector_defensive",
     "priority": 0.78,
     "note": "Health Care vs Real Estate"
   },
   {
     "id": "XLC-XLP",
-    "symbols": ["XLC", "XLP"],
+    "symbols": [
+      "XLC",
+      "XLP"
+    ],
     "category": "us_sector_def_vs_growth",
     "priority": 0.8,
     "note": "Communication vs Staples"
   },
   {
     "id": "XLY-XLF",
-    "symbols": ["XLY", "XLF"],
+    "symbols": [
+      "XLY",
+      "XLF"
+    ],
     "category": "us_sector_cyclicals",
     "priority": 0.8,
     "note": "Discretionary vs Financials"
   },
   {
     "id": "XLB-XLU",
-    "symbols": ["XLB", "XLU"],
+    "symbols": [
+      "XLB",
+      "XLU"
+    ],
     "category": "us_sector_def_vs_cyc",
     "priority": 0.78,
     "note": "Materials vs Utilities"
   },
   {
     "id": "XLK-XBI",
-    "symbols": ["XLK", "XBI"],
+    "symbols": [
+      "XLK",
+      "XBI"
+    ],
     "category": "us_sector_growth_thematic",
     "priority": 0.78,
     "note": "Tech vs Biotech"
   },
   {
     "id": "XLV-XRT",
-    "symbols": ["XLV", "XRT"],
+    "symbols": [
+      "XLV",
+      "XRT"
+    ],
     "category": "us_sector_def_vs_cyc",
     "priority": 0.78,
     "note": "Health Care vs Retail"
   },
   {
     "id": "XLC-XBI",
-    "symbols": ["XLC", "XBI"],
+    "symbols": [
+      "XLC",
+      "XBI"
+    ],
     "category": "us_sector_thematic",
     "priority": 0.74,
     "note": "Communication vs Biotech"
   },
   {
     "id": "XLY-XLRE",
-    "symbols": ["XLY", "XLRE"],
+    "symbols": [
+      "XLY",
+      "XLRE"
+    ],
     "category": "us_sector_cyclicals",
     "priority": 0.8,
     "note": "Discretionary vs Real Estate"
   },
-
   {
     "id": "QQQ-SPY",
-    "symbols": ["QQQ", "SPY"],
+    "symbols": [
+      "QQQ",
+      "SPY"
+    ],
     "category": "index_us_equity",
     "priority": 0.95,
     "note": "Nasdaq 100 vs S&P 500"
   },
   {
     "id": "DIA-SPY",
-    "symbols": ["DIA", "SPY"],
+    "symbols": [
+      "DIA",
+      "SPY"
+    ],
     "category": "index_us_equity",
     "priority": 0.9,
     "note": "Dow Jones vs S&P 500"
   },
   {
     "id": "IVV-VOOG",
-    "symbols": ["IVV", "VOOG"],
+    "symbols": [
+      "IVV",
+      "VOOG"
+    ],
     "category": "index_us_equity",
     "priority": 0.88,
     "note": "S&P 500 vs Growth tilt"
   },
   {
     "id": "VTI-ITOT",
-    "symbols": ["VTI", "ITOT"],
+    "symbols": [
+      "VTI",
+      "ITOT"
+    ],
     "category": "index_us_total_market",
     "priority": 0.96,
     "note": "US total market ETFs"
   },
   {
     "id": "VEA-IEFA",
-    "symbols": ["VEA", "IEFA"],
+    "symbols": [
+      "VEA",
+      "IEFA"
+    ],
     "category": "index_dev_ex_us",
     "priority": 0.9,
     "note": "Developed ex-US large/mid"
   },
   {
     "id": "VWO-EEM",
-    "symbols": ["VWO", "EEM"],
+    "symbols": [
+      "VWO",
+      "EEM"
+    ],
     "category": "index_emerging",
     "priority": 0.9,
     "note": "Emerging Markets ETFs"
   },
-
   {
     "id": "LQD-IGIB",
-    "symbols": ["LQD", "IGIB"],
+    "symbols": [
+      "LQD",
+      "IGIB"
+    ],
     "category": "fixed_income_ig_corp",
     "priority": 0.88,
     "note": "Investment Grade Corporate Bond ETFs"
   },
   {
     "id": "HYG-JNK",
-    "symbols": ["HYG", "JNK"],
+    "symbols": [
+      "HYG",
+      "JNK"
+    ],
     "category": "fixed_income_high_yield",
     "priority": 0.86,
     "note": "High Yield bond ETFs"
   },
   {
     "id": "TIP-IEF",
-    "symbols": ["TIP", "IEF"],
+    "symbols": [
+      "TIP",
+      "IEF"
+    ],
     "category": "fixed_income_rates",
     "priority": 0.84,
     "note": "TIPS vs 7-10Y Treasuries"
   },
   {
     "id": "BND-AGG",
-    "symbols": ["BND", "AGG"],
+    "symbols": [
+      "BND",
+      "AGG"
+    ],
     "category": "fixed_income_agg",
     "priority": 0.9,
     "note": "US Aggregate Bond ETFs"
   },
   {
     "id": "MBB-IEF",
-    "symbols": ["MBB", "IEF"],
+    "symbols": [
+      "MBB",
+      "IEF"
+    ],
     "category": "fixed_income_mbs_rates",
     "priority": 0.8,
     "note": "MBS vs Treasuries spread"
   },
-
   {
     "id": "GDX-GDXJ",
-    "symbols": ["GDX", "GDXJ"],
+    "symbols": [
+      "GDX",
+      "GDXJ"
+    ],
     "category": "commodity_gold_miners",
     "priority": 0.88,
     "note": "Gold miners vs junior miners"
   },
   {
     "id": "XME-PALL",
-    "symbols": ["XME", "PALL"],
+    "symbols": [
+      "XME",
+      "PALL"
+    ],
     "category": "commodity_metals",
     "priority": 0.76,
     "note": "Metals & mining vs Palladium"
   },
   {
     "id": "XOP-OIH",
-    "symbols": ["XOP", "OIH"],
+    "symbols": [
+      "XOP",
+      "OIH"
+    ],
     "category": "commodity_energy_equity",
     "priority": 0.82,
     "note": "Oil & gas producers vs services"
   },
-
   {
     "id": "XBI-IBB",
-    "symbols": ["XBI", "IBB"],
+    "symbols": [
+      "XBI",
+      "IBB"
+    ],
     "category": "us_sector_biotech",
     "priority": 0.92,
     "note": "Equal-weight vs cap-weight Biotech"
   },
   {
     "id": "XHB-ITB",
-    "symbols": ["XHB", "ITB"],
+    "symbols": [
+      "XHB",
+      "ITB"
+    ],
     "category": "us_sector_homebuilders",
     "priority": 0.9,
     "note": "Homebuilders / Home Construction ETFs"
   },
-
   {
     "id": "XLRE-VNQ",
-    "symbols": ["XLRE", "VNQ"],
+    "symbols": [
+      "XLRE",
+      "VNQ"
+    ],
     "category": "us_sector_reit",
     "priority": 0.9,
     "note": "US REIT ETFs"
   },
   {
     "id": "XLK-VGT",
-    "symbols": ["XLK", "VGT"],
+    "symbols": [
+      "XLK",
+      "VGT"
+    ],
     "category": "us_sector_tech",
     "priority": 0.96,
     "note": "S&P Tech vs Vanguard Tech"
   },
   {
     "id": "XLV-VHT",
-    "symbols": ["XLV", "VHT"],
+    "symbols": [
+      "XLV",
+      "VHT"
+    ],
     "category": "us_sector_healthcare",
     "priority": 0.96,
     "note": "S&P Health Care vs Vanguard Health Care"
   },
-
   {
     "id": "IWM-QQQ",
-    "symbols": ["IWM", "QQQ"],
+    "symbols": [
+      "IWM",
+      "QQQ"
+    ],
     "category": "index_us_equity",
     "priority": 0.88,
     "note": "US small caps vs Nasdaq 100"
   },
   {
     "id": "RSP-SPY",
-    "symbols": ["RSP", "SPY"],
+    "symbols": [
+      "RSP",
+      "SPY"
+    ],
     "category": "index_us_equity",
     "priority": 0.92,
     "note": "Equal-weight S&P 500 vs cap-weight S&P 500"
   },
   {
     "id": "VTV-VUG",
-    "symbols": ["VTV", "VUG"],
+    "symbols": [
+      "VTV",
+      "VUG"
+    ],
     "category": "index_us_style",
     "priority": 0.9,
     "note": "US value vs US growth (Vanguard)"
   },
   {
     "id": "SHY-TLT",
-    "symbols": ["SHY", "TLT"],
+    "symbols": [
+      "SHY",
+      "TLT"
+    ],
     "category": "fixed_income_rates",
     "priority": 0.86,
     "note": "Short-term vs long-term US Treasuries"
   },
   {
     "id": "IEF-TLT",
-    "symbols": ["IEF", "TLT"],
+    "symbols": [
+      "IEF",
+      "TLT"
+    ],
     "category": "fixed_income_rates",
     "priority": 0.84,
     "note": "7-10Y vs 20Y+ US Treasuries"
   },
   {
     "id": "HYG-LQD",
-    "symbols": ["HYG", "LQD"],
+    "symbols": [
+      "HYG",
+      "LQD"
+    ],
     "category": "fixed_income_spread",
     "priority": 0.88,
     "note": "High Yield vs Investment Grade corporate bond ETFs"
   },
   {
     "id": "GLD-SLV",
-    "symbols": ["GLD", "SLV"],
+    "symbols": [
+      "GLD",
+      "SLV"
+    ],
     "category": "commodity_precious_metals",
     "priority": 0.9,
     "note": "Gold vs Silver"
   },
   {
     "id": "USO-UNG",
-    "symbols": ["USO", "UNG"],
+    "symbols": [
+      "USO",
+      "UNG"
+    ],
     "category": "commodity_energy",
     "priority": 0.78,
     "note": "Crude Oil vs Natural Gas"
   },
   {
     "id": "DBC-USO",
-    "symbols": ["DBC", "USO"],
+    "symbols": [
+      "DBC",
+      "USO"
+    ],
     "category": "commodity_broad_vs_energy",
     "priority": 0.8,
     "note": "Broad commodities vs Oil"
   },
   {
     "id": "EFA-EEM",
-    "symbols": ["EFA", "EEM"],
+    "symbols": [
+      "EFA",
+      "EEM"
+    ],
     "category": "index_global_dev_em",
     "priority": 0.85,
     "note": "Developed ex-US vs Emerging Markets"
   },
-
   {
     "id": "XLY-XRT",
-    "symbols": ["XLY", "XRT"],
+    "symbols": [
+      "XLY",
+      "XRT"
+    ],
     "category": "us_sector_consumer_chain",
     "priority": 0.82,
     "note": "Discretionary vs broad Retail"
   },
   {
     "id": "XLP-XRT",
-    "symbols": ["XLP", "XRT"],
+    "symbols": [
+      "XLP",
+      "XRT"
+    ],
     "category": "us_sector_def_vs_retail",
     "priority": 0.8,
     "note": "Staples vs Retail"
   },
   {
     "id": "XRT-SPY",
-    "symbols": ["XRT", "SPY"],
+    "symbols": [
+      "XRT",
+      "SPY"
+    ],
     "category": "us_sector_vs_index",
     "priority": 0.82,
     "note": "Retail vs broad US equities (S&P 500)"
   },
   {
     "id": "XLK-QQQ",
-    "symbols": ["XLK", "QQQ"],
+    "symbols": [
+      "XLK",
+      "QQQ"
+    ],
     "category": "us_sector_growth",
     "priority": 0.9,
     "note": "Tech sector vs Nasdaq 100"
   },
   {
     "id": "VOO-SPY",
-    "symbols": ["VOO", "SPY"],
+    "symbols": [
+      "VOO",
+      "SPY"
+    ],
     "category": "index_us_equity",
     "priority": 0.96,
     "note": "Two flagship S&P 500 ETFs (Vanguard vs SPDR)"
   },
   {
     "id": "IWM-RSP",
-    "symbols": ["IWM", "RSP"],
+    "symbols": [
+      "IWM",
+      "RSP"
+    ],
     "category": "index_us_equity",
     "priority": 0.86,
     "note": "US small caps vs equal-weight S&P 500"
   },
   {
     "id": "UUP-FXE",
-    "symbols": ["UUP", "FXE"],
+    "symbols": [
+      "UUP",
+      "FXE"
+    ],
     "category": "fx_usd_eur",
     "priority": 0.78,
     "note": "Long USD vs Euro (ETF proxies)"
   },
   {
     "id": "UUP-FXA",
-    "symbols": ["UUP", "FXA"],
+    "symbols": [
+      "UUP",
+      "FXA"
+    ],
     "category": "fx_usd_aud",
     "priority": 0.76,
     "note": "Long USD vs Australian Dollar"
   },
   {
     "id": "TLT-GLD",
-    "symbols": ["TLT", "GLD"],
+    "symbols": [
+      "TLT",
+      "GLD"
+    ],
     "category": "macro_risk_off",
     "priority": 0.8,
     "note": "Long-duration Treasuries vs Gold (risk-off cluster)"
   },
   {
     "id": "SPY-HYG",
-    "symbols": ["SPY", "HYG"],
+    "symbols": [
+      "SPY",
+      "HYG"
+    ],
     "category": "equity_credit_risk",
     "priority": 0.82,
     "note": "US equities vs High Yield credit"
+  },
+  {
+    "symbols": [
+      "IWF",
+      "IWD"
+    ],
+    "id": "IWF-IWD",
+    "category": "growth_vs_value",
+    "priority": 0.9,
+    "note": "Growth vs Value — classic factor pair"
+  },
+  {
+    "symbols": [
+      "VUG",
+      "VTV"
+    ],
+    "id": "VUG-VTV",
+    "category": "growth_vs_value",
+    "priority": 0.85,
+    "note": "Vanguard Growth vs Value"
+  },
+  {
+    "symbols": [
+      "IWM",
+      "SPY"
+    ],
+    "id": "IWM-SPY",
+    "category": "size_factor",
+    "priority": 0.85,
+    "note": "Small cap vs Large cap"
+  },
+  {
+    "symbols": [
+      "MDY",
+      "SPY"
+    ],
+    "id": "MDY-SPY",
+    "category": "size_factor",
+    "priority": 0.8,
+    "note": "Mid cap vs Large cap"
+  },
+  {
+    "symbols": [
+      "IJR",
+      "IWM"
+    ],
+    "id": "IJR-IWM",
+    "category": "size_factor",
+    "priority": 0.8,
+    "note": "S&P 600 vs Russell 2000"
+  },
+  {
+    "symbols": [
+      "GLD",
+      "TLT"
+    ],
+    "id": "GLD-TLT",
+    "category": "cross_asset",
+    "priority": 0.9,
+    "note": "Gold vs Long Treasury — risk barometer"
+  },
+  {
+    "symbols": [
+      "USO",
+      "XLE"
+    ],
+    "id": "USO-XLE",
+    "category": "energy",
+    "priority": 0.85,
+    "note": "Oil vs Energy stocks"
+  },
+  {
+    "symbols": [
+      "QQQ",
+      "XLK"
+    ],
+    "id": "QQQ-XLK",
+    "category": "tech_overlap",
+    "priority": 0.9,
+    "note": "Nasdaq 100 vs Tech sector"
   }
 ]
