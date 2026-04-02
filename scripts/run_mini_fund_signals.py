@@ -48,11 +48,8 @@ try:
 except Exception:
     params_score_params_dict = None  # type: ignore
 
-# ---- מקור מחירים זמני (yfinance) ----
-try:
-    import yfinance as yf  # type: ignore
-except Exception:
-    yf = None  # type: ignore
+# ---- Canonical price loader ----
+from common.data_loader import load_price_data
 
 
 # ========= קונפיג ברירת מחדל =========
@@ -101,25 +98,33 @@ def load_snapshot_and_params() -> Tuple[pd.DataFrame, Dict[str, Dict[str, Any]]]
     return df_snap, params_dict
 
 
-# ========= 2. פונקציות מחירים (זמנית: yfinance) =========
+# ========= 2. פונקציות מחירים (via canonical loader) =========
 
 def get_price_series(symbol: str, lookback_days: int = 120) -> pd.Series:
     """
-    מחזיר סדרת מחירי Adj Close ל-symbol מסוים מתוך yfinance.
-    בגרסה סופית מומלץ להחליף למקור דאטה פנימי (SqlStore/IBKR).
-    """
-    if yf is None:
-        raise RuntimeError(
-            "yfinance is not installed; cannot fetch prices. "
-            "Install with: pip install yfinance"
-        )
+    Return Adj Close series for *symbol* using the canonical data loader.
 
+    Uses common.data_loader.load_price_data() which handles caching,
+    yfinance MultiIndex fix, and surveillance hooks.
+    """
     end = dt.date.today()
-    start = end - dt.timedelta(days=lookback_days * 2)  # *2 לכיסוי סופי שבוע
-    data = yf.download(symbol, start=start, end=end)
-    if data.empty or "Adj Close" not in data.columns:
+    start = end - dt.timedelta(days=lookback_days * 2)  # *2 for weekends/holidays
+
+    data = load_price_data(symbol, start_date=start, end_date=end)
+    if data.empty:
         raise RuntimeError(f"No price data for symbol {symbol}")
-    s = data["Adj Close"].dropna()
+
+    # Canonical loader returns lowercase columns; prefer adj_close then close
+    if "adj_close" in data.columns:
+        s = data["adj_close"].dropna()
+    elif "close" in data.columns:
+        s = data["close"].dropna()
+    elif "Adj Close" in data.columns:
+        s = data["Adj Close"].dropna()
+    elif "Close" in data.columns:
+        s = data["Close"].dropna()
+    else:
+        raise RuntimeError(f"No close price column for {symbol}")
     return s
 
 

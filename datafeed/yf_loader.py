@@ -47,21 +47,19 @@ def load_prices(
     except Exception:
         pass
 
-    # Fallback: yfinance
+    # Fallback: canonical loader (handles yfinance + caching + MultiIndex fix)
     try:
-        import yfinance as yf  # noqa: PLC0415
-        raw = yf.download(list(tickers), start=start, end=end, progress=False)
-        if not raw.empty:
-            if "Adj Close" in raw.columns:
-                df = raw["Adj Close"]
-            elif "Close" in raw.columns:
-                df = raw["Close"]
-            else:
-                df = raw
-            if isinstance(df.columns, pd.MultiIndex):
-                df.columns = df.columns.get_level_values(1)
-            return df.ffill()
-    except ImportError:
+        from common.data_loader import load_price_data  # noqa: PLC0415
+        frames = {}
+        for t in tickers:
+            pdf = load_price_data(t, start_date=start, end_date=end)
+            if not pdf.empty:
+                col = next((c for c in ("adj_close", "close", "Adj Close", "Close") if c in pdf.columns), None)
+                if col:
+                    frames[t] = pdf[col]
+        if frames:
+            return pd.DataFrame(frames).ffill()
+    except Exception:
         pass
 
     return pd.DataFrame()

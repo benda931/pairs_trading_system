@@ -145,7 +145,8 @@ def optimize_pair(sym_x: str, sym_y: str, n_trials: int = 40) -> dict:
             score = ret * 0.4 + win_rate * 0.4 + min(trades / 30, 1.0) * 0.2
             return score
 
-        study = optuna.create_study(direction="maximize")
+        from common.optuna_factory import create_optuna_study
+        study = create_optuna_study(study_name=f"alpha_{sym_x}_{sym_y}", direction="maximize")
         study.optimize(objective, n_trials=n_trials, show_progress_bar=False)
 
         return {

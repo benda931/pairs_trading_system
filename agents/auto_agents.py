@@ -228,7 +228,8 @@ class AutoParameterOptimizer(BaseAgent):
                 win_rate = (exits & entries.shift(10).fillna(False)).sum() / max(1, n_trades)
                 return float(win_rate)
 
-            study = optuna.create_study(direction="maximize")
+            from common.optuna_factory import create_optuna_study
+            study = create_optuna_study(study_name=f"auto_opt_{pair_label}", direction="maximize")
             study.optimize(objective, n_trials=n_trials, show_progress_bar=False)
 
             best = study.best_params
@@ -266,18 +267,16 @@ class AutoConfigUpdater(BaseAgent):
             audit.log("No updates to apply")
             return {"updated": False, "reason": "empty_updates"}
 
-        config_path = PROJECT_ROOT / "config.json"
-        backup_path = PROJECT_ROOT / "config.json.bak"
-
         try:
-            # Backup
-            if config_path.exists():
-                shutil.copy2(config_path, backup_path)
-                audit.log("Config backed up")
+            # Use canonical config_manager (has validation + backup logic)
+            from common.config_manager import load_config, save_config, save_config_profile
 
-            # Read current
-            with open(config_path) as f:
-                config = json.load(f)
+            config = load_config()
+            audit.log("Config loaded via canonical config_manager")
+
+            # Save a timestamped backup profile before modifying
+            backup_name = save_config_profile(config, profile="auto_agent_backup", validate=False)
+            audit.log(f"Config profile backup saved: {backup_name}")
 
             # Apply updates (only to strategy section for safety)
             strategy = config.get("strategy", {})
@@ -290,16 +289,20 @@ class AutoConfigUpdater(BaseAgent):
                     audit.log(f"Updated strategy.{key}: {old_val} → {value}")
             config["strategy"] = strategy
 
-            # Write
-            with open(config_path, "w") as f:
-                json.dump(config, f, indent=2, ensure_ascii=False)
+            # Write via canonical save_config (validates before writing)
+            save_config(config, validate=True)
 
-            audit.log(f"Config updated: {len(applied)} changes applied")
-            return {"updated": True, "changes": applied, "backup": str(backup_path)}
+            audit.log(f"Config updated via config_manager: {len(applied)} changes applied")
+            return {"updated": True, "changes": applied, "backup": backup_name}
 
         except Exception as e:
             audit.error(f"Config update failed: {e}")
-            if backup_path.exists():
-                shutil.copy2(backup_path, config_path)
-                audit.log("Rolled back config from backup")
+            # Rollback: reload from profile backup if available
+            try:
+                from common.config_manager import load_config as _lc, save_config as _sc
+                original = _lc()  # Will load the file before our failed write
+                _sc(original, validate=False)
+                audit.log("Rolled back config from canonical loader")
+            except Exception:
+                pass
             return {"updated": False, "error": str(e)}

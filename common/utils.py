@@ -328,12 +328,10 @@ def get_close_series_range(
 # -----------------------------------------------------------------------------
 
 def calculate_zscore(x: pd.Series, y: pd.Series, window: int = 20) -> float:
-    """Z-score של spread בין שתי סדרות מחירים."""
+    """Z-score of spread between two price series (delegates to canonical implementation)."""
+    from common.feature_engineering import compute_zscore_scalar
     spread = x - y
-    mu = spread.rolling(window).mean()
-    sd = spread.rolling(window).std()
-    z = (spread - mu) / sd
-    return float(z.iloc[-1]) if len(z) and not np.isnan(z.iloc[-1]) else 0.0
+    return compute_zscore_scalar(spread, lookback=window)
 
 
 def calculate_half_life(spread: pd.Series) -> float:

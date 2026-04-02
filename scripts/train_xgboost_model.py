@@ -50,12 +50,11 @@ def compute_advanced_features(px: pd.Series, py: pd.Series, lookback: int = 60) 
     """
     features = pd.DataFrame(index=px.index)
 
-    # Spread
+    # Spread (canonical z-score)
+    from common.feature_engineering import compute_zscore
     beta = float(np.cov(px.values, py.values)[0, 1] / np.var(px.values))
     spread = py - beta * px
-    mu = spread.rolling(lookback, min_periods=lookback // 2).mean()
-    sig = spread.rolling(lookback, min_periods=lookback // 2).std().replace(0, np.nan)
-    z = ((spread - mu) / sig).fillna(0.0)
+    z = compute_zscore(spread, lookback, min_periods=lookback // 2, fillna_value=0.0)
 
     # ── Z-score features ─────────────────────────────────────────
     features["z"] = z
@@ -159,12 +158,11 @@ def train_xgboost_model(
     # Compute features
     X = compute_advanced_features(px, py)
 
-    # Compute labels
+    # Compute labels (canonical z-score)
+    from common.feature_engineering import compute_zscore
     beta = float(np.cov(px.values, py.values)[0, 1] / np.var(px.values))
     spread = py - beta * px
-    mu = spread.rolling(60, min_periods=30).mean()
-    sig = spread.rolling(60, min_periods=30).std().replace(0, np.nan)
-    z = ((spread - mu) / sig).fillna(0.0)
+    z = compute_zscore(spread, 60, min_periods=30, fillna_value=0.0)
     y = compute_labels(z, horizon=horizon, entry_threshold=entry_threshold)
 
     # Align and drop NaN

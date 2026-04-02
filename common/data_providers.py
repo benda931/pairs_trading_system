@@ -710,74 +710,50 @@ class YahooProvider(MarketDataProvider):
             return pd.DataFrame()
 
         # yfinance ׳׳ ׳×׳•׳׳ ׳‘׳‘׳¨ ׳’׳“׳׳™׳ ׳›׳׳• IB, ׳׳– ׳ ׳×׳¢׳׳ ׳ײ¾bar_size ׳›׳׳ (׳׳• ׳ ׳׳₪׳” ׳ײ¾interval ׳‘׳”׳¨׳—׳‘׳” ׳¢׳×׳™׳“׳™׳×)
-        if start is not None or end is not None:
-            df = yf.download(
-                " ".join(tickers),
-                start=start,
-                end=end,
-                auto_adjust=self.auto_adjust,
-                progress=False,
-                session=self.session,
-            )
-        else:
-            df = yf.download(
-                " ".join(tickers),
-                period=period or "6mo",
-                auto_adjust=self.auto_adjust,
-                progress=False,
-                session=self.session,
-            )
+        # Delegate to canonical loader — gets caching, MultiIndex fix,
+        # and surveillance hooks for free.
+        from common.data_loader import load_price_data  # noqa: PLC0415
 
-        if df is None or df.empty:
+        all_frames: list[pd.DataFrame] = []
+        for _sym in tickers:
+            try:
+                raw = load_price_data(_sym, start_date=start, end_date=end)
+            except Exception:
+                logger.warning("YahooProvider: canonical loader failed for %s", _sym)
+                continue
+            if raw is not None and not raw.empty:
+                raw = raw.copy()
+                raw["symbol"] = _sym
+                all_frames.append(raw)
+
+        if not all_frames:
             logger.warning("YahooProvider: empty data for %s", tickers)
             return pd.DataFrame()
 
-        # ׳׳ ׳™׳© ׳›׳׳” ׳˜׳™׳§׳¨׳™׳ ג€“ yfinance ׳׳—׳–׳™׳¨ MultiIndex columns
-        if isinstance(df.columns, pd.MultiIndex):
-            frames: list[pd.DataFrame] = []
-            for sym in tickers:
-                if (sym, "Close") not in df.columns:
-                    continue
-                sub = df.xs(sym, axis=1, level=1, drop_level=False)
-                # columns like ('Open','QQQ') ג†’ ׳ ׳™׳§׳•׳™ ׳׳©׳׳•׳× ׳¡׳˜׳ ׳“׳¨׳˜׳™׳™׳
-                sub = sub.droplevel(1, axis=1)
-                sub = sub.rename(
-                    columns={
-                        "Open": "open",
-                        "High": "high",
-                        "Low": "low",
-                        "Close": "close",
-                        "Adj Close": "adj_close",
-                        "Volume": "volume",
-                    }
-                )
-                sub = sub.reset_index().rename(columns={"Date": "datetime"})
-                sub["symbol"] = sym
-                frames.append(sub)
-            if not frames:
-                return pd.DataFrame()
-            out = pd.concat(frames, ignore_index=True)
-        else:
-            # Single ticker
-            sym = tickers[0]
-            out = df.rename(
-                columns={
-                    "Open": "open",
-                    "High": "high",
-                    "Low": "low",
-                    "Close": "close",
-                    "Adj Close": "adj_close",
-                    "Volume": "volume",
-                }
-            ).reset_index().rename(columns={"Date": "datetime"})
-            out["symbol"] = sym
+        df = pd.concat(all_frames, ignore_index=False) if len(all_frames) > 1 else all_frames[0]
 
-        # ׳©׳׳™׳¨׳” ׳¢׳ ׳₪׳•׳¨׳׳˜ ׳׳—׳™׳“
-        cols = ["symbol", "datetime", "open", "high", "low", "close", "volume"]
+        # Canonical loader already handles MultiIndex fix + lowercase columns.
+        # Normalize to expected output format: symbol, datetime, open, high, low, close, volume
+        out = df.reset_index()
+        # Rename index column (could be 'Date' or 'date')
+        if 'Date' in out.columns:
+            out = out.rename(columns={'Date': 'datetime'})
+        elif 'date' in out.columns:
+            out = out.rename(columns={'date': 'datetime'})
+
+        # Ensure lowercase column names
+        col_rename = {
+            'Open': 'open', 'High': 'high', 'Low': 'low',
+            'Close': 'close', 'Adj Close': 'adj_close', 'Volume': 'volume',
+        }
+        out = out.rename(columns={k: v for k, v in col_rename.items() if k in out.columns})
+
+        # Standard column ordering
+        cols = ['symbol', 'datetime', 'open', 'high', 'low', 'close', 'volume']
         out = out[[c for c in cols if c in out.columns] + [c for c in out.columns if c not in cols]]
 
-        if "datetime" in out.columns:
-            out["datetime"] = pd.to_datetime(out["datetime"], utc=False)
+        if 'datetime' in out.columns:
+            out['datetime'] = pd.to_datetime(out['datetime'], utc=False)
 
         return out
 

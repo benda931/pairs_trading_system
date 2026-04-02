@@ -377,6 +377,89 @@ def spread_zscore(
     return zscore(sp, window)
 
 
+def compute_zscore(
+    spread_series: pd.Series,
+    lookback: int,
+    *,
+    min_periods: int | None = None,
+    fillna_value: float | None = None,
+    eps: float = 1e-12,
+) -> pd.Series:
+    """
+    Canonical rolling z-score for spread series.
+
+    This is the **recommended entry point** for all z-score computations
+    in the system. Callers that previously used inline rolling mean/std
+    should switch to this function for consistency.
+
+    Parameters
+    ----------
+    spread_series : pd.Series
+        Spread (or any numeric series) to z-score.
+    lookback : int
+        Rolling window size.
+    min_periods : int | None
+        Minimum observations for rolling stats. Defaults to lookback.
+    fillna_value : float | None
+        If provided, fill NaN results with this value (e.g. 0.0).
+    eps : float
+        Guard against division by zero.
+
+    Returns
+    -------
+    pd.Series
+        Rolling z-score series.
+    """
+    _min = min_periods if min_periods is not None else lookback
+    mu = spread_series.rolling(lookback, min_periods=_min).mean()
+    sig = spread_series.rolling(lookback, min_periods=_min).std(ddof=0)
+    sig_safe = sig.mask(sig.abs() < eps, np.nan)
+    z = (spread_series - mu) / sig_safe
+    z = z.replace([np.inf, -np.inf], np.nan)
+    if fillna_value is not None:
+        z = z.fillna(fillna_value)
+    return z
+
+
+def compute_zscore_scalar(
+    spread_series: pd.Series,
+    lookback: int | None = None,
+    eps: float = 1e-12,
+) -> float:
+    """
+    Return the latest z-score as a scalar float.
+
+    Parameters
+    ----------
+    spread_series : pd.Series
+        Spread series. If *lookback* is None, uses full-history mean/std;
+        otherwise uses rolling window ending at the last bar.
+    lookback : int | None
+        Rolling window. None = full history.
+    eps : float
+        Division-by-zero guard.
+
+    Returns
+    -------
+    float
+        Latest z-score, or 0.0 if computation fails.
+    """
+    if spread_series.empty:
+        return 0.0
+    if lookback is None:
+        mu = float(spread_series.mean())
+        sig = float(spread_series.std(ddof=0))
+    else:
+        z_series = compute_zscore(spread_series, lookback, eps=eps)
+        last = z_series.iloc[-1] if len(z_series) else float("nan")
+        return float(last) if not (np.isnan(last) or np.isinf(last)) else 0.0
+
+    if sig < eps:
+        return 0.0
+    val = float(spread_series.iloc[-1])
+    return (val - mu) / sig
+
+
 def rolling_beta_zscore(
     series1: pd.Series,
     series2: pd.Series,

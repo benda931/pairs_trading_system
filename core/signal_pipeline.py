@@ -88,6 +88,12 @@ class SignalDecision:
     """
     Output of the SignalPipeline for a single evaluation.
 
+    NOTE: There is also ``core.intents.SignalDecision`` which is a richer,
+    fully-typed variant used by the agent/intent system.  This class is the
+    lightweight pipeline-output variant consumed by the backtester and
+    portfolio_bridge.  A future migration should unify them (see
+    CANONICALIZATION_CANDIDATES.md Priority 7).
+
     Downstream consumer (PortfolioAllocator) should check:
         - decision.blocked -> if True, do not route to portfolio
         - decision.intent  -> EntryIntent or ExitIntent to route

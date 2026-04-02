@@ -170,10 +170,9 @@ try:
 except Exception:
     # Fallbacks keep the engine usable if utils module is missing.
     def calculate_zscore(s1: pd.Series, s2: pd.Series, lookback: int) -> pd.Series:
+        from common.feature_engineering import compute_zscore
         spread = s1 - s2
-        m = spread.rolling(lookback).mean()
-        sd = spread.rolling(lookback).std(ddof=0)
-        return (spread - m) / sd
+        return compute_zscore(spread, lookback, fillna_value=None)
 
     def calculate_beta(s1: pd.Series, s2: pd.Series, lookback: int) -> pd.Series:
         cov = s1.rolling(lookback).cov(s2)
@@ -461,6 +460,12 @@ class RiskConfig:
 class BacktestConfig:
     """
     BacktestConfig bundles strategy settings, execution model and risk controls.
+
+    NOTE: There are 3 BacktestConfig definitions in the codebase:
+      1. core.optimization_backtester.BacktestConfig — richest, canonical for core/
+      2. root.backtest.BacktestConfig (this one) — dashboard variant
+      3. root.backtest_logic.BacktestConfig — Pydantic variant for simple backtest
+    Future migration should consolidate these (see CANONICALIZATION_CANDIDATES.md P7).
 
     Strategy (pairs Z-score mean-reversion)
     ---------------------------------------

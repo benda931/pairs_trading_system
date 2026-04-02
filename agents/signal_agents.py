@@ -132,11 +132,11 @@ class SignalAnalystAgent(BaseAgent):
             warnings.append(f"Only {len(spread_clip)} observations — estimates unreliable")
             audit.warn(f"Thin spread history: {len(spread_clip)} obs")
 
-        # ── Compute z-score ───────────────────────────────────────
+        # ── Compute z-score (canonical) ───────────────────────────
+        from common.feature_engineering import compute_zscore_scalar
         spread_mean = float(spread_clip.mean())
         spread_std  = float(spread_clip.std())
-        current_val  = float(spread_clip.iloc[-1]) if len(spread_clip) > 0 else math.nan
-        z_score = (current_val - spread_mean) / spread_std if spread_std > 0 else 0.0
+        z_score = compute_zscore_scalar(spread_clip, lookback=None)
         audit.log(f"z={z_score:.3f} mean={spread_mean:.4f} std={spread_std:.4f}")
 
         # ── Volatility ratio ─────────────────────────────────────

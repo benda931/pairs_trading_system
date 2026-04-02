@@ -198,7 +198,8 @@ def run_walk_forward(
                 if trades < 3: return -999
                 return (eq / 100000 - 1)
 
-            study = optuna.create_study(direction="maximize")
+            from common.optuna_factory import create_optuna_study
+            study = create_optuna_study(direction="maximize")
             study.optimize(objective, n_trials=n_optuna_trials, show_progress_bar=False)
             best_params = study.best_params
             is_return = study.best_value
