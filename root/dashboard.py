@@ -938,7 +938,8 @@ def compute_feature_flags(app_ctx: "AppContext") -> FeatureFlags:
     # המלצה ראשונית אילו טאבים אמורים להיות פעילים.
     # ה-Tab Registry בהמשך ישלב את זה עם קיום מודולים/קבצים בפועל.
     tabs_flags: Dict[str, bool] = {
-        "home": True,  # תמיד קיים
+        "home": True,
+        "alpha": True,  # Alpha Performance — always enabled
         "smart_scan": caps.signals_engine,
         "pair": True,
         "matrix": caps.market_data_router or caps.sql_store,
@@ -2555,23 +2556,26 @@ TAB_KEY_FAIR_VALUE: TabKey = "fair_value"
 TAB_KEY_CONFIG: TabKey = "config"
 TAB_KEY_AGENTS: TabKey = "agents"
 TAB_KEY_LOGS: TabKey = "logs"
+TAB_KEY_ALPHA: TabKey = "alpha"
 
 ALL_TAB_KEYS: Tuple[TabKey, ...] = (
     TAB_KEY_HOME,
-    TAB_KEY_SMART_SCAN,
+    TAB_KEY_ALPHA,  # Alpha Dashboard — first after Home
     TAB_KEY_PAIR,
-    TAB_KEY_MATRIX,
-    TAB_KEY_COMPARISON_MATRICES,
     TAB_KEY_BACKTEST,
     TAB_KEY_OPTIMIZATION,
-    TAB_KEY_INSIGHTS,
     TAB_KEY_MACRO,
     TAB_KEY_PORTFOLIO,
     TAB_KEY_RISK,
-    TAB_KEY_FAIR_VALUE,
     TAB_KEY_CONFIG,
     TAB_KEY_AGENTS,
     TAB_KEY_LOGS,
+    # Hidden by default (require SqlStore/API data):
+    TAB_KEY_SMART_SCAN,
+    TAB_KEY_MATRIX,
+    TAB_KEY_COMPARISON_MATRICES,
+    TAB_KEY_INSIGHTS,
+    TAB_KEY_FAIR_VALUE,
 )
 
 def get_all_tab_keys() -> Tuple[TabKey, ...]:
@@ -2706,8 +2710,17 @@ _BASE_TAB_DEFS: Dict[TabKey, Dict[str, Any]] = {
         "order": 10,
         "requires": (),
         "enabled_default": True,
-        "profile_overrides": {},  # תמיד נרצה את Home
-        "description": "תצוגת בית / Monitoring מרכזי של המערכת.",
+        "profile_overrides": {},
+        "description": "Home / system monitoring overview.",
+    },
+    TAB_KEY_ALPHA: {
+        "label": "📊 Alpha Performance",
+        "group": "core",
+        "order": 15,
+        "requires": (),
+        "enabled_default": True,
+        "profile_overrides": {},
+        "description": "Portfolio equity curve, Sharpe, drawdown, pair heatmap, trade blotter.",
     },
     TAB_KEY_SMART_SCAN: {
         "label": "🔍 Smart Scan",
@@ -2944,6 +2957,7 @@ def _get_tab_renderer(tab_key: TabKey) -> TabRenderer:
     # חשוב: כאן אנחנו מחזיקים רק את *שם* הפונקציה, לא את האובייקט עצמו.
     name_mapping: Dict[TabKey, str] = {
         TAB_KEY_HOME: "render_home_tab",
+        TAB_KEY_ALPHA: "render_alpha_dashboard",
         TAB_KEY_SMART_SCAN: "render_smart_scan_tab",
         TAB_KEY_PAIR: "render_pair_tab",
         TAB_KEY_MATRIX: "render_matrix_tab",
@@ -3327,6 +3341,24 @@ def _log_tab_entry(
 
     except Exception as exc:  # pragma: no cover - הגנה קריטית
         logger.debug("Failed to log tab entry for '%s': %s", tab_key, exc, exc_info=True)
+
+
+# ----------------------
+# Alpha Performance tab
+# ----------------------
+
+def render_alpha_dashboard(
+    app_ctx: "AppContext",
+    feature_flags: FeatureFlags,
+    nav_payload: Optional[NavPayload] = None,
+) -> None:
+    """📊 Alpha Performance — professional portfolio analytics."""
+    try:
+        from root.alpha_dashboard_tab import render_alpha_dashboard as _render
+        _render(app_ctx, feature_flags, nav_payload)
+    except Exception as exc:
+        st.error(f"Alpha dashboard error: {exc}")
+        logger.warning("render_alpha_dashboard failed: %s", exc)
 
 
 # ----------------------
