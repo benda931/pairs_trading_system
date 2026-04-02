@@ -442,4 +442,58 @@ def _populate_default_registry(registry: AgentRegistry) -> None:
     except ImportError as exc:
         logger.warning("Could not register governance_agents: %s", exc)
 
+    # ── GPT-powered analysis agents ────────────────────────────────
+    try:
+        from agents.gpt_agents import (
+            GPTSignalAdvisor,
+            GPTModelTuner,
+            GPTStrategyResearcher,
+            GPTReportGenerator,
+        )
+        registry.register(
+            GPTSignalAdvisor(),
+            permissions={AgentPermission.READ_ONLY, AgentPermission.RESEARCH},
+        )
+        registry.register(
+            GPTModelTuner(),
+            permissions={AgentPermission.READ_ONLY, AgentPermission.RESEARCH},
+        )
+        registry.register(
+            GPTStrategyResearcher(),
+            permissions={AgentPermission.READ_ONLY, AgentPermission.RESEARCH},
+        )
+        registry.register(
+            GPTReportGenerator(),
+            permissions={AgentPermission.READ_ONLY, AgentPermission.RESEARCH},
+        )
+    except ImportError as exc:
+        logger.warning("Could not register gpt_agents: %s", exc)
+
+    # ── Autonomous execution agents ──────────────────────────────
+    try:
+        from agents.auto_agents import (
+            AutoModelRetrainer,
+            AutoDataRefresher,
+            AutoParameterOptimizer,
+            AutoConfigUpdater,
+        )
+        registry.register(
+            AutoModelRetrainer(),
+            permissions={AgentPermission.READ_ONLY, AgentPermission.RESEARCH, AgentPermission.EXECUTION},
+        )
+        registry.register(
+            AutoDataRefresher(),
+            permissions={AgentPermission.READ_ONLY, AgentPermission.RESEARCH},
+        )
+        registry.register(
+            AutoParameterOptimizer(),
+            permissions={AgentPermission.READ_ONLY, AgentPermission.RESEARCH},
+        )
+        registry.register(
+            AutoConfigUpdater(),
+            permissions={AgentPermission.READ_ONLY, AgentPermission.RESEARCH, AgentPermission.EXECUTION},
+        )
+    except ImportError as exc:
+        logger.warning("Could not register auto_agents: %s", exc)
+
     logger.info("Default registry populated with %d agents", len(registry._agents))
