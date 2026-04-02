@@ -31,6 +31,25 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass
+class RegimeConfig:
+    """Regime-conditional risk parameters."""
+    # Vol regime thresholds (realized vol annualized)
+    low_vol_threshold: float = 0.08    # Below 8% = low vol regime
+    high_vol_threshold: float = 0.20   # Above 20% = high vol regime
+    crisis_vol_threshold: float = 0.35 # Above 35% = crisis regime
+
+    # Regime-conditional position scaling
+    low_vol_scale: float = 1.3         # Increase size in low vol
+    normal_vol_scale: float = 1.0      # Normal sizing
+    high_vol_scale: float = 0.6        # Reduce in high vol
+    crisis_scale: float = 0.2          # Minimal in crisis
+
+    # Regime-conditional entry threshold adjustment
+    high_vol_entry_widen: float = 0.5  # Widen entry z by 0.5 in high vol
+    crisis_entry_widen: float = 1.0    # Widen entry z by 1.0 in crisis
+
+
+@dataclass
 class PortfolioConfig:
     """Configuration for portfolio-level backtest."""
     initial_capital: float = 1_000_000.0
@@ -47,6 +66,11 @@ class PortfolioConfig:
     drawdown_halt: float = -0.20       # Halt at -20% DD
     kelly_fraction: float = 0.25       # Use 1/4 Kelly (conservative)
     lookback: int = 60                 # Default lookback for spread
+    regime: RegimeConfig = None        # Regime-conditional risk
+
+    def __post_init__(self):
+        if self.regime is None:
+            self.regime = RegimeConfig()
 
 
 @dataclass
@@ -89,6 +113,32 @@ class PortfolioResult:
     drawdown_series: Optional[pd.Series] = None
     weights_history: Optional[pd.DataFrame] = None
     trade_log: list = field(default_factory=list)
+
+
+def detect_vol_regime(
+    returns: pd.Series,
+    config: RegimeConfig,
+    lookback: int = 20,
+) -> tuple[str, float]:
+    """
+    Detect current volatility regime.
+
+    Returns (regime_name, position_scale).
+    Regimes: LOW_VOL, NORMAL, HIGH_VOL, CRISIS
+    """
+    if len(returns) < lookback:
+        return "NORMAL", config.normal_vol_scale
+
+    realized_vol = float(returns.tail(lookback).std() * np.sqrt(252))
+
+    if realized_vol >= config.crisis_vol_threshold:
+        return "CRISIS", config.crisis_scale
+    elif realized_vol >= config.high_vol_threshold:
+        return "HIGH_VOL", config.high_vol_scale
+    elif realized_vol <= config.low_vol_threshold:
+        return "LOW_VOL", config.low_vol_scale
+    else:
+        return "NORMAL", config.normal_vol_scale
 
 
 def compute_kelly_weight(win_rate: float, avg_win: float, avg_loss: float) -> float:
@@ -234,6 +284,14 @@ def run_portfolio_backtest(
         else:
             vol_scale = 1.0
 
+        # Regime detection — adjust sizing based on market vol regime
+        regime_name, regime_scale = "NORMAL", 1.0
+        if len(returns_series) > 20:
+            regime_name, regime_scale = detect_vol_regime(
+                pd.Series(returns_series[-60:]),
+                config.regime,
+            )
+
         # ── Process each pair ────────────────────────────────────
         for label, data in pair_data.items():
             z = data["z"]
@@ -267,7 +325,7 @@ def run_portfolio_backtest(
                 # Entry
                 if z_val <= -z_open and dd_scale > 0:
                     positions[label] = 1.0
-                    target_weight = config.max_position_weight * dd_scale * vol_scale * config.kelly_fraction
+                    target_weight = config.max_position_weight * dd_scale * vol_scale * regime_scale * config.kelly_fraction
                     weights[label] = min(target_weight, config.max_position_weight)
                     entry_equity[label] = equity
                     holding_days[label] = 0
@@ -280,7 +338,7 @@ def run_portfolio_backtest(
                     })
                 elif z_val >= z_open and dd_scale > 0:
                     positions[label] = -1.0
-                    target_weight = config.max_position_weight * dd_scale * vol_scale * config.kelly_fraction
+                    target_weight = config.max_position_weight * dd_scale * vol_scale * regime_scale * config.kelly_fraction
                     weights[label] = min(target_weight, config.max_position_weight)
                     entry_equity[label] = equity
                     holding_days[label] = 0
