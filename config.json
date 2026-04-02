@@ -1,8 +1,8 @@
 {
   "FMP_API_KEY": "bwMpyASX8gBkNFoVkMfJJ5ci92SIcIs5",
   "strategy": {
-    "z_open": 2.0,
-    "z_close": 0.5,
+    "z_open": 1.52,
+    "z_close": 1.0,
     "max_exposure_per_trade": 0.1,
     "rolling_window": 60,
     "atr_window": 14,

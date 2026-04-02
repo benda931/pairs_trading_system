@@ -112,35 +112,83 @@ def run_analysis_cycle() -> dict:
 
 
 def run_model_cycle() -> dict:
-    """Retrain ML model."""
+    """Retrain ML models for top pairs."""
     print("\n🔄 Model Retrain Cycle")
     print("=" * 50)
-    result = _dispatch("auto_model_retrainer", "auto_retrain_model", {
-        "pair": "XLY-XLC",
-        "horizon": 10,
-        "entry_threshold": 1.5,
-    })
-    if result.get("retrained"):
-        print(f"  ✅ Model retrained: AUC={result.get('auc', '?'):.3f}")
-    else:
-        print(f"  ❌ Retrain failed: {result.get('error', result.get('reason', '?'))}")
-    return result
+
+    # Train on top pairs
+    try:
+        from common.data_loader import load_pairs
+        pairs = load_pairs()[:3]
+        pair_labels = [f"{p['symbols'][0]}-{p['symbols'][1]}" for p in pairs if len(p.get('symbols', [])) >= 2]
+    except Exception:
+        pair_labels = ["XLY-XLC"]
+
+    results = {}
+    for pair in pair_labels:
+        result = _dispatch("auto_model_retrainer", "auto_retrain_model", {
+            "pair": pair,
+            "horizon": 10,
+            "entry_threshold": 1.5,
+        })
+        if result.get("retrained"):
+            print(f"  ✅ {pair}: AUC={result.get('auc', '?'):.3f}")
+            results[pair] = result
+        else:
+            print(f"  ❌ {pair}: {result.get('error', result.get('reason', '?'))}")
+
+    return {"models_retrained": len(results), "results": results}
 
 
 def run_optimize_cycle() -> dict:
-    """Optimize trading parameters."""
+    """Optimize trading parameters and apply them."""
     print("\n⚙️ Parameter Optimization Cycle")
     print("=" * 50)
-    result = _dispatch("auto_parameter_optimizer", "auto_optimize_params", {
-        "pair": "XLY-XLC",
-        "n_trials": 20,
-    })
-    if result.get("optimized"):
-        print(f"  ✅ Best params: {result.get('best_params')}")
-        print(f"  ✅ Best value: {result.get('best_value', '?'):.3f}")
-    else:
-        print(f"  ❌ Optimization failed: {result.get('error', '?')}")
-    return result
+
+    # Get top pairs from pairs.json
+    try:
+        from common.data_loader import load_pairs
+        pairs = load_pairs()[:5]  # Top 5 pairs
+        pair_labels = [f"{p['symbols'][0]}-{p['symbols'][1]}" for p in pairs if len(p.get('symbols', [])) >= 2]
+    except Exception:
+        pair_labels = ["XLY-XLC"]
+
+    best_results = {}
+    for pair in pair_labels[:3]:  # Optimize top 3 pairs
+        result = _dispatch("auto_parameter_optimizer", "auto_optimize_params", {
+            "pair": pair,
+            "n_trials": 20,
+        })
+        if result.get("optimized"):
+            print(f"  ✅ {pair}: z_open={result['best_params'].get('z_open', '?'):.2f}, "
+                  f"z_close={result['best_params'].get('z_close', '?'):.2f}, "
+                  f"lookback={result['best_params'].get('lookback', '?')}")
+            best_results[pair] = result
+        else:
+            print(f"  ❌ {pair}: {result.get('error', '?')}")
+
+    # Apply best params to config (from the first pair)
+    if best_results:
+        first_pair = list(best_results.values())[0]
+        best_params = first_pair.get("best_params", {})
+        if best_params:
+            updates = {}
+            if "z_open" in best_params:
+                updates["z_open"] = round(best_params["z_open"], 2)
+            if "z_close" in best_params:
+                updates["z_close"] = round(best_params["z_close"], 2)
+            if updates:
+                config_result = _dispatch("auto_config_updater", "auto_update_config", {
+                    "updates": updates,
+                })
+                if config_result.get("updated"):
+                    changes = config_result.get("changes", [])
+                    for c in changes:
+                        print(f"  📋 Config: {c['key']}: {c['old']} → {c['new']}")
+                else:
+                    print(f"  ⚠️ Config update skipped: {config_result.get('reason', '?')}")
+
+    return {"pairs_optimized": len(best_results), "results": best_results}
 
 
 def run_report_cycle(all_results: dict) -> str:
