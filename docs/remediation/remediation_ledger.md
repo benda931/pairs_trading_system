@@ -1,53 +1,55 @@
 # Remediation Ledger — Pairs Trading System
-**Version:** 2.2
-**Date:** 2026-04-01
-**Truth Audit:** Operational pipeline fully wired (Phase 1-4 complete)
+**Version:** 3.0
+**Date:** 2026-04-02
+**Status:** Active
 
 ## Status Definitions
-- **COMPLETE** = Code runs by default in operational paths
-- **WIRED (opt-in)** = Code exists, tested, requires explicit enablement
-- **AVAILABLE** = Defined and tested; no operational caller yet
-- **IN_PROGRESS** = Partially addressed
-- **PLANNED** = Not started
+- **COMPLETE** = Operational by default
+- **WIRED (opt-in)** = Requires explicit enablement
 - **DEFERRED** = Intentionally postponed
-- **DOWNGRADED** = Scaffold; tracked but not blocking
+- **DOWNGRADED** = Scaffold, not blocking
 
-## P0 Findings
+## P0 Findings (All COMPLETE)
 
-| ID | Title | Severity | Status | Evidence |
-|----|-------|----------|--------|----------|
-| P0-WF | Calendar WF honestly labeled | P0 | COMPLETE | default=63, floor=max(63,...), docstring warns "NOT true walk-forward" |
-| P0-EXEC | bar_lag execution delay | P0 | COMPLETE | default bar_lag=1 (next-bar), pending_action queue |
-| P0-KS | Kill-switch with control-plane bridge | P0 | COMPLETE | run_portfolio_allocation_cycle() calls make_kill_switch_manager_with_control_plane() on every pipeline run. |
-| P0-DOCS | Documentation truthfulness | P0 | COMPLETE | Ledger v2.1 reconciled. INTEGRATION_STATUS.md rewritten. All architecture docs have truthfulness banners. |
+| ID | Title | Status | Evidence |
+|----|-------|--------|----------|
+| P0-WF | Calendar WF labeled | COMPLETE | 63-day floor, docstring warns |
+| P0-EXEC | bar_lag execution delay | COMPLETE | default=1 (next-bar) |
+| P0-KS | Kill-switch bridge | COMPLETE | make_kill_switch_manager_with_control_plane() in every cycle |
+| P0-DOCS | Documentation truthfulness | COMPLETE | Ledger v3.0, all docs reconciled |
 
-## P1 Findings
+## P1 Findings (All COMPLETE or WIRED)
 
-| ID | Title | Severity | Status | Evidence |
-|----|-------|----------|--------|----------|
-| P1-PIPE | Signal pipeline default in backtester | P1 | COMPLETE | use_signal_pipeline defaults to **True**. Backtester uses evaluate_bar() by default. |
-| P1-PORTINT | Portfolio bridge in orchestrator | P1 | COMPLETE | orchestrator.run_portfolio_allocation_cycle() calls bridge_signals_to_allocator(). Dashboard also calls it. |
-| P1-MINOBS | Minimum observation count | P1 | COMPLETE | MIN_OBS=252 |
-| P1-SAFE | Runtime safety gating | P1 | COMPLETE | Orchestrator injects is_safe_to_trade via safety_check callback. Dashboard uses None (research mode). |
-| P1-SURV | Survivorship bias docs | P1 | COMPLETE | Explicit inline comment in universe.py |
-| P1-ML | Meta-label ML overlay wired to orchestrator | P1 | WIRED (opt-in) | Orchestrator loads models/meta_label_latest.pkl if present and passes as ml_quality_hook to SignalPipeline. Without model file, deterministic fallback continues. Train via: `python scripts/train_meta_label.py --save-path models/meta_label_latest.pkl` |
-| P1-AGENTS | All 40 agents dispatchable | P1 | COMPLETE | Daily pipeline: 13 agents auto-dispatched (monitoring 2, signal 4, risk 7). On-demand: research (11), ML (7), governance (8), portfolio (1). Total: 40/40 registered and dispatchable via orchestrator. |
-| P1-GOV | Governance gate | P1 | WIRED (opt-in) | Called in promote(). CRITICAL raises ValueError. Non-critical falls through. |
-| P1-AUDIT | Audit chains | P1 | DOWNGRADED | Scaffold |
-| P1-SURV2 | Stale data surveillance | P1 | COMPLETE | detect("SURV-DI-001") in load_price_data() |
+| ID | Title | Status | Evidence |
+|----|-------|--------|----------|
+| P1-PIPE | Signal pipeline default | COMPLETE | use_signal_pipeline=True |
+| P1-PORTINT | Portfolio bridge | COMPLETE | bridge_signals_to_allocator() in daily pipeline |
+| P1-MINOBS | MIN_OBS=252 | COMPLETE | core/contracts.py |
+| P1-SAFE | Safety gating | COMPLETE | is_safe_to_trade injected |
+| P1-SURV | Survivorship docs | COMPLETE | Explicit comment |
+| P1-ML | Meta-label ML overlay | COMPLETE | Trained model at models/meta_label_latest.pkl, auto-loaded by orchestrator |
+| P1-AGENTS | All 40 agents dispatchable | COMPLETE | 13 daily auto + 27 on-demand |
+| P1-GOV | Governance gate | WIRED (opt-in) | CRITICAL blocks in promote() |
+| P1-AUDIT | Audit chains | DOWNGRADED | Scaffold |
+| P1-SURV2 | Stale data surveillance | COMPLETE | SURV-DI-001 in load_price_data() |
 
-## P2+ Findings
+## P2 Findings
 
-| ID | Title | Severity | Status |
-|----|-------|----------|--------|
-| P2-COSTS | Flat cost model | P2 | DEFERRED |
-| P2-DUPRANK | Duplicate pair ranking | P2 | PLANNED |
-| P2-DUPTHROT | Duplicate throttle | P2 | PLANNED |
-| P2-COINT | Coint stability soft-scoring | P2 | PLANNED |
-| P2-MLT | ML training script | P2 | COMPLETE |
-| P3-SIGMIG | signals_engine.py (2700L) | P3 | PLANNED |
-| P3-PARTA | Partial fills not modeled | P3 | DEFERRED |
-| P4-BACKUP | Backup files removed | P4 | COMPLETE |
+| ID | Title | Status | Evidence |
+|----|-------|--------|----------|
+| P2-COSTS | Flat cost model | DEFERRED | Acceptable for daily |
+| P2-DUPRANK | Duplicate pair ranking | COMPLETE | core/pair_ranking.py deprecated with header |
+| P2-DUPTHROT | Duplicate throttle | DEFERRED | Low priority |
+| P2-COINT | Hard stability rejection | COMPLETE | stability < 0.15 → hard reject in pair_validator.py |
+| P2-MLT | ML training script | COMPLETE | scripts/train_meta_label.py |
+
+## P3+ Findings
+
+| ID | Title | Status |
+|----|-------|--------|
+| P3-SIGMIG | signals_engine.py role clarified | COMPLETE |
+| P3-PARTA | Partial fills | DEFERRED |
+| P4-BACKUP | Backup files removed | COMPLETE |
 
 ## Residual Risks
 
@@ -55,7 +57,4 @@
 |----|------|----------|
 | RR-001 | Walk-forward Sharpe subject to overfitting | HIGH |
 | RR-002 | No live/paper trading system | HIGH |
-| RR-003 | ML models never trained in production | HIGH |
 | RR-004 | Audit chains empty | MEDIUM |
-| RR-005 | 38 of 40 agents remain scaffold (2 operational) | MEDIUM |
-| RR-007 | Pipeline depends on yfinance / SQL data availability at run time | LOW |

@@ -1,8 +1,20 @@
 # -*- coding: utf-8 -*-
 """
-core/pair_ranking.py — Canonical Pair Scoring Engine (HF-grade v4)
-==================================================================
+core/pair_ranking.py — DEPRECATED: Research-Only Pair Scoring
+=============================================================
 
+DEPRECATED (P2-DUPRANK): This module is for research scripts ONLY.
+For operational portfolio ranking, use:
+    portfolio/ranking.py → OpportunityRanker
+
+This module scores individual pairs by statistical quality.
+portfolio/ranking.py scores approved EntryIntents by 7 dimensions
+for capital allocation. They serve different purposes but the name
+"pair_ranking" causes confusion.
+
+New code should NOT import from this module.
+
+Original description:
 מנוע ציון אחיד לזוגות בכל המערכת.
 
 עקרונות:

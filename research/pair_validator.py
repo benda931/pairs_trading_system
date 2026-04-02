@@ -484,11 +484,14 @@ class PairValidator:
                 n_windows=self.config.stability_n_windows,
             )
             report.rolling_stability = stability if not np.isnan(stability) else np.nan
+            # P2-COINT: Hard-reject if stability is critically low (< 0.15)
+            HARD_STABILITY_FLOOR = 0.15
+            critically_unstable = (not np.isnan(stability)) and stability < HARD_STABILITY_FLOOR
             stab_ok = np.isnan(stability) or stability >= self.config.min_rolling_stability
             stab_test = ValidationTest(
                 name="hedge_ratio_stability",
-                passed=stab_ok,
-                is_hard=False,  # SOFT: warn, don't reject
+                passed=stab_ok and not critically_unstable,
+                is_hard=critically_unstable,  # HARD reject if below 0.15
                 value=stability if not np.isnan(stability) else np.nan,
                 threshold=self.config.min_rolling_stability,
                 message=(
@@ -497,7 +500,12 @@ class PairValidator:
                 ),
             )
             report.tests.append(stab_test)
-            if not stab_ok:
+            if critically_unstable:
+                report.rejection_reasons.append(
+                    f"CRITICALLY unstable hedge ratio: {stability:.3f} < {HARD_STABILITY_FLOOR} "
+                    "(relationship is nearly random — hard reject per P2-COINT)"
+                )
+            elif not stab_ok:
                 report.warning_reasons.append(
                     f"Low hedge ratio stability: {stability:.3f} < {self.config.min_rolling_stability} "
                     "(hedge ratio drifting; consider Kalman or rolling OLS spread model)"

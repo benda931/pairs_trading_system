@@ -30,3 +30,4 @@ zoom_results/
 studies/
 *.bak
 *.gpt_backup
+models/
