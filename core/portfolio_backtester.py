@@ -222,6 +222,35 @@ def run_portfolio_backtest(
         except Exception as e:
             logger.debug(f"Skip {label}: {e}")
 
+    # ── Correlation check: flag overlapping pairs ──────────────
+    # Compute pairwise spread correlations and warn about overlap
+    if len(pair_data) > 1:
+        spread_returns = {}
+        for label, d in pair_data.items():
+            sr = d["spread"].pct_change().dropna().replace([np.inf, -np.inf], 0)
+            spread_returns[label] = sr
+
+        corr_matrix = pd.DataFrame(spread_returns).corr()
+        overlapping = []
+        checked = set()
+        for l1 in corr_matrix.columns:
+            for l2 in corr_matrix.columns:
+                if l1 >= l2:
+                    continue
+                key = (l1, l2)
+                if key in checked:
+                    continue
+                checked.add(key)
+                c = corr_matrix.loc[l1, l2]
+                if abs(c) > config.max_corr_overlap:
+                    overlapping.append((l1, l2, round(c, 3)))
+        if overlapping:
+            logger.info(
+                "Correlated pairs detected (%d pairs, corr > %.2f): %s",
+                len(overlapping), config.max_corr_overlap,
+                ", ".join(f"{a}-{b}({c})" for a, b, c in overlapping[:5]),
+            )
+
     if not pair_data:
         return PortfolioResult()
 

@@ -52,7 +52,24 @@ def _load_fmp_key_from_config() -> str | None:
     return None
 
 
-_DEFAULT_API_KEY: str | None = os.environ.get("FMP_API_KEY") or _load_fmp_key_from_config()
+def _load_fmp_key_from_env_file() -> str | None:
+    """Read FMP_API_KEY from .env file in the project root."""
+    try:
+        root = Path(__file__).resolve().parent.parent
+        env_path = root / ".env"
+        if env_path.exists():
+            for line in env_path.read_text().splitlines():
+                if line.startswith("FMP_API_KEY="):
+                    return line.split("=", 1)[1].strip() or None
+    except Exception:
+        pass
+    return None
+
+_DEFAULT_API_KEY: str | None = (
+    os.environ.get("FMP_API_KEY")
+    or _load_fmp_key_from_env_file()
+    or _load_fmp_key_from_config()
+)
 _BASE = "https://financialmodelingprep.com"
 _STABLE = f"{_BASE}/stable"
 _V3 = f"{_BASE}/api/v3"

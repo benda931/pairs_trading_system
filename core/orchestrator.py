@@ -1156,17 +1156,53 @@ class PairsOrchestrator:
         # If not found → ml_hook=None → deterministic quality fallback.
         ml_hook = None
         try:
-            from ml.models.meta_labeler import MetaLabelModel
-            model_path = PROJECT_ROOT / "models" / "meta_label_latest.pkl"
-            if model_path.exists():
-                ml_hook = MetaLabelModel.load(str(model_path))
-                if ml_hook.is_fitted:
-                    logger.info("ML meta-label model loaded: %s", model_path.name)
-                else:
-                    logger.info("ML model at %s is not fitted — using deterministic fallback", model_path.name)
-                    ml_hook = None
+            # Priority 1: XGBoost model (best AUC) — per-pair or generic
+            import pickle
+            xgb_path = PROJECT_ROOT / "models" / "xgb_meta_latest.pkl"
+            if not xgb_path.exists():
+                # Try any XGBoost model
+                xgb_files = sorted((PROJECT_ROOT / "models").glob("xgb_meta_*.pkl"))
+                if xgb_files:
+                    xgb_path = xgb_files[-1]
+
+            if xgb_path.exists():
+                with open(xgb_path, "rb") as _f:
+                    xgb_data = pickle.load(_f)
+                if hasattr(xgb_data, "get"):
+                    xgb_model = xgb_data.get("model")
+                    xgb_features = xgb_data.get("features", [])
+                    if xgb_model is not None:
+                        # Wrap XGBoost in MetaLabelProtocol interface
+                        class _XGBHook:
+                            def __init__(self, model, features):
+                                self._model = model
+                                self._features = features
+                            def predict_success_probability(self, feats):
+                                import pandas as _pd
+                                if isinstance(feats, dict):
+                                    row = {k: feats.get(k, 0.0) for k in self._features}
+                                    X = _pd.DataFrame([row])
+                                else:
+                                    X = _pd.DataFrame([{k: 0.0 for k in self._features}])
+                                try:
+                                    return float(self._model.predict_proba(X)[0, 1])
+                                except Exception:
+                                    return float("nan")
+                        ml_hook = _XGBHook(xgb_model, xgb_features)
+                        logger.info("XGBoost ML model loaded: %s (%d features)", xgb_path.name, len(xgb_features))
+
+            # Priority 2: MetaLabelModel (LogReg fallback)
+            if ml_hook is None:
+                from ml.models.meta_labeler import MetaLabelModel
+                model_path = PROJECT_ROOT / "models" / "meta_label_latest.pkl"
+                if model_path.exists():
+                    ml_hook = MetaLabelModel.load(str(model_path))
+                    if ml_hook.is_fitted:
+                        logger.info("MetaLabel (LogReg) model loaded: %s", model_path.name)
+                    else:
+                        ml_hook = None
         except Exception as ml_exc:
-            logger.debug("ML meta-label model not available: %s", ml_exc)
+            logger.debug("ML model not available: %s", ml_exc)
 
         for pair_def in pairs:
             sym_x = sym_y = None

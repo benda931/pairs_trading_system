@@ -242,6 +242,32 @@ def run_full_cycle(
         result["optimal_params"] = opt["best_params"]
         backtest_results.append(result)
 
+    # ── Stage 3.5: Walk-Forward Validation ──────────────────────
+    print(f"\n📊 WALK-FORWARD VALIDATION (top {min(10, len(backtest_results))} pairs)...")
+    print("=" * 60)
+
+    # Run WF on pairs that passed initial backtest
+    candidates = sorted(backtest_results, key=lambda x: x.get("sharpe", -999), reverse=True)
+    candidates = [c for c in candidates if c.get("sharpe", -999) > 0 and not c.get("error")][:10]
+
+    for c in candidates:
+        try:
+            from core.walk_forward_engine import run_walk_forward
+            sx, sy = c.get("optimal_params", c).get("sym_x", c["pair"].split("/")[0]), c["pair"].split("/")[-1]
+            if "/" in c["pair"]:
+                sx, sy = c["pair"].split("/")
+            wf = run_walk_forward(sx, sy, n_folds=3, test_days=63, n_optuna_trials=10)
+            c["wf_oos_sharpe"] = wf.avg_oos_sharpe
+            c["wf_profitable_folds"] = wf.pct_profitable_folds
+            c["wf_deflated_sharpe"] = wf.deflated_sharpe
+            emoji = "✅" if wf.avg_oos_sharpe > 0 else "❌"
+            print(f"  {emoji} {c['pair']:<12} OOS_Sharpe={wf.avg_oos_sharpe:+.2f}  "
+                  f"Profitable={wf.pct_profitable_folds:.0f}%  DSR={wf.deflated_sharpe:.3f}")
+        except Exception as e:
+            c["wf_oos_sharpe"] = 0
+            c["wf_profitable_folds"] = 0
+            logger.debug(f"WF failed for {c['pair']}: {e}")
+
     # ── Stage 4: Filter by Sharpe ─────────────────────────────────
     print(f"\n🔍 FILTERING: keeping pairs with Sharpe > {min_sharpe}")
     print("=" * 60)

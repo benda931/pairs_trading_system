@@ -1,5 +1,4 @@
 {
-  "FMP_API_KEY": "bwMpyASX8gBkNFoVkMfJJ5ci92SIcIs5",
   "strategy": {
     "z_open": 1.52,
     "z_close": 1.0,
@@ -165,7 +164,7 @@
     "note": "250 זוגות אוטומטיים מדורגים עם תחומים מגוונים"
   },
   "version": "1.0.0",
-  "last_updated": "2026-04-02T14:31:55Z",
+  "last_updated": "2026-04-02T15:39:27Z",
   "theme": "light",
   "accent": "Blue",
   "language": "he",
