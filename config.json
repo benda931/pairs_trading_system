@@ -200,5 +200,8 @@
   "sql_store_url": null,
   "scheduler_run_time": "16:15",
   "scheduler_timezone": "America/New_York",
-  "scheduler_capital": 1000000.0
+  "scheduler_capital": 1000000.0,
+  "auto_improve_interval_hours": 6.0,
+  "data_refresh_interval_hours": 2.0,
+  "scheduler_enabled": true
 }

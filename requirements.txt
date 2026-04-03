@@ -28,6 +28,9 @@ matplotlib
 streamlit>=1.30
 dash>=2
 
+# Scheduling
+APScheduler>=3.10
+
 # Utilities
 pydantic>=2
 pydantic-settings

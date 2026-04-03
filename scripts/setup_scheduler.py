@@ -32,29 +32,36 @@ PYTHON = PROJECT_ROOT / ".venv" / "Scripts" / "python.exe"
 
 TASKS = [
     {
+        "name": "PairsTrading_Daemon",
+        "script": "scripts\\run_scheduler_daemon.py",
+        "args": "",
+        "schedule": "/SC ONLOGON",  # Start on user login (resilience)
+        "description": "Pairs Trading: Main scheduler daemon (manages all jobs)",
+    },
+    {
         "name": "PairsTrading_AlphaPipeline",
-        "script": "scripts/run_full_alpha.py",
+        "script": "scripts\\run_full_alpha.py",
         "args": "--universe all --trials 20 --min-sharpe 0.3",
         "schedule": "/SC HOURLY /MO 4",  # Every 4 hours
         "description": "Pairs Trading: Alpha pipeline (discover, optimize, backtest)",
     },
     {
         "name": "PairsTrading_AutoImprove",
-        "script": "scripts/run_auto_improve.py",
+        "script": "scripts\\run_auto_improve.py",
         "args": "",
         "schedule": "/SC HOURLY /MO 6",  # Every 6 hours
         "description": "Pairs Trading: GPT auto-improvement cycle",
     },
     {
         "name": "PairsTrading_DataRefresh",
-        "script": "scripts/run_auto_improve.py",
+        "script": "scripts\\run_auto_improve.py",
         "args": "--cycle data",
         "schedule": "/SC HOURLY /MO 2",  # Every 2 hours
         "description": "Pairs Trading: Refresh price data from Yahoo/FMP",
     },
     {
         "name": "PairsTrading_DailyReport",
-        "script": "scripts/run_auto_improve.py",
+        "script": "scripts\\run_auto_improve.py",
         "args": "--cycle analysis",
         "schedule": "/SC DAILY /ST 16:30",  # 4:30 PM daily
         "description": "Pairs Trading: Daily GPT analysis report",
@@ -66,9 +73,11 @@ def create_tasks():
     """Create all Windows scheduled tasks."""
     print("Creating scheduled tasks...")
     for task in TASKS:
+        script_path = PROJECT_ROOT / task["script"]
+        task_args = task["args"]
         cmd = (
             f'schtasks /CREATE /TN "{task["name"]}" '
-            f'/TR "\\\"{PYTHON}\\\" \\\"{PROJECT_ROOT / task[\"script\"]}\\\" {task[\"args\"]}" '
+            f'/TR "\\"{PYTHON}\\" \\"{script_path}\\" {task_args}" '
             f'{task["schedule"]} '
             f'/F'  # Force overwrite
         )
