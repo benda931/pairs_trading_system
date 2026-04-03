@@ -301,3 +301,68 @@ class TestCLIScript:
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
         assert callable(getattr(mod, "main", None)), "scripts/run_daily_pipeline.py must define main()"
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Section 8 — TestEndToEndPipeline
+# ──────────────────────────────────────────────────────────────────────────────
+
+class TestEndToEndPipeline:
+    """
+    End-to-end integration tests for the full daily pipeline.
+
+    These tests verify that the orchestrator can execute the full pipeline
+    from health_check through risk_check without crashing, and that all
+    key integration points (agents, signals, allocation, alerts) are wired.
+    """
+
+    def test_run_daily_pipeline_never_raises(self):
+        """The full pipeline should never raise — returns results list."""
+        from core.orchestrator import PairsOrchestrator
+
+        orch = PairsOrchestrator()
+        results = orch.run_daily_pipeline()
+        assert isinstance(results, list)
+        # At minimum health_check and data_refresh should execute
+        assert len(results) >= 2
+
+    def test_pipeline_results_have_status(self):
+        """Every TaskResult should have a status field."""
+        from core.orchestrator import PairsOrchestrator
+
+        orch = PairsOrchestrator()
+        results = orch.run_daily_pipeline()
+        for r in results:
+            assert hasattr(r, "status"), f"TaskResult missing status: {r}"
+
+    def test_load_ml_hook_returns_valid_or_none(self):
+        """_load_ml_hook should return an object with predict_success_probability or None."""
+        from core.orchestrator import PairsOrchestrator
+
+        orch = PairsOrchestrator()
+        hook = orch._load_ml_hook()
+        if hook is not None:
+            assert callable(getattr(hook, "predict_success_probability", None)), \
+                "ML hook must implement predict_success_probability()"
+            # Test it doesn't crash with empty features
+            prob = hook.predict_success_probability({})
+            assert isinstance(prob, float)
+
+    def test_send_pipeline_alerts_never_raises(self):
+        """_send_pipeline_alerts should never crash even with empty data."""
+        from core.orchestrator import PairsOrchestrator
+
+        orch = PairsOrchestrator()
+        # Should not raise with empty data
+        orch._send_pipeline_alerts([], [])
+
+    def test_scheduler_daemon_script_importable(self):
+        """The scheduler daemon should be importable without side effects."""
+        import importlib.util
+        script = Path(__file__).resolve().parent.parent / "scripts" / "run_scheduler_daemon.py"
+        assert script.exists()
+        spec = importlib.util.spec_from_file_location("run_scheduler_daemon", script)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        assert callable(getattr(mod, "start_daemon", None))
+        assert callable(getattr(mod, "_job_heartbeat", None))

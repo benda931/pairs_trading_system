@@ -343,6 +343,7 @@ class PairsOrchestrator:
 
         order = ["health_check", "data_refresh", "compute_signals", "risk_check"]
         results = []
+        all_signal_decisions = []  # Collect for alert summary
 
         for name in order:
             task = self.tasks.get(name)
@@ -374,6 +375,7 @@ class PairsOrchestrator:
 
                 # Collect decisions and allocate
                 signal_decisions = self._collect_signal_decisions()
+                all_signal_decisions = signal_decisions  # Save for alert summary
                 if signal_decisions:
                     try:
                         from common.config_manager import load_config
@@ -397,10 +399,14 @@ class PairsOrchestrator:
 
         # Summary
         ok = sum(1 for r in results if r.status == "success")
+        failed = len(results) - ok
         logger.info(
             "Daily pipeline complete: %d/%d tasks succeeded",
             ok, len(results),
         )
+
+        # ── Send operational alerts ──────────────────────────────
+        self._send_pipeline_alerts(results, all_signal_decisions)
 
         # Publish pipeline summary
         self.bus.publish("daily_pipeline", {
@@ -410,6 +416,66 @@ class PairsOrchestrator:
         })
 
         return results
+
+    def _send_pipeline_alerts(self, results: list, signal_decisions: list) -> None:
+        """
+        Send operational alerts after daily pipeline completes.
+
+        Alerts:
+        - Pipeline summary (OK/FAILED tasks count)
+        - Active entry/exit signals
+        - Risk warnings from failed tasks
+        """
+        try:
+            from core.alerts import alert_system, alert_signal, alert_risk
+
+            # Pipeline summary
+            ok = sum(1 for r in results if r.status == "success")
+            failed = len(results) - ok
+            if failed > 0:
+                alert_system(
+                    "daily_pipeline",
+                    "WARNING",
+                    f"{ok}/{len(results)} tasks OK, {failed} failed",
+                )
+            else:
+                alert_system(
+                    "daily_pipeline",
+                    "OK",
+                    f"All {ok} tasks completed successfully",
+                )
+
+            # Signal alerts — notify on active entry/exit signals
+            for dec in signal_decisions:
+                try:
+                    if hasattr(dec, 'blocked') and dec.blocked:
+                        continue  # Skip blocked signals
+
+                    pair_label = str(dec.pair_id) if hasattr(dec, 'pair_id') else "?"
+                    z = dec.z_score if hasattr(dec, 'z_score') else 0.0
+                    intent = getattr(dec, 'intent', None)
+
+                    if intent is None:
+                        continue
+
+                    action_str = str(getattr(intent, 'action', 'HOLD'))
+                    if 'ENTRY' in action_str.upper() or 'EXIT' in action_str.upper():
+                        regime = getattr(dec, 'regime', '?')
+                        grade = getattr(dec, 'quality_grade', '?')
+                        alert_signal(
+                            pair=pair_label,
+                            action=action_str,
+                            z_score=z,
+                            regime=regime,
+                            quality=grade,
+                        )
+                except Exception:
+                    pass  # Never let alert errors break the pipeline
+
+        except ImportError:
+            logger.debug("core.alerts not available — skipping pipeline alerts")
+        except Exception as exc:
+            logger.warning("_send_pipeline_alerts failed: %s", exc)
 
     def run_agent_system_health_check(self) -> Optional[TaskResult]:
         """
@@ -1107,6 +1173,96 @@ class PairsOrchestrator:
         logger.warning("_get_active_pairs: no pairs found in AppContext or config")
         return []
 
+    def _load_ml_hook(self):
+        """
+        Load the best available meta-label ML model for signal quality.
+
+        Priority order:
+        1. ModelScorer (formal ML inference layer) — if registry has a champion
+        2. XGBoost pickle (ad-hoc trained) — per-pair or generic
+        3. MetaLabelModel (LogReg) — lighter fallback
+        4. None → deterministic quality fallback (no ML)
+
+        Returns an object with ``predict_success_probability(features_dict)``
+        or None if no model is available.
+        """
+        # Priority 1: Try formal ModelScorer from ML platform
+        try:
+            from ml.inference.scorer import ModelScorer
+            from ml.contracts import InferenceRequest, MLTaskFamily
+            scorer = ModelScorer()
+            model = scorer.get_model_for_task(MLTaskFamily.META_LABELING)
+            if model is not None:
+                class _ScorerHook:
+                    def __init__(self, _scorer):
+                        self._scorer = _scorer
+                    def predict_success_probability(self, feats):
+                        try:
+                            req = InferenceRequest(
+                                entity_id="pipeline",
+                                task_family=MLTaskFamily.META_LABELING,
+                                features=feats if isinstance(feats, dict) else {},
+                                allow_fallback=True,
+                            )
+                            result = self._scorer.score(req)
+                            return result.score if not result.fallback_used else float("nan")
+                        except Exception:
+                            return float("nan")
+                logger.info("ML model loaded via ModelScorer (formal inference layer)")
+                return _ScorerHook(scorer)
+        except Exception as exc:
+            logger.debug("ModelScorer not available: %s", exc)
+
+        # Priority 2: XGBoost pickle (ad-hoc trained models)
+        try:
+            import pickle
+            import pandas as _pd
+            xgb_path = PROJECT_ROOT / "models" / "xgb_meta_latest.pkl"
+            if not xgb_path.exists():
+                xgb_files = sorted((PROJECT_ROOT / "models").glob("xgb_meta_*.pkl"))
+                if xgb_files:
+                    xgb_path = xgb_files[-1]
+            if xgb_path.exists():
+                with open(xgb_path, "rb") as _f:
+                    xgb_data = pickle.load(_f)
+                if hasattr(xgb_data, "get"):
+                    xgb_model = xgb_data.get("model")
+                    xgb_features = xgb_data.get("features", [])
+                    if xgb_model is not None:
+                        class _XGBHook:
+                            def __init__(self, model, features):
+                                self._model = model
+                                self._features = features
+                            def predict_success_probability(self, feats):
+                                if isinstance(feats, dict):
+                                    row = {k: feats.get(k, 0.0) for k in self._features}
+                                    X = _pd.DataFrame([row])
+                                else:
+                                    X = _pd.DataFrame([{k: 0.0 for k in self._features}])
+                                try:
+                                    return float(self._model.predict_proba(X)[0, 1])
+                                except Exception:
+                                    return float("nan")
+                        logger.info("XGBoost ML model loaded: %s (%d features)", xgb_path.name, len(xgb_features))
+                        return _XGBHook(xgb_model, xgb_features)
+        except Exception as exc:
+            logger.debug("XGBoost model not available: %s", exc)
+
+        # Priority 3: MetaLabelModel (LogReg fallback)
+        try:
+            from ml.models.meta_labeler import MetaLabelModel
+            model_path = PROJECT_ROOT / "models" / "meta_label_latest.pkl"
+            if model_path.exists():
+                ml_model = MetaLabelModel.load(str(model_path))
+                if ml_model.is_fitted:
+                    logger.info("MetaLabel (LogReg) model loaded: %s", model_path.name)
+                    return ml_model
+        except Exception as exc:
+            logger.debug("MetaLabelModel not available: %s", exc)
+
+        logger.info("No ML model available — using deterministic quality fallback")
+        return None
+
     def _collect_signal_decisions(
         self,
         pairs: Optional[list] = None,
@@ -1150,59 +1306,10 @@ class PairsOrchestrator:
         decisions = []
         t0 = _time.time()
 
-        # ── P1-ML: Try loading a trained meta-label model ────────
-        # If a model file exists (from scripts/train_meta_label.py),
-        # pass it as ml_quality_hook to every SignalPipeline instance.
-        # If not found → ml_hook=None → deterministic quality fallback.
-        ml_hook = None
-        try:
-            # Priority 1: XGBoost model (best AUC) — per-pair or generic
-            import pickle
-            xgb_path = PROJECT_ROOT / "models" / "xgb_meta_latest.pkl"
-            if not xgb_path.exists():
-                # Try any XGBoost model
-                xgb_files = sorted((PROJECT_ROOT / "models").glob("xgb_meta_*.pkl"))
-                if xgb_files:
-                    xgb_path = xgb_files[-1]
-
-            if xgb_path.exists():
-                with open(xgb_path, "rb") as _f:
-                    xgb_data = pickle.load(_f)
-                if hasattr(xgb_data, "get"):
-                    xgb_model = xgb_data.get("model")
-                    xgb_features = xgb_data.get("features", [])
-                    if xgb_model is not None:
-                        # Wrap XGBoost in MetaLabelProtocol interface
-                        class _XGBHook:
-                            def __init__(self, model, features):
-                                self._model = model
-                                self._features = features
-                            def predict_success_probability(self, feats):
-                                import pandas as _pd
-                                if isinstance(feats, dict):
-                                    row = {k: feats.get(k, 0.0) for k in self._features}
-                                    X = _pd.DataFrame([row])
-                                else:
-                                    X = _pd.DataFrame([{k: 0.0 for k in self._features}])
-                                try:
-                                    return float(self._model.predict_proba(X)[0, 1])
-                                except Exception:
-                                    return float("nan")
-                        ml_hook = _XGBHook(xgb_model, xgb_features)
-                        logger.info("XGBoost ML model loaded: %s (%d features)", xgb_path.name, len(xgb_features))
-
-            # Priority 2: MetaLabelModel (LogReg fallback)
-            if ml_hook is None:
-                from ml.models.meta_labeler import MetaLabelModel
-                model_path = PROJECT_ROOT / "models" / "meta_label_latest.pkl"
-                if model_path.exists():
-                    ml_hook = MetaLabelModel.load(str(model_path))
-                    if ml_hook.is_fitted:
-                        logger.info("MetaLabel (LogReg) model loaded: %s", model_path.name)
-                    else:
-                        ml_hook = None
-        except Exception as ml_exc:
-            logger.debug("ML model not available: %s", ml_exc)
+        # ── P1-ML: Load meta-label model for signal quality ─────
+        # Priority: ModelScorer (formal) → XGBoost pickle → MetaLabel LogReg
+        # If none available → ml_hook=None → deterministic quality fallback.
+        ml_hook = self._load_ml_hook()
 
         for pair_def in pairs:
             sym_x = sym_y = None
