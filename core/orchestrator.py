@@ -435,6 +435,9 @@ class PairsOrchestrator:
             ok, len(results),
         )
 
+        # ── Agent Feedback Loop — ACT on agent outputs ─────────
+        feedback_summary = self._run_feedback_loop(results)
+
         # ── Send operational alerts ──────────────────────────────
         self._send_pipeline_alerts(results, all_signal_decisions)
 
@@ -783,6 +786,47 @@ class PairsOrchestrator:
         except Exception as exc:
             logger.warning("Factor attribution failed: %s", exc)
             return TaskResult(task_name="factor_attribution", status="failed", message=str(exc))
+
+    def _run_feedback_loop(self, results: list) -> Optional[Any]:
+        """
+        Run the Agent Feedback Loop on pipeline results.
+
+        This is the key integration: agent outputs are analyzed by the
+        feedback engine and converted into REAL system actions (block entries,
+        force exits, deleverage, retrain, etc.)
+        """
+        try:
+            from core.agent_feedback import AgentFeedbackLoop
+
+            loop = AgentFeedbackLoop(dry_run=False)
+            actions = loop.process_agent_results(results)
+
+            if actions:
+                summary = loop.execute_actions(actions)
+                self.bus.publish("feedback_loop", {
+                    "n_actions": summary.n_actions_generated,
+                    "n_executed": summary.n_actions_executed,
+                    "n_blocked": summary.n_actions_blocked,
+                    "state_changes": summary.system_state_changes,
+                    "actions": [
+                        {"type": a.action_type, "target": a.target,
+                         "severity": a.severity, "executed": a.executed}
+                        for a in summary.actions
+                    ],
+                })
+                logger.info(
+                    "Feedback loop: %d actions generated, %d executed, %d blocked",
+                    summary.n_actions_generated, summary.n_actions_executed,
+                    summary.n_actions_blocked,
+                )
+                return summary
+            else:
+                logger.info("Feedback loop: no actions needed")
+                return None
+
+        except Exception as exc:
+            logger.warning("Feedback loop failed: %s", exc)
+            return None
 
     def _send_pipeline_alerts(self, results: list, signal_decisions: list) -> None:
         """
