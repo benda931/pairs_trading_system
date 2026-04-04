@@ -397,6 +397,18 @@ class PairsOrchestrator:
                 else:
                     logger.info("run_daily_pipeline: no signal decisions — allocation skipped")
 
+        # ── Run risk analytics on portfolio returns ─────────────
+        risk_result = self._run_risk_analytics()
+        if risk_result is not None:
+            results.append(risk_result)
+            self._results.append(risk_result)
+
+        # ── Run universe scanner for new pair opportunities ───
+        scan_result = self._run_universe_scan()
+        if scan_result is not None:
+            results.append(scan_result)
+            self._results.append(scan_result)
+
         # Summary
         ok = sum(1 for r in results if r.status == "success")
         failed = len(results) - ok
@@ -416,6 +428,158 @@ class PairsOrchestrator:
         })
 
         return results
+
+    def _run_risk_analytics(self) -> Optional[TaskResult]:
+        """Run portfolio-level risk analytics using the new RiskAnalytics engine."""
+        try:
+            from core.risk_analytics import RiskAnalytics
+
+            # Try to load recent equity curve / returns
+            returns = None
+            try:
+                from core.alpha_persistence import load_alpha_results
+                alpha = load_alpha_results()
+                if alpha and "equity_curve" in alpha:
+                    eq = pd.Series(alpha["equity_curve"])
+                    returns = eq.pct_change().dropna()
+            except Exception:
+                pass
+
+            if returns is None or len(returns) < 30:
+                logger.info("Risk analytics: no returns data available, skipping")
+                return None
+
+            ra = RiskAnalytics()
+            report = ra.full_risk_report(returns, name="Portfolio")
+
+            # Alert on high risk
+            if report.var_95 and report.var_95.cvar > 0.03:
+                try:
+                    from core.alerts import alert_risk
+                    alert_risk(
+                        "High CVaR",
+                        f"95% CVaR = {report.var_95.cvar:.2%} (threshold: 3%)",
+                        severity="WARNING",
+                    )
+                except Exception:
+                    pass
+
+            if report.drawdown and report.drawdown.current_drawdown < -0.10:
+                try:
+                    from core.alerts import alert_risk
+                    alert_risk(
+                        "Drawdown Alert",
+                        f"Current DD = {report.drawdown.current_drawdown:.2%}",
+                        severity="CRITICAL" if report.drawdown.current_drawdown < -0.20 else "WARNING",
+                    )
+                except Exception:
+                    pass
+
+            self.bus.publish("risk_analytics", {
+                "sharpe": report.sharpe_ratio,
+                "vol": report.annualized_vol,
+                "var95": report.var_95.cornish_fisher_var if report.var_95 else None,
+                "cvar95": report.var_95.cvar if report.var_95 else None,
+                "max_dd": report.drawdown.max_drawdown if report.drawdown else None,
+                "current_dd": report.drawdown.current_drawdown if report.drawdown else None,
+            })
+
+            logger.info(
+                "Risk analytics: Sharpe=%.2f, Vol=%.1f%%, CVaR95=%.2f%%, MaxDD=%.1f%%",
+                report.sharpe_ratio,
+                report.annualized_vol * 100,
+                (report.var_95.cvar if report.var_95 else 0) * 100,
+                (report.drawdown.max_drawdown if report.drawdown else 0) * 100,
+            )
+
+            return TaskResult(
+                task_name="risk_analytics",
+                status="success",
+                message=f"Sharpe={report.sharpe_ratio:.2f}, CVaR95={report.var_95.cvar:.2%}" if report.var_95 else "OK",
+            )
+        except Exception as exc:
+            logger.warning("Risk analytics failed: %s", exc)
+            return TaskResult(task_name="risk_analytics", status="failed", message=str(exc))
+
+    def _run_universe_scan(self) -> Optional[TaskResult]:
+        """Run universe scanner to find new pair opportunities."""
+        try:
+            from core.universe_scanner import UniverseScanner
+            from common.data_loader import load_prices_multi
+
+            # Get list of symbols to scan
+            pairs = self._get_active_pairs()
+            symbols = set()
+            for p in pairs:
+                if isinstance(p, dict):
+                    sx = p.get("sym_x") or p.get("symbol_x")
+                    sy = p.get("sym_y") or p.get("symbol_y")
+                    if sx:
+                        symbols.add(sx)
+                    if sy:
+                        symbols.add(sy)
+                elif isinstance(p, (list, tuple)) and len(p) >= 2:
+                    symbols.add(str(p[0]))
+                    symbols.add(str(p[1]))
+
+            if len(symbols) < 3:
+                logger.info("Universe scan: too few symbols (%d), skipping", len(symbols))
+                return None
+
+            prices = load_prices_multi(list(symbols))
+            if prices is None or prices.empty or len(prices.columns) < 3:
+                logger.info("Universe scan: insufficient price data")
+                return None
+
+            scanner = UniverseScanner(
+                min_correlation=0.55,
+                min_grade="C",
+                require_cointegration=True,
+                max_pairs=20,
+            )
+            result = scanner.scan(prices)
+
+            self.bus.publish("universe_scan", {
+                "n_instruments": result.n_instruments,
+                "n_pairs_screened": result.n_pairs_screened,
+                "n_pairs_final": result.n_pairs_final,
+                "yield_rate": result.yield_rate,
+                "top_pairs": [
+                    {"pair": f"{p.sym_x}/{p.sym_y}", "score": p.score, "grade": p.grade}
+                    for p in result.pairs[:5]
+                ],
+            })
+
+            # Alert on new high-quality discoveries
+            new_high_quality = [p for p in result.pairs if p.grade in ("A+", "A")]
+            if new_high_quality:
+                try:
+                    from core.alerts import alert_signal
+                    for p in new_high_quality[:3]:
+                        alert_signal(
+                            pair=f"{p.sym_x}/{p.sym_y}",
+                            action="NEW_DISCOVERY",
+                            z_score=0.0,
+                            grade=p.grade,
+                            score=f"{p.score:.3f}",
+                            half_life=f"{p.half_life:.1f}d",
+                        )
+                except Exception:
+                    pass
+
+            logger.info(
+                "Universe scan: %d pairs found from %d screened (yield=%.1f%%)",
+                result.n_pairs_final, result.n_pairs_screened, result.yield_rate * 100,
+            )
+
+            return TaskResult(
+                task_name="universe_scan",
+                status="success",
+                message=f"{result.n_pairs_final} pairs found ({result.yield_rate:.0%} yield)",
+            )
+        except Exception as exc:
+            logger.warning("Universe scan failed: %s", exc)
+            return TaskResult(task_name="universe_scan", status="failed", message=str(exc))
 
     def _send_pipeline_alerts(self, results: list, signal_decisions: list) -> None:
         """
