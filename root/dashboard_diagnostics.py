@@ -39,7 +39,7 @@ try:
         RUNTIME_USER,
         STARTED_AT_UTC,
     )
-except ImportError:
+except (ImportError, AttributeError):
     _make_json_safe = lambda x: x
     _safe_getattr = getattr
     ensure_dashboard_runtime = lambda ctx: None
@@ -58,13 +58,13 @@ except ImportError:
 
 try:
     from root.dashboard_telemetry import build_dashboard_summary, dashboard_summary_to_dict
-except ImportError:
+except (ImportError, AttributeError):
     build_dashboard_summary = lambda runtime: None
     dashboard_summary_to_dict = lambda s: {}
 
 try:
     from root.dashboard_health import compute_dashboard_health, dashboard_health_to_dict
-except ImportError:
+except (ImportError, AttributeError):
     compute_dashboard_health = lambda runtime: None
     dashboard_health_to_dict = lambda h, include_summary=False: {}
 

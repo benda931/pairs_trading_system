@@ -43,7 +43,7 @@ try:
         DashboardSummary,
         SESSION_KEY_DASHBOARD_SUMMARY,
     )
-except ImportError:
+except (ImportError, AttributeError):
     ensure_dashboard_runtime = lambda ctx: None
     _log_tab_entry = lambda *a, **kw: None
     _find_module = lambda *a: None

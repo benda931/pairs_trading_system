@@ -33,7 +33,7 @@ try:
         RUNTIME_HOST,
         STARTED_AT_UTC,
     )
-except ImportError:
+except (ImportError, AttributeError):
     _safe_getattr = getattr
     _make_json_safe = lambda x: x
     _discover_services_mapping = lambda ctx: {}

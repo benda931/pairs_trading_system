@@ -20,29 +20,29 @@ logger = logging.getLogger(__name__)
 # Import deps
 try:
     from root.dashboard import _make_json_safe, ensure_dashboard_runtime
-except ImportError:
+except (ImportError, AttributeError):
     _make_json_safe = lambda x: x
     ensure_dashboard_runtime = lambda ctx: None
 
 try:
     from root.dashboard_health import compute_dashboard_health
-except ImportError:
+except (ImportError, AttributeError):
     compute_dashboard_health = lambda runtime: None
 
 try:
     from root.dashboard_metrics import build_dashboard_overview_metrics, dashboard_overview_metrics_to_dict
-except ImportError:
+except (ImportError, AttributeError):
     build_dashboard_overview_metrics = lambda runtime: []
     dashboard_overview_metrics_to_dict = lambda m: []
 
 try:
     from root.dashboard_alerts_bus import get_dashboard_alerts
-except ImportError:
+except (ImportError, AttributeError):
     get_dashboard_alerts = lambda limit=None: []
 
 try:
     from root.dashboard_integrations import list_saved_views
-except ImportError:
+except (ImportError, AttributeError):
     list_saved_views = lambda: []
 
 # Forward refs

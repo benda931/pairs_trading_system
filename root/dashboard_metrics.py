@@ -31,7 +31,7 @@ try:
         _discover_services_mapping,
         _probe_service,
     )
-except ImportError:
+except (ImportError, AttributeError):
     _make_json_safe = lambda x: x
     _cache_get = lambda ns, key: None
     _cache_set = lambda ns, key, val, ttl=60: None
@@ -40,25 +40,25 @@ except ImportError:
 
 try:
     from root.dashboard_health import compute_dashboard_health, DashboardHealth
-except ImportError:
+except (ImportError, AttributeError):
     compute_dashboard_health = lambda runtime: None
     DashboardHealth = Any
 
 try:
     from root.dashboard_telemetry import build_dashboard_summary, DashboardSummary, TabUsageStats
-except ImportError:
+except (ImportError, AttributeError):
     build_dashboard_summary = lambda runtime: None
     DashboardSummary = Any
     TabUsageStats = Any
 
 try:
     from root.dashboard_alerts_bus import get_dashboard_alerts
-except ImportError:
+except (ImportError, AttributeError):
     get_dashboard_alerts = lambda limit=None: []
 
 try:
     from root.dashboard_integrations import get_last_desktop_push_info, get_agent_actions_history_tail
-except ImportError:
+except (ImportError, AttributeError):
     get_last_desktop_push_info = lambda: None
     get_agent_actions_history_tail = lambda limit=10: []
 

@@ -40,7 +40,7 @@ try:
         TAB_KEY_FAIR_VALUE,
         TAB_KEY_LOGS,
     )
-except ImportError:
+except (ImportError, AttributeError):
     _log_tab_entry = lambda *a, **kw: None
     _find_module = lambda *a: None
     _find_tab_function_in_module = lambda *a: None
@@ -60,13 +60,13 @@ except ImportError:
 
 try:
     from root.dashboard_health import compute_dashboard_health, check_dashboard_ready
-except ImportError:
+except (ImportError, AttributeError):
     compute_dashboard_health = lambda runtime: None
     check_dashboard_ready = lambda ctx: {}
 
 try:
     from root.dashboard_metrics import build_dashboard_overview_metrics, dashboard_overview_metrics_to_dict
-except ImportError:
+except (ImportError, AttributeError):
     build_dashboard_overview_metrics = lambda runtime: []
     dashboard_overview_metrics_to_dict = lambda m: []
 
@@ -78,7 +78,7 @@ try:
         find_saved_view_by_name, apply_saved_view,
         export_saved_views_for_agents,
     )
-except ImportError:
+except (ImportError, AttributeError):
     handle_agent_action = lambda *a, **kw: {}
     handle_agent_actions_batch = lambda *a, **kw: []
     get_agent_actions_history_tail = lambda limit=10: []
@@ -90,7 +90,7 @@ except ImportError:
 
 try:
     from root.dashboard_alerts_bus import render_dashboard_alert_center
-except ImportError:
+except (ImportError, AttributeError):
     render_dashboard_alert_center = lambda *a, **kw: None
 
 # Forward refs

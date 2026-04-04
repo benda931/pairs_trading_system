@@ -39,7 +39,7 @@ try:
         APP_NAME,
         APP_VERSION,
     )
-except ImportError:
+except (ImportError, AttributeError):
     _make_json_safe = lambda x: x
     _safe_getattr = getattr
     _discover_services_mapping = lambda ctx: {}

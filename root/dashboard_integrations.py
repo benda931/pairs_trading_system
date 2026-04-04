@@ -54,7 +54,7 @@ try:
         TAB_KEY_FAIR_VALUE,
         TAB_KEY_LOGS,
     )
-except ImportError:
+except (ImportError, AttributeError):
     # Fallbacks for standalone testing
     _make_json_safe = lambda x: x
     _normalize_env = lambda x: x or "dev"

@@ -36,7 +36,7 @@ try:
         RUNTIME_HOST,
         RUNTIME_USER,
     )
-except ImportError:
+except (ImportError, AttributeError):
     _make_json_safe = lambda x: x
     _cache_get = lambda ns, key: None
     _cache_set = lambda ns, key, val, ttl=60: None

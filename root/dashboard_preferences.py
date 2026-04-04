@@ -856,7 +856,7 @@ try:
         "apply_user_prefs_to_runtime",
         "persist_user_prefs_if_needed",
         "_render_dashboard_shell_core",
-        "render_dashboard_shell",
+        # render_dashboard_shell is in dashboard_diagnostics.py (Part 26)
     ]
 except NameError:  # pragma: no cover
     __all__ = [
@@ -866,6 +866,6 @@ except NameError:  # pragma: no cover
         "apply_user_prefs_to_runtime",
         "persist_user_prefs_if_needed",
         "_render_dashboard_shell_core",
-        "render_dashboard_shell",
+        # render_dashboard_shell is in dashboard_diagnostics.py (Part 26)
     ]
 # =====================

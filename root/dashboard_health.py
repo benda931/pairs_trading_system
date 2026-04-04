@@ -33,7 +33,7 @@ try:
         DashboardSummary,
         ServiceHealthSnapshot,
     )
-except ImportError:
+except (ImportError, AttributeError):
     _make_json_safe = lambda x: x
     get_app_context = lambda: None
     ensure_dashboard_runtime = lambda ctx: None
