@@ -409,6 +409,24 @@ class PairsOrchestrator:
             results.append(scan_result)
             self._results.append(scan_result)
 
+        # ── Run correlation health monitor ────────────────────
+        corr_result = self._run_correlation_monitor()
+        if corr_result is not None:
+            results.append(corr_result)
+            self._results.append(corr_result)
+
+        # ── Run Monte Carlo confidence estimation ─────────────
+        mc_result = self._run_monte_carlo()
+        if mc_result is not None:
+            results.append(mc_result)
+            self._results.append(mc_result)
+
+        # ── Run factor attribution ────────────────────────────
+        attr_result = self._run_factor_attribution()
+        if attr_result is not None:
+            results.append(attr_result)
+            self._results.append(attr_result)
+
         # Summary
         ok = sum(1 for r in results if r.status == "success")
         failed = len(results) - ok
@@ -580,6 +598,191 @@ class PairsOrchestrator:
         except Exception as exc:
             logger.warning("Universe scan failed: %s", exc)
             return TaskResult(task_name="universe_scan", status="failed", message=str(exc))
+
+    def _run_correlation_monitor(self) -> Optional[TaskResult]:
+        """Run correlation health check on all active pairs."""
+        try:
+            from core.correlation_monitor import CorrelationMonitor
+            from common.data_loader import load_prices_multi
+
+            pairs = self._get_active_pairs()
+            if not pairs:
+                return None
+
+            symbols = set()
+            pair_tuples = []
+            for p in pairs:
+                if isinstance(p, dict):
+                    sx = p.get("sym_x") or p.get("symbol_x")
+                    sy = p.get("sym_y") or p.get("symbol_y")
+                elif isinstance(p, (list, tuple)) and len(p) >= 2:
+                    sx, sy = str(p[0]), str(p[1])
+                else:
+                    continue
+                if sx and sy:
+                    symbols.update([sx, sy])
+                    pair_tuples.append((sx, sy))
+
+            if len(symbols) < 2:
+                return None
+
+            prices = load_prices_multi(list(symbols))
+            if prices is None or prices.empty:
+                return None
+
+            cm = CorrelationMonitor()
+            report = cm.monitor_portfolio(prices, pair_tuples)
+
+            # Alert on breaks
+            for pair_key, health in report.pair_health.items():
+                if health.has_break and health.divergence_risk in ("HIGH", "CRITICAL"):
+                    try:
+                        from core.alerts import alert_risk
+                        alert_risk(
+                            "Correlation Break",
+                            f"{pair_key}: {health.alert_message} (action: {health.action})",
+                            severity="CRITICAL" if health.divergence_risk == "CRITICAL" else "WARNING",
+                        )
+                    except Exception:
+                        pass
+
+            self.bus.publish("correlation_monitor", {
+                "n_pairs": report.n_pairs,
+                "avg_correlation": report.avg_correlation,
+                "n_breaks": report.n_breaks_detected,
+                "n_at_risk": report.n_pairs_at_risk,
+                "effective_n_bets": report.effective_n_bets,
+            })
+
+            logger.info(
+                "Correlation monitor: %d pairs, %d breaks, %d at risk, eff_N=%.1f",
+                report.n_pairs, report.n_breaks_detected,
+                report.n_pairs_at_risk, report.effective_n_bets,
+            )
+            return TaskResult(
+                task_name="correlation_monitor", status="success",
+                message=f"{report.n_breaks_detected} breaks, {report.n_pairs_at_risk} at risk",
+            )
+        except Exception as exc:
+            logger.warning("Correlation monitor failed: %s", exc)
+            return TaskResult(task_name="correlation_monitor", status="failed", message=str(exc))
+
+    def _run_monte_carlo(self) -> Optional[TaskResult]:
+        """Run Monte Carlo simulation for strategy confidence estimation."""
+        try:
+            from core.monte_carlo import MonteCarloEngine
+
+            returns = None
+            try:
+                from core.alpha_persistence import load_alpha_results
+                alpha = load_alpha_results()
+                if alpha and "equity_curve" in alpha:
+                    eq = pd.Series(alpha["equity_curve"])
+                    returns = eq.pct_change().dropna()
+            except Exception:
+                pass
+
+            if returns is None or len(returns) < 60:
+                return None
+
+            mc = MonteCarloEngine(n_simulations=2000, seed=42)
+            result = mc.simulate_strategy(returns, target_return=0.10, ruin_threshold=-0.25)
+
+            self.bus.publish("monte_carlo", {
+                "sharpe_mean": result.sharpe_mean,
+                "sharpe_ci": [result.sharpe_ci_lower, result.sharpe_ci_upper],
+                "deflated_sharpe": result.deflated_sharpe,
+                "prob_loss": result.prob_loss,
+                "prob_target_10pct": result.prob_target,
+                "prob_ruin_25pct": result.prob_ruin,
+                "median_max_dd": result.median_max_drawdown,
+            })
+
+            # Alert if strategy confidence is low
+            if result.prob_loss > 0.30:
+                try:
+                    from core.alerts import alert_risk
+                    alert_risk(
+                        "High Loss Probability",
+                        f"MC: {result.prob_loss:.0%} probability of loss (Sharpe CI: [{result.sharpe_ci_lower:.2f}, {result.sharpe_ci_upper:.2f}])",
+                        severity="WARNING",
+                    )
+                except Exception:
+                    pass
+
+            logger.info(
+                "Monte Carlo: Sharpe=%.2f [%.2f, %.2f], DSR=%.3f, P(loss)=%.1f%%, P(ruin)=%.1f%%",
+                result.sharpe_mean, result.sharpe_ci_lower, result.sharpe_ci_upper,
+                result.deflated_sharpe, result.prob_loss * 100, result.prob_ruin * 100,
+            )
+            return TaskResult(
+                task_name="monte_carlo", status="success",
+                message=f"Sharpe={result.sharpe_mean:.2f}, DSR={result.deflated_sharpe:.3f}, P(loss)={result.prob_loss:.0%}",
+            )
+        except Exception as exc:
+            logger.warning("Monte Carlo failed: %s", exc)
+            return TaskResult(task_name="monte_carlo", status="failed", message=str(exc))
+
+    def _run_factor_attribution(self) -> Optional[TaskResult]:
+        """Run factor attribution on portfolio returns."""
+        try:
+            from core.factor_attribution import FactorAttribution
+
+            returns = None
+            try:
+                from core.alpha_persistence import load_alpha_results
+                alpha = load_alpha_results()
+                if alpha and "equity_curve" in alpha:
+                    eq = pd.Series(alpha["equity_curve"])
+                    returns = eq.pct_change().dropna()
+            except Exception:
+                pass
+
+            if returns is None or len(returns) < 60:
+                return None
+
+            # Try to load SPY as benchmark
+            benchmark = None
+            try:
+                from common.data_loader import load_price_data
+                spy_data = load_price_data("SPY")
+                if not spy_data.empty:
+                    col = next((c for c in ("adj_close", "close", "Close") if c in spy_data.columns), None)
+                    if col:
+                        benchmark = spy_data[col].pct_change().dropna()
+            except Exception:
+                pass
+
+            fa = FactorAttribution()
+            report = fa.attribute(returns, benchmark_returns=benchmark)
+
+            if report.performance:
+                perf = report.performance
+                self.bus.publish("factor_attribution", {
+                    "alpha_annualized": perf.alpha_annualized,
+                    "beta": perf.beta_to_benchmark,
+                    "r_squared": perf.r_squared,
+                    "information_ratio": perf.information_ratio,
+                    "tracking_error": perf.tracking_error,
+                    "sharpe": perf.sharpe_ratio,
+                    "hit_rate": perf.hit_rate,
+                    "max_dd": perf.max_drawdown,
+                })
+
+                logger.info(
+                    "Factor attribution: alpha=%.2f%%, beta=%.2f, IR=%.2f, R²=%.2f",
+                    perf.alpha_annualized * 100, perf.beta_to_benchmark,
+                    perf.information_ratio, perf.r_squared,
+                )
+
+                return TaskResult(
+                    task_name="factor_attribution", status="success",
+                    message=f"alpha={perf.alpha_annualized:.2%}, beta={perf.beta_to_benchmark:.2f}, IR={perf.information_ratio:.2f}",
+                )
+            return None
+        except Exception as exc:
+            logger.warning("Factor attribution failed: %s", exc)
+            return TaskResult(task_name="factor_attribution", status="failed", message=str(exc))
 
     def _send_pipeline_alerts(self, results: list, signal_decisions: list) -> None:
         """
@@ -1601,6 +1804,39 @@ class PairsOrchestrator:
                 n_funded, len(allocations), elapsed,
             )
 
+            # ── Generate rebalance plan from allocations ──────
+            rebalance_plan = None
+            try:
+                from core.portfolio_rebalancer import PortfolioRebalancer
+                if n_funded > 0:
+                    target_weights = {}
+                    for a in allocations:
+                        if a.approved and hasattr(a, 'pair_id'):
+                            label = str(a.pair_id)
+                            w = getattr(a, 'target_weight', 1.0 / max(n_funded, 1))
+                            target_weights[label] = w
+
+                    if target_weights:
+                        rebalancer = PortfolioRebalancer()
+                        rebalance_plan = rebalancer.rebalance(
+                            current_positions={},  # Fresh allocation
+                            target_weights=target_weights,
+                            total_capital=capital,
+                        )
+                        self.bus.publish("rebalance_plan", {
+                            "n_trades": rebalance_plan.n_trades,
+                            "total_cost": rebalance_plan.total_estimated_cost,
+                            "gross_turnover": rebalance_plan.gross_turnover,
+                        })
+                        logger.info(
+                            "Rebalance plan: %d trades, cost=$%.2f (%.3f%% of capital)",
+                            rebalance_plan.n_trades,
+                            rebalance_plan.total_estimated_cost,
+                            rebalance_plan.cost_as_pct_of_capital,
+                        )
+            except Exception as rebal_exc:
+                logger.debug("Rebalancer not available: %s", rebal_exc)
+
             return TaskResult(
                 task_name="portfolio_allocation",
                 status="success",
@@ -1611,6 +1847,8 @@ class PairsOrchestrator:
                     "n_intents_received": diagnostics.n_intents_received,
                     "safety_check_used": safety_fn is not None,
                     "kill_switch_used": kill_switch_state is not None,
+                    "rebalance_n_trades": rebalance_plan.n_trades if rebalance_plan else 0,
+                    "rebalance_cost": rebalance_plan.total_estimated_cost if rebalance_plan else 0,
                 },
             )
 

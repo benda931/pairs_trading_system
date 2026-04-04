@@ -322,3 +322,69 @@ class LeverageEngine:
             ))
 
         return results
+
+    # ── GARCH-Enhanced Leverage ───────────────────────────────
+
+    def compute_leverage_with_garch_forecast(
+        self,
+        returns: pd.Series,
+        current_drawdown: float = 0.0,
+        vix_level: float = 20.0,
+        regime: str = "NORMAL",
+        margin_utilization: float = 0.5,
+        forecast_horizon: int = 5,
+    ) -> LeverageResult:
+        """
+        Compute target leverage using GARCH volatility forecast.
+
+        Instead of backward-looking realized vol, uses GARCH(1,1) forecast
+        (with EWMA fallback) for forward-looking vol targeting.
+
+        This is the PREFERRED method for production — realized vol
+        is stale by definition; GARCH adapts to volatility clustering.
+        """
+        try:
+            from core.garch_engine import GarchEngine
+            ge = GarchEngine()
+            forecast = ge.forecast(returns, horizon=forecast_horizon)
+            forecast_vol = forecast.vol_forecast
+
+            # Use GARCH vol for leverage, but floor at realized
+            realized = float(returns.dropna().std() * np.sqrt(252)) if len(returns) > 20 else 0.15
+            # Use the higher of forecast and realized (conservative)
+            effective_vol = max(forecast_vol, realized * 0.7)
+
+            result = self.compute_target_leverage(
+                realized_vol=effective_vol,
+                current_drawdown=current_drawdown,
+                vix_level=vix_level,
+                regime=regime,
+                margin_utilization=margin_utilization,
+            )
+
+            # Enrich with GARCH details
+            result.components["garch_vol_forecast"] = round(forecast_vol, 6)
+            result.components["garch_vol_regime"] = forecast.vol_regime
+            result.components["garch_vol_percentile"] = forecast.vol_percentile
+            result.components["realized_vol"] = round(realized, 6)
+            result.components["effective_vol_used"] = round(effective_vol, 6)
+
+            logger.info(
+                "GARCH leverage: forecast_vol=%.1f%%, realized=%.1f%%, effective=%.1f%%, "
+                "regime=%s, target_leverage=%.2f",
+                forecast_vol * 100, realized * 100, effective_vol * 100,
+                forecast.vol_regime, result.target_leverage,
+            )
+
+            return result
+
+        except Exception as exc:
+            logger.warning("GARCH forecast failed, falling back to realized vol: %s", exc)
+            realized = float(returns.dropna().std() * np.sqrt(252)) if len(returns) > 20 else 0.15
+            return self.compute_target_leverage(
+                realized_vol=realized,
+                current_drawdown=current_drawdown,
+                vix_level=vix_level,
+                regime=regime,
+                margin_utilization=margin_utilization,
+            )
