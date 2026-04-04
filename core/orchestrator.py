@@ -1301,7 +1301,7 @@ class PairsOrchestrator:
                 ("regime_surveillance", "regime_surveillance.scan",
                  {"spreads": {}}),
                 ("signal_analyst", "signal_analyst.classify",
-                 {"pair_id": "ALL", "spread": None}),
+                 {"pair_id": "PLACEHOLDER/SKIP", "spread": None, "skip_if_no_pair": True}),
                 ("trade_lifecycle", "lifecycle.inspect",
                  {"states": {}}),
                 ("exit_oversight", "exit_oversight.scan",

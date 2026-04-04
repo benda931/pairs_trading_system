@@ -113,7 +113,13 @@ class SignalAnalystAgent(BaseAgent):
         # ── Unpack payload ────────────────────────────────────────
         raw_pair = task.payload["pair_id"]
         pair_id = _coerce_pair_id(raw_pair)
-        spread: pd.Series = task.payload["spread"]
+        if pair_id is None:
+            audit.log(f"Skipping: cannot parse pair_id from {raw_pair!r}")
+            return {"skipped": True, "reason": f"invalid_pair_id: {raw_pair!r}"}
+        spread: pd.Series = task.payload.get("spread")
+        if spread is None or (hasattr(spread, '__len__') and len(spread) == 0):
+            audit.log("Skipping: no spread data provided")
+            return {"skipped": True, "reason": "no_spread_data"}
         prices_x: Optional[pd.Series] = task.payload.get("prices_x")
         prices_y: Optional[pd.Series] = task.payload.get("prices_y")
         as_of: datetime = task.payload.get("as_of") or _last_ts(spread)
@@ -685,15 +691,23 @@ class ExitOversightAgent(BaseAgent):
 # HELPERS (module-private)
 # ══════════════════════════════════════════════════════════════════
 
-def _coerce_pair_id(raw: Any) -> PairId:
+def _coerce_pair_id(raw: Any) -> Optional[PairId]:
+    """Coerce various formats to PairId, or return None if not possible."""
     if isinstance(raw, PairId):
         return raw
     if isinstance(raw, dict):
-        return PairId(raw["sym_x"], raw["sym_y"])
+        sx = raw.get("sym_x") or raw.get("symbol_x")
+        sy = raw.get("sym_y") or raw.get("symbol_y")
+        if sx and sy:
+            return PairId(sx, sy)
+        return None
     if isinstance(raw, str) and "/" in raw:
         parts = raw.split("/")
-        return PairId(parts[0].strip(), parts[1].strip())
-    raise ValueError(f"Cannot coerce to PairId: {raw!r}")
+        if len(parts) == 2 and parts[0].strip() and parts[1].strip():
+            return PairId(parts[0].strip(), parts[1].strip())
+    if isinstance(raw, (list, tuple)) and len(raw) >= 2:
+        return PairId(str(raw[0]), str(raw[1]))
+    return None
 
 
 def _last_ts(series: pd.Series) -> datetime:

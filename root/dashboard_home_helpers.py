@@ -11,6 +11,7 @@ overview metrics, health, alerts summary, pinned views.
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 import streamlit as st
