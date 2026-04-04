@@ -328,6 +328,67 @@ class ImprovementFeedbackRules:
 # Feedback Loop Engine
 # =====================================================================
 
+class ActionThrottler:
+    """
+    Rate limiter for feedback actions.
+
+    Prevents cascading actions in volatile markets by enforcing:
+    - Cool-down period per action type
+    - Maximum actions per pipeline cycle
+    - Maximum emergency actions per day
+    """
+
+    def __init__(self):
+        from core.contracts import ActionThrottleConfig
+        self._config = ActionThrottleConfig()
+        self._last_action_time: Dict[str, float] = {}
+        self._actions_this_cycle: int = 0
+        self._emergency_actions_today: int = 0
+        self._today: str = ""
+
+    def can_execute(self, action: FeedbackAction) -> tuple:
+        """Check if action is allowed. Returns (allowed, reason)."""
+        import time
+
+        today = datetime.now(timezone.utc).strftime("%Y%m%d")
+        if today != self._today:
+            self._today = today
+            self._emergency_actions_today = 0
+
+        # Max actions per cycle
+        if self._actions_this_cycle >= self._config.max_actions_per_cycle:
+            return False, f"Max actions per cycle ({self._config.max_actions_per_cycle}) reached"
+
+        # Max emergency per day
+        if action.severity == "EMERGENCY":
+            if self._emergency_actions_today >= self._config.max_emergency_actions_per_day:
+                return False, f"Max emergency actions per day ({self._config.max_emergency_actions_per_day}) reached"
+
+        # Cool-down per action type
+        cool_down = self._config.cool_down_seconds.get(action.action_type, 300)
+        key = f"{action.action_type}:{action.target}"
+        last_time = self._last_action_time.get(key, 0)
+        elapsed = time.time() - last_time
+        if elapsed < cool_down:
+            remaining = cool_down - elapsed
+            return False, f"Cool-down: {action.action_type} for {action.target} ({remaining:.0f}s remaining)"
+
+        return True, "OK"
+
+    def record_execution(self, action: FeedbackAction) -> None:
+        """Record that an action was executed."""
+        import time
+        key = f"{action.action_type}:{action.target}"
+        self._last_action_time[key] = time.time()
+        self._actions_this_cycle += 1
+        if action.severity == "EMERGENCY":
+            self._emergency_actions_today += 1
+
+    def reset_cycle(self) -> None:
+        """Reset per-cycle counter (call at start of each pipeline run)."""
+        self._actions_this_cycle = 0
+
+
 class AgentFeedbackLoop:
     """
     Central engine that converts agent outputs into system actions.
@@ -345,6 +406,7 @@ class AgentFeedbackLoop:
     def __init__(self, dry_run: bool = False):
         self.dry_run = dry_run
         self._action_history: List[FeedbackAction] = []
+        self._throttle = ActionThrottler()
 
     def process_agent_results(
         self,
@@ -415,6 +477,7 @@ class AgentFeedbackLoop:
         n_executed = 0
         n_blocked = 0
         state_changes: Dict[str, Any] = {}
+        self._throttle.reset_cycle()
 
         for action in actions:
             if self.dry_run:
@@ -428,12 +491,20 @@ class AgentFeedbackLoop:
                 n_blocked += 1
                 continue
 
+            # ── Throttle check ────────────────────────────────
+            allowed, throttle_reason = self._throttle.can_execute(action)
+            if not allowed:
+                logger.info("[THROTTLED] %s → %s: %s", action.action_type, action.target, throttle_reason)
+                n_blocked += 1
+                continue
+
             # Execute the action
             try:
                 result = self._execute_single(action)
                 action.executed = True
                 action.execution_result = result
                 n_executed += 1
+                self._throttle.record_execution(action)
 
                 # Track state changes
                 if action.action_type in ("KILL_SWITCH", "BLOCK_ENTRY", "DELEVERAGE"):

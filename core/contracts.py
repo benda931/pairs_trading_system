@@ -869,6 +869,76 @@ class PlatformConstants:
     PURGE_DAYS: int = 10
 
 
+# ── Production Safety Contracts ──────────────────────────────────
+
+@runtime_checkable
+class StateProvider(Protocol):
+    """
+    Abstract state storage — decouples core logic from Streamlit.
+
+    Implementations:
+    - StreamlitStateProvider (root/ only)
+    - InMemoryStateProvider (tests, CLI, API)
+    - DictStateProvider (minimal fallback)
+    """
+    def get(self, key: str, default: Any = None) -> Any: ...
+    def set(self, key: str, value: Any) -> None: ...
+    def has(self, key: str) -> bool: ...
+
+
+class InMemoryStateProvider:
+    """Thread-safe in-memory state for CLI, tests, and API."""
+    def __init__(self) -> None:
+        self._store: Dict[str, Any] = {}
+    def get(self, key: str, default: Any = None) -> Any:
+        return self._store.get(key, default)
+    def set(self, key: str, value: Any) -> None:
+        self._store[key] = value
+    def has(self, key: str) -> bool:
+        return key in self._store
+
+
+@dataclass(frozen=True)
+class EngineContract:
+    """
+    Every quant engine must declare its contract.
+
+    This enables governance: classify engines as PRODUCTION vs RESEARCH,
+    define failure modes, and track economic value.
+    """
+    name: str
+    purpose: str
+    inputs: Dict[str, str]
+    outputs: Dict[str, str]
+    failure_mode: str              # What happens on error
+    fallback: str                  # Degraded behavior
+    owner: str                     # Module path
+    consumers: Tuple[str, ...]     # Who uses this output
+    economic_value: str            # "alpha" / "risk" / "governance" / "research"
+    classification: str            # "PRODUCTION" / "RESEARCH" / "EXPERIMENTAL"
+
+
+@dataclass
+class ActionThrottleConfig:
+    """
+    Cool-down and rate limits for agent feedback actions.
+
+    Prevents cascading actions in volatile markets.
+    """
+    cool_down_seconds: Dict[str, int] = field(default_factory=lambda: {
+        "KILL_SWITCH": 3600,       # 1 hour
+        "DELEVERAGE": 1800,        # 30 min
+        "FORCE_EXIT": 300,         # 5 min per pair
+        "BLOCK_ENTRY": 600,        # 10 min
+        "ADJUST_THRESHOLD": 1800,  # 30 min
+        "RETRAIN_MODEL": 86400,    # 1 per day
+        "OPTIMIZE_PARAMS": 86400,  # 1 per day
+        "UPDATE_CONFIG": 3600,     # 1 per hour
+    })
+    max_actions_per_cycle: int = 10
+    max_emergency_actions_per_day: int = 5
+
+
 __all__ = [
     # Enums
     "PairLifecycleState", "TradeLifecycleState", "ValidationResult", "RegimeLabel",
@@ -892,4 +962,7 @@ __all__ = [
     "BacktesterProtocol", "AgentProtocol",
     # Constants
     "ValidationThresholds", "PlatformConstants",
+    # Production Safety
+    "StateProvider", "InMemoryStateProvider",
+    "EngineContract", "ActionThrottleConfig",
 ]

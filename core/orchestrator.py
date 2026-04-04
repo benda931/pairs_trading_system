@@ -1894,6 +1894,10 @@ class PairsOrchestrator:
         """
         Run one portfolio allocation cycle with safety gating.
 
+        IDEMPOTENCY: Uses batch_id (date-based) to prevent double-allocation.
+        If this method is called twice on the same day, the second call is
+        a no-op. This protects against scheduler restarts mid-pipeline.
+
         Resolves:
         - P1-PORTINT: Portfolio bridge called from operational code
         - P1-SAFE: Runtime safety check injected as callback
@@ -1915,6 +1919,19 @@ class PairsOrchestrator:
 
         if not signal_decisions:
             return None
+
+        # ── Idempotency guard ────────────────────────────────
+        batch_id = f"alloc_{datetime.now(timezone.utc).strftime('%Y%m%d')}"
+        if getattr(self, '_last_allocation_batch', None) == batch_id:
+            logger.warning(
+                "Allocation already ran for batch %s — skipping duplicate",
+                batch_id,
+            )
+            return TaskResult(
+                task_name="portfolio_allocation",
+                status="skipped",
+                message=f"Duplicate batch {batch_id}",
+            )
 
         try:
             from core.portfolio_bridge import bridge_signals_to_allocator
@@ -1984,6 +2001,9 @@ class PairsOrchestrator:
             except Exception as rebal_exc:
                 logger.debug("Rebalancer not available: %s", rebal_exc)
 
+            # Mark batch as complete (idempotency)
+            self._last_allocation_batch = batch_id
+
             return TaskResult(
                 task_name="portfolio_allocation",
                 status="success",
@@ -1996,6 +2016,7 @@ class PairsOrchestrator:
                     "kill_switch_used": kill_switch_state is not None,
                     "rebalance_n_trades": rebalance_plan.n_trades if rebalance_plan else 0,
                     "rebalance_cost": rebalance_plan.total_estimated_cost if rebalance_plan else 0,
+                    "batch_id": batch_id,
                 },
             )
 

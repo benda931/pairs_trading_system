@@ -1011,6 +1011,42 @@ def load_price_data(
 # =============================================================
 
 
+class DataFreshnessError(RuntimeError):
+    """Raised when price data is too stale for production use."""
+    pass
+
+
+def load_price_data_guarded(
+    symbol: str,
+    max_staleness_hours: float = 24.0,
+    **kwargs: Any,
+) -> pd.DataFrame:
+    """
+    Production-safe price loader with freshness validation.
+
+    Raises DataFreshnessError if data is older than max_staleness_hours.
+    For research/backtest, use load_price_data() directly (no guard).
+    """
+    data = load_price_data(symbol, **kwargs)
+    if data.empty:
+        raise DataFreshnessError(f"No data available for {symbol}")
+
+    if hasattr(data.index, 'max'):
+        last_date = pd.Timestamp(data.index.max())
+        now = pd.Timestamp.now(tz=last_date.tz if last_date.tz else None)
+        age_hours = (now - last_date).total_seconds() / 3600
+        if age_hours > max_staleness_hours:
+            logger.warning(
+                "Stale data for %s: %.1f hours old (max: %.1f)",
+                symbol, age_hours, max_staleness_hours,
+            )
+            raise DataFreshnessError(
+                f"{symbol} data is {age_hours:.0f}h old (max: {max_staleness_hours:.0f}h)"
+            )
+
+    return data
+
+
 def load_prices_multi(
     symbols: Sequence[str],
     start_date: Optional[Union[datetime, date]] = None,
