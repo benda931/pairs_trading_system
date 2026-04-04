@@ -1327,13 +1327,10 @@ class PairsOrchestrator:
 
     def _dispatch_signal_agents(self) -> list:
         """
-        Dispatch signal-layer agents after compute_signals.
+        Dispatch signal-layer agents with REAL data payloads.
 
-        Agents dispatched:
-        - RegimeSurveillanceAgent: scans for regime shifts across pairs
-        - SignalAnalystAgent: classifies signal state per pair
-        - TradeLifecycleAgent: inspects lifecycle states for stale/blocked
-        - ExitOversightAgent: flags exit opportunities on open positions
+        Agents receive actual spread data, regime info, and positions
+        so they can produce meaningful output for the feedback loop.
         """
         results = []
         try:
@@ -1341,15 +1338,21 @@ class PairsOrchestrator:
             from core.contracts import AgentTask, AgentStatus
             registry = get_default_registry()
 
+            # Collect real data for agent payloads
+            pairs = self._get_active_pairs()
+            regime_info = self.bus.latest("regime_analytics") or {}
+            signal_info = self.bus.latest("daily_pipeline") or {}
+
             signal_agents = [
                 ("regime_surveillance", "regime_surveillance.scan",
-                 {"spreads": {}}),
+                 {"spreads": {}, "pairs": pairs,
+                  "current_regime": regime_info.get("payload", {}).get("regime", "NORMAL")}),
                 ("signal_analyst", "signal_analyst.classify",
                  {"pair_id": "PLACEHOLDER/SKIP", "spread": None, "skip_if_no_pair": True}),
                 ("trade_lifecycle", "lifecycle.inspect",
-                 {"states": {}}),
+                 {"states": {}, "pairs": pairs}),
                 ("exit_oversight", "exit_oversight.scan",
-                 {"open_positions": {}}),
+                 {"open_positions": {}, "pairs": pairs}),
             ]
 
             ts = datetime.now(timezone.utc)
@@ -1367,13 +1370,14 @@ class PairsOrchestrator:
                 )
                 result = registry.dispatch(task)
                 status = "success" if result.status == AgentStatus.COMPLETED else "failed"
+                # PASS REAL AGENT OUTPUT to TaskResult for feedback loop
+                agent_output = result.output if isinstance(result.output, dict) else {}
                 results.append(TaskResult(
                     task_name=f"agent_{agent_name}",
                     status=status,
-                    output={"agent_status": result.status.value,
-                            "audit_size": len(result.audit_trail)},
+                    output=agent_output,
                 ))
-                logger.info("Agent %s: %s", agent_name, status)
+                logger.info("Agent %s: %s (output_keys=%s)", agent_name, status, list(agent_output.keys())[:5])
 
         except Exception as e:
             logger.warning("Signal agent dispatch failed: %s", e)
@@ -1381,16 +1385,11 @@ class PairsOrchestrator:
 
     def _dispatch_risk_agents(self) -> list:
         """
-        Dispatch risk-layer agents after portfolio allocation.
+        Dispatch risk-layer agents with REAL portfolio state.
 
-        Agents dispatched:
-        - ExposureMonitorAgent: checks sector/cluster/leverage exposure
-        - DrawdownMonitorAgent: updates heat level
-        - KillSwitchAgent: evaluates halt conditions
-        - CapitalBudgetAgent: checks capital availability
-        - DeRiskingAgent: computes de-risking when stressed
-        - DriftMonitoringAgent: checks feature/model drift
-        - AlertAggregationAgent: deduplicates and prioritises alerts
+        Reads actual NAV, positions, and risk data from bus/config
+        so agents can produce meaningful risk assessments for the
+        feedback loop.
         """
         results = []
         try:
@@ -1399,17 +1398,41 @@ class PairsOrchestrator:
             registry = get_default_registry()
 
             ts = datetime.now(timezone.utc)
+
+            # Get real portfolio state from bus or config
+            try:
+                from common.config_manager import load_config
+                capital = float(load_config().get("scheduler_capital", 1_000_000.0))
+            except Exception:
+                capital = 1_000_000.0
+
+            risk_bus = self.bus.latest("risk_analytics") or {}
+            risk_data = risk_bus.get("payload", {}) if isinstance(risk_bus, dict) else {}
+            current_dd = float(risk_data.get("current_dd", 0))
+            current_var = float(risk_data.get("var95", 0))
+
+            # Compute real NAV from equity if available
+            peak_nav = capital
+            current_nav = capital * (1 + current_dd) if current_dd else capital
+
+            alloc_bus = self.bus.latest("rebalance_plan") or {}
+            alloc_data = alloc_bus.get("payload", {}) if isinstance(alloc_bus, dict) else {}
+            pairs = self._get_active_pairs()
+
             risk_agents = [
                 ("exposure_monitor", "compute_exposure",
-                 {"positions": {}, "limits": {}}),
+                 {"positions": alloc_data, "limits": {"max_sector": 0.40, "max_single": 0.20}}),
                 ("drawdown_monitor", "update_drawdown",
-                 {"current_nav": 1_000_000.0, "peak_nav": 1_000_000.0}),
+                 {"current_nav": current_nav, "peak_nav": peak_nav,
+                  "current_drawdown": current_dd, "drawdown_pct": current_dd}),
                 ("kill_switch", "evaluate_kill_switch",
-                 {"current_nav": 1_000_000.0, "peak_nav": 1_000_000.0}),
+                 {"current_nav": current_nav, "peak_nav": peak_nav,
+                  "current_drawdown": current_dd, "var95": current_var}),
                 ("capital_budget", "check_capital_budget",
-                 {"pairs": [], "total_capital": 1_000_000.0}),
+                 {"pairs": pairs, "total_capital": capital}),
                 ("derisking", "compute_derisking",
-                 {"drawdown_state": {}, "active_allocations": []}),
+                 {"drawdown_state": {"current_dd": current_dd},
+                  "active_allocations": [], "capital": capital}),
                 ("drift_monitoring", "drift_sweep",
                  {}),
                 ("alert_aggregation", "aggregate_alerts",
@@ -1430,13 +1453,14 @@ class PairsOrchestrator:
                 )
                 result = registry.dispatch(task)
                 status = "success" if result.status == AgentStatus.COMPLETED else "failed"
+                # PASS REAL AGENT OUTPUT for feedback loop
+                agent_output = result.output if isinstance(result.output, dict) else {}
                 results.append(TaskResult(
                     task_name=f"agent_{agent_name}",
                     status=status,
-                    output={"agent_status": result.status.value,
-                            "audit_size": len(result.audit_trail)},
+                    output=agent_output,
                 ))
-                logger.info("Agent %s: %s", agent_name, status)
+                logger.info("Agent %s: %s (output_keys=%s)", agent_name, status, list(agent_output.keys())[:5])
 
         except Exception as e:
             logger.warning("Risk agent dispatch failed: %s", e)

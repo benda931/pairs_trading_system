@@ -80,7 +80,15 @@ class SignalFeedbackRules:
         status = result.get("status", "")
 
         if agent_name == "regime_surveillance":
-            regime = output.get("regime") or output.get("current_regime", "")
+            # Agent returns "regime_map" dict or "current_regime" or "regime"
+            regime_map = output.get("regime_map", {})
+            regime = (
+                output.get("regime")
+                or output.get("current_regime")
+                or output.get("overall_regime")
+                or (list(regime_map.values())[0] if regime_map else "")
+                or ""
+            )
             if regime.upper() in ("CRISIS", "BROKEN"):
                 actions.append(FeedbackAction(
                     action_id=f"regime_{regime}_{_ts()}",
@@ -126,7 +134,13 @@ class SignalFeedbackRules:
                 ))
 
         elif agent_name == "exit_oversight":
-            exits = output.get("recommended_exits", [])
+            # Agent may return "exit_signals", "recommended_exits", "exits", etc.
+            exits = (
+                output.get("recommended_exits")
+                or output.get("exit_signals")
+                or output.get("exits")
+                or []
+            )
             for ex in exits:
                 pair = ex.get("pair_id", "?")
                 reason = ex.get("reason", "agent_recommendation")
@@ -168,7 +182,14 @@ class RiskFeedbackRules:
         output = result.get("output", {}) or {}
 
         if agent_name == "drawdown_monitor":
-            current_dd = output.get("current_drawdown", 0)
+            # Agent may return "current_dd_pct", "current_drawdown", "drawdown_pct", etc.
+            current_dd = (
+                output.get("current_drawdown")
+                or output.get("current_dd_pct")
+                or output.get("drawdown_pct")
+                or output.get("dd_pct")
+                or 0
+            )
             if current_dd < -0.20:
                 actions.append(FeedbackAction(
                     action_id=f"dd_killswitch_{_ts()}",
@@ -206,7 +227,13 @@ class RiskFeedbackRules:
                     ))
 
         elif agent_name == "kill_switch":
-            should_halt = output.get("should_halt", False)
+            # Agent may return "triggered", "should_halt", "halt", etc.
+            should_halt = (
+                output.get("should_halt")
+                or output.get("triggered")
+                or output.get("halt")
+                or False
+            )
             if should_halt:
                 actions.append(FeedbackAction(
                     action_id=f"killswitch_{_ts()}",
