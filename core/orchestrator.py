@@ -1341,18 +1341,61 @@ class PairsOrchestrator:
             # Collect real data for agent payloads
             pairs = self._get_active_pairs()
             regime_info = self.bus.latest("regime_analytics") or {}
-            signal_info = self.bus.latest("daily_pipeline") or {}
+
+            # Load actual spread data for pairs
+            spreads_data = {}
+            try:
+                from common.data_loader import load_prices_multi
+                import numpy as np
+                symbols = set()
+                for p in pairs:
+                    if isinstance(p, dict):
+                        sx = p.get("sym_x") or p.get("symbol_x")
+                        sy = p.get("sym_y") or p.get("symbol_y")
+                    elif isinstance(p, (list, tuple)) and len(p) >= 2:
+                        sx, sy = str(p[0]), str(p[1])
+                    else:
+                        continue
+                    if sx and sy:
+                        symbols.update([sx, sy])
+
+                if symbols:
+                    prices = load_prices_multi(list(symbols))
+                    if prices is not None and not prices.empty:
+                        for p in pairs:
+                            if isinstance(p, dict):
+                                sx = p.get("sym_x") or p.get("symbol_x")
+                                sy = p.get("sym_y") or p.get("symbol_y")
+                            elif isinstance(p, (list, tuple)) and len(p) >= 2:
+                                sx, sy = str(p[0]), str(p[1])
+                            else:
+                                continue
+                            if sx in prices.columns and sy in prices.columns:
+                                px = prices[sx].dropna()
+                                py = prices[sy].dropna()
+                                if len(px) > 60 and len(py) > 60:
+                                    beta = float(np.cov(px.values, py.values)[0, 1] / max(np.var(px.values), 1e-12))
+                                    spread = py - beta * px
+                                    spreads_data[f"{sx}/{sy}"] = {
+                                        "spread": spread,
+                                        "beta": beta,
+                                        "z_score": float((spread.iloc[-1] - spread.mean()) / max(spread.std(), 1e-12)),
+                                        "prices_x": px,
+                                        "prices_y": py,
+                                    }
+            except Exception as exc:
+                logger.debug("Could not load spread data for agents: %s", exc)
 
             signal_agents = [
                 ("regime_surveillance", "regime_surveillance.scan",
-                 {"spreads": {}, "pairs": pairs,
+                 {"spreads": spreads_data, "pairs": pairs,
                   "current_regime": regime_info.get("payload", {}).get("regime", "NORMAL")}),
                 ("signal_analyst", "signal_analyst.classify",
                  {"pair_id": "PLACEHOLDER/SKIP", "spread": None, "skip_if_no_pair": True}),
                 ("trade_lifecycle", "lifecycle.inspect",
-                 {"states": {}, "pairs": pairs}),
+                 {"states": {}, "pairs": pairs, "n_active_pairs": len(spreads_data)}),
                 ("exit_oversight", "exit_oversight.scan",
-                 {"open_positions": {}, "pairs": pairs}),
+                 {"open_positions": spreads_data, "pairs": pairs}),
             ]
 
             ts = datetime.now(timezone.utc)
@@ -1792,6 +1835,42 @@ class PairsOrchestrator:
                     prices_y=py,
                     as_of=datetime.now(timezone.utc),
                 )
+
+                # ── Enrich with cycle detection ──────────────
+                try:
+                    from core.cycle_detector import CycleDetector
+                    cd = CycleDetector()
+                    cycle_result = cd.analyze(spread)
+                    if hasattr(decision, 'metadata') and isinstance(decision.metadata, dict):
+                        decision.metadata["cycle"] = {
+                            "dominant_period": cycle_result.dominant_period,
+                            "is_cyclical": cycle_result.is_cyclical,
+                            "phase": cycle_result.phase_signal,
+                            "optimal_lookback": cycle_result.optimal_lookback,
+                            "strength": cycle_result.cycle_strength,
+                        }
+                except Exception:
+                    pass
+
+                # ── Enrich with optimal exit info ────────────
+                try:
+                    from core.optimal_exit import OptimalExitEngine
+                    from core.spread_analytics import SpreadAnalytics
+                    sa = SpreadAnalytics()
+                    hl = sa._mean_reversion_metrics(spread)
+                    half_life = hl.half_life_days if hl else 15.0
+                    oe = OptimalExitEngine(half_life=half_life, entry_z=abs(z_score))
+                    boundary = oe.compute_optimal_boundary()
+                    if hasattr(decision, 'metadata') and isinstance(decision.metadata, dict):
+                        decision.metadata["optimal_exit"] = {
+                            "half_life": half_life,
+                            "max_expected_holding": boundary.max_expected_holding,
+                            "exit_z_dynamic_5d": boundary.exit_z_dynamic[4] if len(boundary.exit_z_dynamic) > 4 else None,
+                            "exit_z_dynamic_10d": boundary.exit_z_dynamic[9] if len(boundary.exit_z_dynamic) > 9 else None,
+                        }
+                except Exception:
+                    pass
+
                 decisions.append(decision)
 
             except Exception as exc:
