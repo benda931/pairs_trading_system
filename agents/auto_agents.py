@@ -229,7 +229,7 @@ class AutoParameterOptimizer(BaseAgent):
                 return float(win_rate)
 
             from common.optuna_factory import create_optuna_study
-            study = create_optuna_study(study_name=f"auto_opt_{pair_label}", direction="maximize")
+            study = create_optuna_study(study_name=f"auto_opt_{pair}", direction="maximize")
             study.optimize(objective, n_trials=n_trials, show_progress_bar=False)
 
             best = study.best_params

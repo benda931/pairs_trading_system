@@ -263,11 +263,11 @@ def _render_dashboard_toolbar(
 try:
     __all__ += [
         "_render_dashboard_toolbar",
-        "render_dashboard_shell",
+        # render_dashboard_shell is in dashboard_diagnostics.py
     ]
 except NameError:  # pragma: no cover
     __all__ = [
         "_render_dashboard_toolbar",
-        "render_dashboard_shell",
+        # render_dashboard_shell is in dashboard_diagnostics.py
     ]
 # =====================
