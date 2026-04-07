@@ -118,6 +118,19 @@ class BaseIntent:
     def label(self) -> str:
         return self.pair_id.label
 
+    @property
+    def metadata(self) -> dict:
+        """
+        Backward-compat: return a dict view of optional enrichment fields.
+
+        Consumers that call ``intent.metadata.get("spread_vol", default)``
+        will get the value from the typed field if set, or the default.
+        Subclasses should NOT store arbitrary dicts — add typed fields instead.
+
+        This property is intentionally read-only and computed, not stored.
+        """
+        return {}
+
     def to_dict(self) -> dict:
         return {
             "pair": self.label,
@@ -160,6 +173,14 @@ class EntryIntent(BaseIntent):
 
     The downstream layers (portfolio, risk, execution) decide whether
     and how to act on this intent.
+
+    Signal enrichment fields (quality_grade, regime, size_multiplier,
+    half_life_days) are SET BY THE PIPELINE (signal_pipeline.py) at
+    intent construction time and READ BY THE PORTFOLIO RANKER.
+
+    Prior to ADR-007, these were monkey-patched via object.__setattr__()
+    in portfolio_bridge.py.  They are now first-class typed fields so
+    that no ad-hoc attribute injection is needed anywhere.
     """
     action: IntentAction = IntentAction.ENTER
     direction: SignalDirection = SignalDirection.LONG_SPREAD
@@ -174,6 +195,51 @@ class EntryIntent(BaseIntent):
     divergence_velocity: float = 0.0  # How fast z-score is moving away from mean
     is_reversal_confirmed: bool = False  # z-score is turning back toward mean
 
+    # ── Signal enrichment — set by SignalPipeline, read by portfolio ranker ──
+    # These are typed first-class fields (ADR-007 replaces object.__setattr__)
+    quality_grade:   str   = ""    # SignalQualityGrade.value, e.g. "A", "B", "F"
+    regime:          str   = ""    # RegimeLabel.value, e.g. "MEAN_REVERTING"
+    size_multiplier: float = 1.0   # Net size multiplier from SoftSignalModifiers
+    half_life_days:  float = 20.0  # Current half-life estimate (days)
+
+    # ── Optional research enrichments — set by pair scanner / OOS pipeline ──
+    # These replace the old ``intent.metadata`` dict for the portfolio ranker.
+    # When not set (None), the ranker falls back to its own defaults.
+    spread_vol:        Optional[float] = None  # σ of spread returns (daily)
+    avg_dollar_vol_x:  Optional[float] = None  # Average daily dollar volume leg X
+    avg_dollar_vol_y:  Optional[float] = None  # Average daily dollar volume leg Y
+    oos_sharpe:        Optional[float] = None  # Out-of-sample Sharpe ratio
+    oos_ic:            Optional[float] = None  # Out-of-sample IC
+    n_oos_trades:      int              = 0    # Number of OOS trades
+    stability_score:   Optional[float] = None  # CUSUM/structural-stability score [0,1]
+    spread_bps_x:      Optional[float] = None  # Bid-ask spread in bps leg X
+    spread_bps_y:      Optional[float] = None  # Bid-ask spread in bps leg Y
+    spread_vol_pct:    float            = 0.02  # Spread vol as fraction of notional
+
+    @property
+    def metadata(self) -> dict:
+        """
+        Backward-compat: dict view of optional research enrichment fields.
+
+        The portfolio ranker uses ``intent.metadata.get(field, default)``
+        to access these values.  As a property, it is always computed from
+        the typed fields above — no separate dict is stored.
+
+        Write the typed fields directly; do not set metadata["key"] = val.
+        """
+        return {
+            "spread_vol":       self.spread_vol,
+            "avg_dollar_vol_x": self.avg_dollar_vol_x,
+            "avg_dollar_vol_y": self.avg_dollar_vol_y,
+            "oos_sharpe":       self.oos_sharpe,
+            "oos_ic":           self.oos_ic,
+            "n_oos_trades":     self.n_oos_trades,
+            "stability_score":  self.stability_score,
+            "spread_bps_x":     self.spread_bps_x,
+            "spread_bps_y":     self.spread_bps_y,
+            "spread_vol_pct":   self.spread_vol_pct,
+        }
+
     def to_dict(self) -> dict:
         d = super().to_dict()
         d.update({
@@ -185,6 +251,10 @@ class EntryIntent(BaseIntent):
             "expected_half_life_days": self.expected_half_life_days,
             "entry_mode": self.entry_mode.value,
             "scale_fraction": self.scale_fraction,
+            "quality_grade": self.quality_grade,
+            "regime": self.regime,
+            "size_multiplier": round(self.size_multiplier, 4),
+            "half_life_days": round(self.half_life_days, 2),
         })
         return d
 

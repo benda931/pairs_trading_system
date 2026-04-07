@@ -5370,11 +5370,15 @@ def _build_signal_decision_from_row(
     Build a synthetic SignalDecision object that satisfies bridge_signals_to_allocator().
     The intent is a real EntryIntent; regime/grade are from user inputs.
     """
-    from core.signal_pipeline import SignalDecision
+    from core.signal_contracts import make_signal_decision
     from core.contracts import PairId
     pair_id = PairId(sym_a, sym_b)
     intent = _build_entry_intent_from_ui(sym_a, sym_b, z_score, confidence, direction)
-    decision = SignalDecision(
+    # Populate typed enrichment fields on the intent
+    intent.quality_grade = quality_grade
+    intent.regime = regime
+    intent.size_multiplier = 1.0
+    decision = make_signal_decision(
         pair_id=pair_id,
         as_of=datetime.now(timezone.utc),
         z_score=float(z_score),

@@ -4,39 +4,43 @@ core/signal_pipeline.py
 =======================
 Canonical signal generation pipeline.
 
-ADR-006: This module is the canonical integration point between the z-score
-computation layer (common/signal_generator.py) and the portfolio intent layer
-(portfolio/allocator.py via core/intents.py).
+ADR-006 / ADR-007: This module is the canonical integration point between the
+z-score computation layer (common/signal_generator.py) and the portfolio intent
+layer (portfolio/allocator.py via core/intents.py).
 
-The pipeline:
-    spread z-score + prices
-        -> RegimeEngine.classify()
-        -> ThresholdEngine.compute(regime)
-        -> SignalQualityEngine.assess(conviction, regime)
-        -> TradeLifecycleStateMachine.can_enter/can_add
-        -> EntryIntent / ExitIntent / None
+The pipeline (5 layers):
+    Layer 0 — Input validation (NaN z-score → immediate hard block)
+    Layer 1 — RegimeEngine.classify()    → RegimeContext
+    Layer 2 — ThresholdEngine.compute()  → ThresholdContext
+    Layer 3 — SignalQualityEngine.assess() → QualityVerdict
+    Layer 4 — Intent generation          → SignalEnvelope
 
-Integration Status (2026-04-01):
-    This pipeline is the **default** backtester signal path (``use_signal_pipeline``
-    defaults to ``True`` in optimization_backtester.py).  The backtester calls
-    ``evaluate_bar()`` for each bar unless ``use_signal_pipeline=False`` is explicitly
-    set to revert to legacy z-score threshold logic.
+Output: ``SignalEnvelope`` (from ``core.signal_contracts``) — a fully typed,
+immutable record with NO untyped ``metadata: dict``.  All contextual data is
+in typed sub-contracts: regime_ctx, threshold_ctx, quality, soft, advisory.
 
-    See also: ``evaluate()`` for the full evaluation with regime features from
-    price series, and ``evaluate_bar()`` for the lightweight bar-by-bar path
-    used by the optimisation backtester.
+Layer separation:
+    hard_blocked   — binary gates; ANY one True = intent suppressed
+    soft           — continuous adjustments (size mult, regime boost)
+    advisory       — research enrichments, NEVER used in execution
+
+Integration Status (2026-04-07):
+    - ``evaluate()``      — full evaluation for live/portfolio-intent path
+    - ``evaluate_bar()``  — lightweight bar-by-bar path for backtester
+    - ``SignalDecision``  — DEPRECATED alias for ``SignalEnvelope`` (removed).
+      Consumers must import ``SignalEnvelope`` from ``core.signal_contracts``.
 
 Usage (full evaluation):
     pipeline = SignalPipeline(pair_id=PairId("AAPL", "MSFT"))
-    decision = pipeline.evaluate(
+    env = pipeline.evaluate(
         z_score=2.3,
         spread_series=spread,
         prices_x=px,
         prices_y=py,
         as_of=datetime.utcnow(),
     )
-    if decision.intent is not None and not decision.blocked:
-        # Route to PortfolioAllocator.allocate([decision.intent])
+    if env.is_actionable:
+        # Route to PortfolioAllocator.allocate([env.intent])
         pass
 
 Usage (backtester bar-by-bar):
@@ -73,6 +77,17 @@ from core.regime_engine import RegimeEngine, RegimeFeatureSet, build_regime_feat
 from core.signal_quality import SignalQualityEngine, QualityConfig
 from core.lifecycle import TradeLifecycleStateMachine, LifecycleRegistry, CooldownPolicy
 from core.signals_engine import compute_mr_score
+from core.signal_contracts import (
+    SignalEnvelope,
+    RegimeContext,
+    ThresholdContext,
+    QualityVerdict,
+    SoftSignalModifiers,
+    AdvisoryOverlays,
+    HardBlockCode,
+    make_run_id,
+    make_blocked_envelope,
+)
 
 if TYPE_CHECKING:
     pass
@@ -84,33 +99,22 @@ logger = logging.getLogger(__name__)
 # OUTPUT CONTRACTS
 # ═══════════════════════════════════════════════════════════════════
 
-@dataclass
-class SignalDecision:
-    """
-    Output of the SignalPipeline for a single evaluation.
-
-    NOTE: There is also ``core.intents.SignalDecision`` which is a richer,
-    fully-typed variant used by the agent/intent system.  This class is the
-    lightweight pipeline-output variant consumed by the backtester and
-    portfolio_bridge.  A future migration should unify them (see
-    CANONICALIZATION_CANDIDATES.md Priority 7).
-
-    Downstream consumer (PortfolioAllocator) should check:
-        - decision.blocked -> if True, do not route to portfolio
-        - decision.intent  -> EntryIntent or ExitIntent to route
-        - decision.block_reasons -> human-readable rationale if blocked
-    """
-    pair_id: PairId
-    as_of: datetime
-    z_score: float
-    regime: str                            # RegimeLabel.value
-    quality_grade: str                     # SignalQualityGrade.value e.g. "A", "B", "F"
-    intent: Optional[BaseIntent]           # EntryIntent, ExitIntent, or None
-    blocked: bool                          # True = do not route to portfolio
-    block_reasons: list[str] = field(default_factory=list)
-    size_multiplier: float = 1.0           # From signal quality engine
-    warnings: list[str] = field(default_factory=list)
-    metadata: dict = field(default_factory=dict)
+# SignalDecision is DEPRECATED — use SignalEnvelope from core.signal_contracts.
+#
+# The old class had:
+#   blocked: bool              → SignalEnvelope.hard_blocked
+#   block_reasons: list[str]   → SignalEnvelope.hard_block_reasons
+#   metadata: dict             → SignalEnvelope.regime_ctx / threshold_ctx / quality / advisory
+#   size_multiplier: float     → SignalEnvelope.soft.net_size_multiplier
+#   regime: str                → SignalEnvelope.regime  (property)
+#   quality_grade: str         → SignalEnvelope.quality_grade  (property)
+#
+# Consumers that imported ``SignalDecision`` from this module must be updated:
+#     OLD: from core.signal_pipeline import SignalDecision
+#     NEW: from core.signal_contracts import SignalEnvelope as SignalDecision
+#
+# The alias below preserves import compatibility during the migration window.
+SignalDecision = SignalEnvelope
 
 
 @dataclass
@@ -167,12 +171,15 @@ class SignalPipeline:
         self._lifecycle = TradeLifecycleStateMachine(
             pair_id=pair_id, cooldown_policy=cooldown_policy,
         )
-        self._last_decision: Optional[SignalDecision] = None
+        self._last_decision: Optional[SignalEnvelope] = None
 
         # Cached regime state for bar-by-bar use (refreshed periodically)
         self._cached_regime: RegimeLabel = RegimeLabel.UNKNOWN
         self._cached_regime_confidence: float = 0.0
+        self._cached_regime_ctx: RegimeContext = RegimeContext(fallback_used=True)
         self._cached_threshold: ThresholdSet = ThresholdSet()
+        self._cached_threshold_ctx: ThresholdContext = ThresholdContext(fallback_used=True)
+        self._cached_quality: QualityVerdict = QualityVerdict(fallback_used=True)
         self._cached_quality_grade: str = "UNKNOWN"
         self._cached_size_mult: float = 1.0
         self._cached_blocked: bool = False
@@ -200,9 +207,13 @@ class SignalPipeline:
         mr_score: float = 0.5,
         half_life: Optional[float] = None,
         correlation: Optional[float] = None,
-    ) -> SignalDecision:
+    ) -> SignalEnvelope:
         """
         Evaluate signal for this pair at the current moment.
+
+        Returns a fully-typed ``SignalEnvelope`` (from ``core.signal_contracts``)
+        with no untyped metadata dict.  All contextual data is in the typed
+        sub-contracts: regime_ctx, threshold_ctx, quality, soft, advisory.
 
         Parameters
         ----------
@@ -217,66 +228,123 @@ class SignalPipeline:
         conviction : float
             Signal strength [0, 1]. From spread model or ML.
         mr_score : float
-            Mean-reversion quality score [0, 1].
+            Mean-reversion quality score [0, 1] (recomputed internally).
         half_life : float, optional
             Current estimated half-life of spread.
         correlation : float, optional
-            Current rolling correlation.
+            Current rolling correlation (passed through to advisory layer).
         """
         if as_of is None:
             as_of = datetime.utcnow()
 
-        block_reasons: list[str] = []
+        run_id = make_run_id()
+        hard_block_codes: list[str] = []
+        hard_block_reasons: list[str] = []
         warnings: list[str] = []
 
-        # ── Step 1: Regime Classification ────────────────────────
-        regime_label, regime_confidence = self._classify_regime(
+        # ── Layer 0: Input Validation ─────────────────────────────
+        if np.isnan(z_score):
+            return make_blocked_envelope(
+                pair_id=self.pair_id,
+                as_of=as_of,
+                z_score=0.0,
+                block_codes=[HardBlockCode.SPREAD_NAN],
+                block_reasons=["z_score is NaN — cannot evaluate signal"],
+                warnings=["z_score NaN at input"],
+            )
+
+        # ── Layer 1: Regime Classification ────────────────────────
+        regime_ctx = self._classify_regime_typed(
             spread_series, prices_x, prices_y, as_of, warnings,
         )
 
-        # ── Step 2: Threshold Computation ────────────────────────
-        threshold_set = self._compute_thresholds(
-            regime_label, conviction, half_life, warnings,
+        if not regime_ctx.is_tradable:
+            hard_block_codes.append(
+                HardBlockCode.REGIME_CRISIS.value
+                if regime_ctx.regime == RegimeLabel.CRISIS
+                else HardBlockCode.REGIME_BROKEN.value
+            )
+            hard_block_reasons.append(
+                f"Regime {regime_ctx.regime.value} is not tradable for mean-reversion"
+            )
+
+        # ── Layer 2: Threshold Computation ────────────────────────
+        threshold_ctx = self._compute_thresholds_typed(
+            regime_ctx.regime, conviction, half_life, warnings,
         )
 
-        # ── Step 3: Signal Quality Assessment ────────────────────
+        # ── Layer 3: Signal Quality Assessment ────────────────────
         # Compute proper MR score from signal properties (replaces hardcoded 0.5)
-        mr_score = compute_mr_score(
+        mr_score_computed = compute_mr_score(
             spread=spread_series,
             half_life=half_life if half_life is not None else float("nan"),
         )
-        quality_result = self._assess_quality(
-            conviction, mr_score, regime_label, block_reasons, warnings,
+        quality = self._assess_quality_typed(
+            conviction, mr_score_computed, regime_ctx.regime,
+            hard_block_codes, hard_block_reasons, warnings,
         )
 
-        # ── Step 3b: Regime Transition Boost ─────────────────────
-        # The first _transition_boost_window bars after a transition into
-        # MEAN_REVERTING carry the highest empirical IC; boost signal_confidence
-        # (widen position size through size_multiplier, not the entry threshold).
-        transition_boost_meta: dict = {}
-        signal_confidence = (
-            quality_result.size_multiplier if quality_result is not None else conviction
-        )
-        if self._bars_since_transition <= self._transition_boost_window:
-            boost_frac = 1.0 - self._bars_since_transition / self._transition_boost_window
-            transition_boost = 1.0 + 0.20 * boost_frac
-            signal_confidence = min(1.0, signal_confidence * transition_boost)
-            transition_boost_meta["regime_transition_boost"] = round(transition_boost, 3)
-            transition_boost_meta["bars_since_transition"] = self._bars_since_transition
-            if quality_result is not None:
-                quality_result.size_multiplier = signal_confidence
+        # ── Layer 3b: Regime Transition Detection ─────────────────
+        # The first _transition_boost_window bars after transitioning into
+        # MEAN_REVERTING carry the highest empirical IC.
+        transition_boost_additive = 0.0
+        bars_since = self._bars_since_transition
+        if bars_since <= self._transition_boost_window:
+            boost_frac = 1.0 - bars_since / self._transition_boost_window
+            transition_boost_additive = 0.20 * boost_frac
 
-        # ── Step 4: Lifecycle Check ──────────────────────────────
+        # ── Layer 3c: Escape Momentum Veto ────────────────────────
+        escape_penalty = 0.0
+        z_velocity_val = float("nan")
+        if len(spread_series) >= 6:
+            try:
+                z_velocity_val = float(
+                    (spread_series.iloc[-1] - spread_series.iloc[-6])
+                    / max(spread_series.std(), 1e-8)
+                )
+                escape_momentum = z_velocity_val * np.sign(z_score)
+                if escape_momentum > 0.15:
+                    escape_penalty = 0.30
+                elif escape_momentum > 0.05:
+                    escape_penalty = 0.40
+            except Exception:
+                pass
+
+        base_size_mult = quality.size_multiplier
+        net_size_mult = max(0.0, min(
+            1.0,
+            (base_size_mult * (1.0 + transition_boost_additive)) * (1.0 - escape_penalty),
+        ))
+
+        soft = SoftSignalModifiers(
+            net_size_multiplier=net_size_mult,
+            regime_transition_boost=transition_boost_additive,
+            bars_since_transition=bars_since,
+            escape_momentum_penalty=escape_penalty,
+            active_modifiers=[
+                *(["regime_transition_boost"] if transition_boost_additive > 0 else []),
+                *(["escape_momentum_penalty"] if escape_penalty > 0 else []),
+            ],
+        )
+
+        # ── Layer 4: Lifecycle Check ──────────────────────────────
         can_enter = self._lifecycle.can_enter()
         lifecycle_state = self._lifecycle.state
 
-        # ── Step 5: Intent Generation ────────────────────────────
-        intent: Optional[BaseIntent] = None
-        blocked = len(block_reasons) > 0
+        if not can_enter and not self._lifecycle.is_position_active():
+            # Cooldown is active — only block new entries, not exits
+            hard_block_codes.append(HardBlockCode.LIFECYCLE_COOLDOWN.value)
+            hard_block_reasons.append(
+                f"Lifecycle state {lifecycle_state} — cooldown prevents new entry"
+            )
 
-        if not blocked and can_enter:
+        # ── Layer 5: Intent Generation ────────────────────────────
+        hard_blocked = len(hard_block_codes) > 0
+        intent: Optional[BaseIntent] = None
+
+        if not hard_blocked and can_enter:
             abs_z = abs(z_score)
-            if abs_z >= threshold_set.entry_z:
+            if abs_z >= threshold_ctx.entry_z:
                 direction = (
                     SignalDirection.LONG_SPREAD
                     if z_score < 0
@@ -287,75 +355,74 @@ class SignalPipeline:
                     confidence=conviction,
                     direction=direction,
                     z_score=z_score,
-                    entry_z_threshold=threshold_set.entry_z,
-                    exit_z_target=threshold_set.exit_z,
-                    stop_z=threshold_set.stop_z,
+                    entry_z_threshold=threshold_ctx.entry_z,
+                    exit_z_target=threshold_ctx.exit_z,
+                    stop_z=threshold_ctx.stop_z,
                     expected_half_life_days=half_life or 20.0,
+                    quality_grade=quality.grade.value,
+                    regime=regime_ctx.regime.value,
+                    size_multiplier=net_size_mult,
+                    half_life_days=half_life or 20.0,
                     rationale=[
-                        f"z={z_score:.2f} crossed entry_z={threshold_set.entry_z:.2f}",
-                        f"regime={regime_label.value}, quality={quality_result.grade.value if quality_result else 'N/A'}",
+                        f"z={z_score:.2f} crossed entry_z={threshold_ctx.entry_z:.2f}",
+                        f"regime={regime_ctx.regime.value}, "
+                        f"quality={quality.grade.value}",
+                        f"size_mult={net_size_mult:.3f}",
                     ],
                 )
         elif self._lifecycle.is_position_active():
             abs_z = abs(z_score)
-            if abs_z <= threshold_set.exit_z:
+            if abs_z <= threshold_ctx.exit_z:
                 intent = ExitIntent(
                     pair_id=self.pair_id,
                     confidence=conviction,
                     exit_reasons=[ExitReason.MEAN_REVERSION_COMPLETE],
                     z_score=z_score,
                     rationale=[
-                        f"z={z_score:.2f} reverted below exit_z={threshold_set.exit_z:.2f}",
+                        f"z={z_score:.2f} reverted below exit_z={threshold_ctx.exit_z:.2f}",
                     ],
                 )
-            elif abs_z >= threshold_set.stop_z:
+            elif abs_z >= threshold_ctx.stop_z:
                 intent = ExitIntent(
                     pair_id=self.pair_id,
                     confidence=conviction,
                     exit_reasons=[ExitReason.ADVERSE_EXCURSION_STOP],
                     z_score=z_score,
                     rationale=[
-                        f"z={z_score:.2f} exceeded stop_z={threshold_set.stop_z:.2f}",
+                        f"z={z_score:.2f} exceeded stop_z={threshold_ctx.stop_z:.2f}",
                     ],
                 )
 
-        size_mult = (
-            quality_result.size_multiplier if quality_result is not None else 1.0
+        # ── Layer 6: Advisory Overlays ────────────────────────────
+        advisory = AdvisoryOverlays(
+            z_velocity=z_velocity_val,
+            notes=[
+                *(["regime_transition_active"] if transition_boost_additive > 0 else []),
+                *(["correlation"] + [str(round(correlation, 4))]
+                  if correlation is not None else []),
+                f"lifecycle_state={lifecycle_state.value if hasattr(lifecycle_state, 'value') else lifecycle_state}",
+            ],
         )
 
-        decision = SignalDecision(
+        envelope = SignalEnvelope(
             pair_id=self.pair_id,
             as_of=as_of,
+            run_id=run_id,
             z_score=z_score,
-            regime=regime_label.value,
-            quality_grade=(
-                quality_result.grade.value
-                if quality_result is not None
-                else "UNKNOWN"
-            ),
             intent=intent,
-            blocked=blocked,
-            block_reasons=block_reasons,
-            size_multiplier=size_mult,
+            hard_blocked=hard_blocked,
+            hard_block_reasons=hard_block_reasons,
+            hard_block_codes=hard_block_codes,
+            regime_ctx=regime_ctx,
+            threshold_ctx=threshold_ctx,
+            quality=quality,
+            soft=soft,
+            advisory=advisory,
             warnings=warnings,
-            metadata={
-                "regime_confidence": regime_confidence,
-                "entry_z": threshold_set.entry_z,
-                "exit_z": threshold_set.exit_z,
-                "stop_z": threshold_set.stop_z,
-                "lifecycle_state": (
-                    lifecycle_state.value
-                    if hasattr(lifecycle_state, "value")
-                    else str(lifecycle_state)
-                ),
-                "half_life": half_life,
-                "correlation": correlation,
-                **transition_boost_meta,
-            },
         )
 
-        self._last_decision = decision
-        return decision
+        self._last_decision = envelope
+        return envelope
 
     # ──────────────────────────────────────────────────────────────
     # BAR-BY-BAR EVALUATION (for backtester integration)
@@ -480,8 +547,116 @@ class SignalPipeline:
         )
 
     # ──────────────────────────────────────────────────────────────
-    # INTERNAL HELPERS
+    # INTERNAL HELPERS — typed contract versions
     # ──────────────────────────────────────────────────────────────
+
+    def _classify_regime_typed(
+        self,
+        spread_series: pd.Series,
+        prices_x: pd.Series,
+        prices_y: pd.Series,
+        as_of: datetime,
+        warnings: list[str],
+    ) -> RegimeContext:
+        """Layer 1: classify regime and return typed RegimeContext."""
+        try:
+            regime_features = build_regime_features(
+                spread=spread_series,
+                prices_x=prices_x,
+                prices_y=prices_y,
+                as_of=as_of,
+            )
+            regime_result = self._regime_engine.classify(regime_features)
+            return RegimeContext(
+                regime=regime_result.regime,
+                confidence=regime_result.confidence,
+                spread_vol=getattr(regime_features, "spread_vol", float("nan")),
+                spread_trend=getattr(regime_features, "spread_trend", float("nan")),
+                hurst_exp=getattr(regime_features, "hurst_exp", float("nan")),
+            )
+        except Exception as e:
+            logger.warning(
+                "RegimeEngine failed for %s: %s — defaulting to UNKNOWN",
+                self.pair_id, e,
+            )
+            warnings.append(f"Regime classification failed: {e}")
+            return RegimeContext(
+                regime=RegimeLabel.UNKNOWN,
+                confidence=0.0,
+                fallback_used=True,
+                layer_error=str(e),
+            )
+
+    def _compute_thresholds_typed(
+        self,
+        regime: RegimeLabel,
+        confidence: float,
+        half_life: Optional[float],
+        warnings: list[str],
+    ) -> ThresholdContext:
+        """Layer 2: compute thresholds and return typed ThresholdContext."""
+        try:
+            ts = self._threshold_engine.compute(
+                regime=regime,
+                signal_confidence=confidence,
+                half_life_days=half_life if half_life is not None else float("nan"),
+            )
+            return ThresholdContext(
+                entry_z=ts.entry_z,
+                exit_z=ts.exit_z,
+                stop_z=ts.stop_z,
+            )
+        except Exception as e:
+            logger.warning(
+                "ThresholdEngine failed for %s: %s — using static defaults",
+                self.pair_id, e,
+            )
+            warnings.append(f"Threshold computation failed: {e}")
+            return ThresholdContext(fallback_used=True, layer_error=str(e))
+
+    def _assess_quality_typed(
+        self,
+        conviction: float,
+        mr_score: float,
+        regime: RegimeLabel,
+        hard_block_codes: list[str],
+        hard_block_reasons: list[str],
+        warnings: list[str],
+    ) -> QualityVerdict:
+        """Layer 3: assess quality and return typed QualityVerdict."""
+        try:
+            qr = self._quality_engine.assess(
+                conviction=conviction,
+                mr_score=mr_score,
+                regime=regime,
+            )
+            if qr.skip_recommended:
+                hard_block_codes.append(HardBlockCode.GRADE_F_SKIP.value)
+                hard_block_reasons.append(
+                    f"Signal quality grade {qr.grade.value} — skip recommended"
+                )
+            return QualityVerdict(
+                grade=qr.grade,
+                score=getattr(qr, "score", conviction),
+                size_multiplier=qr.size_multiplier,
+                mr_score=mr_score,
+                regime_score=getattr(qr, "regime_score", 0.5),
+                conviction=conviction,
+                skip_recommended=qr.skip_recommended,
+            )
+        except Exception as e:
+            logger.warning(
+                "SignalQualityEngine failed for %s: %s", self.pair_id, e,
+            )
+            warnings.append(f"Quality assessment failed: {e}")
+            return QualityVerdict(
+                grade=SignalQualityGrade.F,
+                skip_recommended=False,
+                fallback_used=True,
+                layer_error=str(e),
+            )
+
+    # ── Legacy helpers kept for evaluate_bar internal use ─────────
 
     def _classify_regime(
         self,
@@ -491,22 +666,8 @@ class SignalPipeline:
         as_of: datetime,
         warnings: list[str],
     ) -> tuple[RegimeLabel, float]:
-        try:
-            regime_features = build_regime_features(
-                spread=spread_series,
-                prices_x=prices_x,
-                prices_y=prices_y,
-                as_of=as_of,
-            )
-            regime_result = self._regime_engine.classify(regime_features)
-            return regime_result.regime, regime_result.confidence
-        except Exception as e:
-            logger.warning(
-                "RegimeEngine failed for %s: %s — defaulting to UNKNOWN",
-                self.pair_id, e,
-            )
-            warnings.append(f"Regime classification failed: {e}")
-            return RegimeLabel.UNKNOWN, 0.0
+        ctx = self._classify_regime_typed(spread_series, prices_x, prices_y, as_of, warnings)
+        return ctx.regime, ctx.confidence
 
     def _compute_thresholds(
         self,
@@ -515,19 +676,13 @@ class SignalPipeline:
         half_life: Optional[float],
         warnings: list[str],
     ) -> ThresholdSet:
-        try:
-            return self._threshold_engine.compute(
-                regime=regime,
-                signal_confidence=confidence,
-                half_life_days=half_life if half_life is not None else float("nan"),
-            )
-        except Exception as e:
-            logger.warning(
-                "ThresholdEngine failed for %s: %s — using static defaults",
-                self.pair_id, e,
-            )
-            warnings.append(f"Threshold computation failed: {e}")
-            return ThresholdSet()
+        ctx = self._compute_thresholds_typed(regime, confidence, half_life, warnings)
+        # Reconstruct a ThresholdSet-compatible object (duck-typed)
+        ts = ThresholdSet()
+        ts.entry_z = ctx.entry_z
+        ts.exit_z = ctx.exit_z
+        ts.stop_z = ctx.stop_z
+        return ts
 
     def _assess_quality(
         self,
@@ -537,24 +692,18 @@ class SignalPipeline:
         block_reasons: list[str],
         warnings: list[str],
     ):
-        try:
-            quality_result = self._quality_engine.assess(
-                conviction=conviction,
-                mr_score=mr_score,
-                regime=regime,
-            )
-            if quality_result.skip_recommended:
-                block_reasons.append(
-                    f"Signal quality grade {quality_result.grade.value}"
-                    " — skip recommended"
-                )
-            return quality_result
-        except Exception as e:
-            logger.warning(
-                "SignalQualityEngine failed for %s: %s", self.pair_id, e,
-            )
-            warnings.append(f"Quality assessment failed: {e}")
-            return None
+        hard_codes: list[str] = []
+        hard_reasons: list[str] = []
+        verdict = self._assess_quality_typed(
+            conviction, mr_score, regime, hard_codes, hard_reasons, warnings,
+        )
+        block_reasons.extend(hard_reasons)
+        # Return a duck-typed wrapper for backward-compat code
+        class _QR:
+            grade = verdict.grade
+            size_multiplier = verdict.size_multiplier
+            skip_recommended = verdict.skip_recommended
+        return _QR()
 
     def _refresh_regime_cache(
         self,
@@ -567,27 +716,27 @@ class SignalPipeline:
     ) -> None:
         """Re-compute regime, thresholds, and quality for bar-by-bar cache."""
         warnings: list[str] = []
-        block_reasons: list[str] = []
+        hard_codes: list[str] = []
+        hard_reasons: list[str] = []
 
-        regime, confidence = self._classify_regime(
+        regime_ctx = self._classify_regime_typed(
             spread_series, prices_x, prices_y,
             datetime.utcnow(), warnings,
         )
-        threshold_set = self._compute_thresholds(
-            regime, conviction, half_life, warnings,
+        threshold_ctx = self._compute_thresholds_typed(
+            regime_ctx.regime, conviction, half_life, warnings,
         )
-        # Compute proper MR score from signal properties (replaces hardcoded 0.5)
-        mr_score = compute_mr_score(
+        mr_score_computed = compute_mr_score(
             spread=spread_series,
             half_life=half_life if half_life is not None else float("nan"),
         )
-        quality_result = self._assess_quality(
-            conviction, mr_score, regime, block_reasons, warnings,
+        quality = self._assess_quality_typed(
+            conviction, mr_score_computed, regime_ctx.regime,
+            hard_codes, hard_reasons, warnings,
         )
 
         # Detect regime transition into MEAN_REVERTING and manage boost counter.
-        # Must happen before caching so the boost is active in the same cycle.
-        new_regime = regime
+        new_regime = regime_ctx.regime
         if self._prev_regime is not None and self._prev_regime != new_regime:
             if new_regime == RegimeLabel.MEAN_REVERTING:
                 self._bars_since_transition = 0
@@ -600,19 +749,22 @@ class SignalPipeline:
         self._prev_regime = new_regime
         self._bars_since_transition += 1
 
-        self._cached_regime = regime
-        self._cached_regime_confidence = confidence
-        self._cached_threshold = threshold_set
-        self._cached_blocked = len(block_reasons) > 0
-        if quality_result is not None:
-            self._cached_quality_grade = quality_result.grade.value
-            base_size_mult = quality_result.size_multiplier
-        else:
-            self._cached_quality_grade = "UNKNOWN"
-            base_size_mult = 1.0
+        # Cache typed contexts for evaluate_bar
+        self._cached_regime = regime_ctx.regime
+        self._cached_regime_ctx = regime_ctx
+        self._cached_regime_confidence = regime_ctx.confidence
+        self._cached_threshold = ThresholdSet()
+        self._cached_threshold.entry_z = threshold_ctx.entry_z
+        self._cached_threshold.exit_z = threshold_ctx.exit_z
+        self._cached_threshold.stop_z = threshold_ctx.stop_z
+        self._cached_threshold_ctx = threshold_ctx
+        self._cached_quality = quality
+        self._cached_blocked = bool(hard_codes)
 
-        # Apply transition boost to cached size multiplier so bar-by-bar path
-        # (evaluate_bar) also benefits from the entry-window boost.
+        self._cached_quality_grade = quality.grade.value
+        base_size_mult = quality.size_multiplier
+
+        # Apply transition boost to cached size multiplier
         if self._bars_since_transition <= self._transition_boost_window:
             boost_frac = 1.0 - self._bars_since_transition / self._transition_boost_window
             transition_boost = 1.0 + 0.20 * boost_frac

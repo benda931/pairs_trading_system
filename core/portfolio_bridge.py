@@ -9,13 +9,24 @@ This module is the canonical integration point between the signal pipeline
 It resolves P1-PORTINT ("PortfolioAllocator never receives real signals") and
 P1-SAFE ("is_safe_to_trade() never called in execution paths").
 
+ADR-007 update: The bridge now consumes ``SignalEnvelope`` (from
+``core.signal_contracts``) instead of the old ``SignalDecision`` from
+``core.signal_pipeline``.  All contextual data (quality_grade, regime,
+size_multiplier, half_life) is accessed from the typed sub-contracts in
+SignalEnvelope — NOT from an untyped ``metadata: dict``.
+
+Additionally, ``EntryIntent`` now carries typed enrichment fields
+(quality_grade, regime, size_multiplier, half_life_days) as first-class
+dataclass fields.  The old ``object.__setattr__()`` monkey-patching in
+``extract_entry_intents()`` has been removed entirely.
+
 Contract:
-    SignalPipeline.evaluate() -> SignalDecision (with EntryIntent inside)
+    SignalPipeline.evaluate() -> SignalEnvelope
         |
     bridge_signals_to_allocator(safety_check=...)
         | 1. Check runtime safety (if callback provided)
-        | 2. Filter non-blocked EntryIntents
-        | 3. Enrich with quality/regime metadata
+        | 2. Filter non-hard-blocked EntryIntents
+        | 3. All enrichment already in EntryIntent typed fields (no patching)
         | 4. Feed to PortfolioAllocator.run_cycle()
         |
     list[AllocationDecision], PortfolioDiagnostics
@@ -31,12 +42,6 @@ Safety gating (P1-SAFE):
 
     This preserves the architecture boundary: core/ does NOT import runtime/.
     The safety check is injected from outside, not hard-wired.
-
-    When safety_check returns (False, reasons):
-        - All new entries are BLOCKED
-        - Diagnostics record the safety block with rationale
-        - No allocation cycle runs
-        - This is explicit, not silent
 
 The bridge does NOT:
     - Size positions (that is the portfolio layer's job)
@@ -68,7 +73,11 @@ from typing import Callable, Optional
 
 from core.contracts import PairId
 from core.intents import EntryIntent
-from core.signal_pipeline import SignalDecision
+from core.signal_contracts import SignalEnvelope
+
+# Backward-compatibility: old code that imported SignalDecision from this module
+# via ``from core.portfolio_bridge import SignalDecision`` will still work.
+SignalDecision = SignalEnvelope
 
 logger = logging.getLogger(__name__)
 
@@ -79,18 +88,21 @@ SafetyCheckFn = Callable[[], tuple[bool, list[str]]]
 
 
 def extract_entry_intents(
-    decisions: list[SignalDecision],
+    decisions: list[SignalEnvelope],
 ) -> list[EntryIntent]:
     """
-    Extract non-blocked EntryIntents from a list of SignalDecisions.
+    Extract non-hard-blocked EntryIntents from a list of SignalEnvelopes.
 
-    Each EntryIntent is enriched with ``quality_grade`` and ``regime``
-    attributes so the portfolio ranker can score them without needing
-    to look up the original SignalDecision.
+    ADR-007: All signal enrichment (quality_grade, regime, size_multiplier,
+    half_life_days) is now carried as typed first-class fields on EntryIntent.
+    No ``object.__setattr__()`` monkey-patching is performed here.
+
+    The pipeline (signal_pipeline.py) already populates these fields at
+    intent construction time from the typed SignalEnvelope sub-contracts.
 
     Parameters
     ----------
-    decisions : list[SignalDecision]
+    decisions : list[SignalEnvelope]
         Output from SignalPipeline.evaluate() for multiple pairs.
 
     Returns
@@ -103,30 +115,39 @@ def extract_entry_intents(
     n_no_intent = 0
     n_not_entry = 0
 
-    for d in decisions:
-        if d.blocked:
+    for env in decisions:
+        # Check hard_blocked (new typed field; also support legacy .blocked)
+        blocked = getattr(env, "hard_blocked", getattr(env, "blocked", False))
+        if blocked:
             n_blocked += 1
             continue
-        if d.intent is None:
+        if env.intent is None:
             n_no_intent += 1
             continue
-        if not isinstance(d.intent, EntryIntent):
+        if not isinstance(env.intent, EntryIntent):
             n_not_entry += 1
             continue
 
-        intent = d.intent
+        intent = env.intent
+        # Typed fields are already populated by the pipeline — no patching needed.
+        # However, as a defensive measure for any legacy SignalEnvelope objects
+        # produced before ADR-007, we verify and back-fill if empty.
+        if not intent.quality_grade:
+            grade_str = getattr(env, "quality_grade", "")
+            if grade_str:
+                # Back-fill via dataclass replace (intent is NOT frozen)
+                intent.quality_grade = grade_str
 
-        # Enrich the intent with metadata the ranker uses via getattr().
-        # These are NOT part of the EntryIntent dataclass — they are set
-        # as ad-hoc attributes.  The ranker reads them with getattr() and
-        # falls back to defaults if missing.  This is the adapter layer.
-        object.__setattr__(intent, "quality_grade", d.quality_grade)
-        object.__setattr__(intent, "regime", d.regime)
-        object.__setattr__(intent, "size_multiplier", d.size_multiplier)
-        if "half_life" in d.metadata:
-            hl = d.metadata["half_life"]
-            if hl is not None:
-                object.__setattr__(intent, "half_life_days", hl)
+        if not intent.regime:
+            regime_str = getattr(env, "regime", "")
+            if regime_str:
+                intent.regime = regime_str
+
+        if intent.size_multiplier == 1.0:
+            # Check soft layer for authoritative value
+            soft = getattr(env, "soft", None)
+            if soft is not None:
+                intent.size_multiplier = soft.net_size_multiplier
 
         intents.append(intent)
 
@@ -139,7 +160,7 @@ def extract_entry_intents(
 
 
 def bridge_signals_to_allocator(
-    signal_decisions: list[SignalDecision],
+    signal_decisions: list[SignalEnvelope],
     capital: float = 1_000_000.0,
     *,
     safety_check: Optional[SafetyCheckFn] = None,

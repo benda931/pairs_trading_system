@@ -1888,23 +1888,24 @@ class PairsOrchestrator:
                     as_of=datetime.now(timezone.utc),
                 )
 
-                # ── Enrich with cycle detection ──────────────
+                # ── Advisory: cycle detection enrichment ─────
+                # ADR-007: write to advisory.notes (typed) not metadata dict
+                advisory_notes_extra: list[str] = []
+                ou_optimal_exit_z_override: float = float("nan")
                 try:
                     from core.cycle_detector import CycleDetector
                     cd = CycleDetector()
                     cycle_result = cd.analyze(spread)
-                    if hasattr(decision, 'metadata') and isinstance(decision.metadata, dict):
-                        decision.metadata["cycle"] = {
-                            "dominant_period": cycle_result.dominant_period,
-                            "is_cyclical": cycle_result.is_cyclical,
-                            "phase": cycle_result.phase_signal,
-                            "optimal_lookback": cycle_result.optimal_lookback,
-                            "strength": cycle_result.cycle_strength,
-                        }
+                    advisory_notes_extra.append(
+                        f"cycle:period={cycle_result.dominant_period:.1f},"
+                        f"cyclical={cycle_result.is_cyclical},"
+                        f"phase={cycle_result.phase_signal:.3f},"
+                        f"strength={cycle_result.cycle_strength:.3f}"
+                    )
                 except Exception:
                     pass
 
-                # ── Enrich with optimal exit info ────────────
+                # ── Advisory: optimal exit enrichment ────────
                 try:
                     from core.optimal_exit import OptimalExitEngine
                     from core.spread_analytics import SpreadAnalytics
@@ -1913,15 +1914,32 @@ class PairsOrchestrator:
                     half_life = hl.half_life_days if hl else 15.0
                     oe = OptimalExitEngine(half_life=half_life, entry_z=abs(z_score))
                     boundary = oe.compute_optimal_boundary()
-                    if hasattr(decision, 'metadata') and isinstance(decision.metadata, dict):
-                        decision.metadata["optimal_exit"] = {
-                            "half_life": half_life,
-                            "max_expected_holding": boundary.max_expected_holding,
-                            "exit_z_dynamic_5d": boundary.exit_z_dynamic[4] if len(boundary.exit_z_dynamic) > 4 else None,
-                            "exit_z_dynamic_10d": boundary.exit_z_dynamic[9] if len(boundary.exit_z_dynamic) > 9 else None,
-                        }
+                    exit_5d = boundary.exit_z_dynamic[4] if len(boundary.exit_z_dynamic) > 4 else None
+                    exit_10d = boundary.exit_z_dynamic[9] if len(boundary.exit_z_dynamic) > 9 else None
+                    if exit_5d is not None:
+                        ou_optimal_exit_z_override = float(exit_5d)
+                    advisory_notes_extra.append(
+                        f"optimal_exit:hl={half_life:.1f}d,"
+                        f"exit_5d={exit_5d},"
+                        f"exit_10d={exit_10d},"
+                        f"max_hold={boundary.max_expected_holding:.1f}d"
+                    )
                 except Exception:
                     pass
+
+                # ── Merge advisory notes into envelope (frozen → replace) ─
+                if advisory_notes_extra or not (ou_optimal_exit_z_override != ou_optimal_exit_z_override):
+                    import dataclasses
+                    old_advisory = decision.advisory
+                    new_notes = list(old_advisory.notes) + advisory_notes_extra
+                    new_advisory = dataclasses.replace(
+                        old_advisory,
+                        ou_optimal_exit_z=ou_optimal_exit_z_override
+                            if not (ou_optimal_exit_z_override != ou_optimal_exit_z_override)
+                            else old_advisory.ou_optimal_exit_z,
+                        notes=new_notes,
+                    )
+                    decision = dataclasses.replace(decision, advisory=new_advisory)
 
                 decisions.append(decision)
 

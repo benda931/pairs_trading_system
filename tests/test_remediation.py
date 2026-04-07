@@ -303,19 +303,20 @@ class TestP1SignalPipeline:
 
     def test_signal_decision_has_required_fields(self):
         """
-        P1-PIPE: SignalDecision must expose all fields expected by the
-        portfolio layer (pair_id, as_of, z_score, regime, quality_grade,
-        intent, blocked, block_reasons, size_multiplier, warnings, metadata).
+        P1-PIPE: SignalDecision (now SignalEnvelope) must expose all fields
+        expected by the portfolio layer: pair_id, as_of, z_score, regime,
+        quality_grade, intent, blocked, block_reasons, size_multiplier,
+        warnings, metadata (backward-compat property).
         """
         try:
-            from core.signal_pipeline import SignalDecision
+            from core.signal_contracts import make_signal_decision
             from core.contracts import PairId
         except ImportError as e:
             pytest.skip(f"Import failed: {e}")
 
         from datetime import datetime
 
-        decision = SignalDecision(
+        decision = make_signal_decision(
             pair_id=PairId("AAPL", "MSFT"),
             as_of=datetime.utcnow(),
             z_score=2.5,
@@ -338,14 +339,14 @@ class TestP1SignalPipeline:
     def test_signal_decision_block_reasons_defaults_to_empty_list(self):
         """block_reasons defaults to empty list (not None)."""
         try:
-            from core.signal_pipeline import SignalDecision
+            from core.signal_contracts import make_signal_decision
             from core.contracts import PairId
         except ImportError as e:
             pytest.skip(f"Import failed: {e}")
 
         from datetime import datetime
 
-        decision = SignalDecision(
+        decision = make_signal_decision(
             pair_id=PairId("AAPL", "MSFT"),
             as_of=datetime.utcnow(),
             z_score=1.0,
@@ -516,7 +517,7 @@ class TestP1PortfolioIntegration:
     def test_extract_entry_intents_from_decisions(self):
         """P1-PORTINT: extract_entry_intents filters blocked and non-entry decisions."""
         from core.portfolio_bridge import extract_entry_intents
-        from core.signal_pipeline import SignalDecision
+        from core.signal_contracts import make_signal_decision
         from core.contracts import PairId
         from core.intents import EntryIntent
         from datetime import datetime
@@ -524,20 +525,23 @@ class TestP1PortfolioIntegration:
         pair = PairId("AAPL", "MSFT")
         now = datetime.utcnow()
 
-        # One valid entry intent
-        d1 = SignalDecision(
+        # One valid entry intent — quality_grade and regime pre-populated on intent
+        entry = EntryIntent(
+            pair_id=pair, confidence=0.7, z_score=2.5,
+            quality_grade="A", regime="MEAN_REVERTING",
+        )
+        d1 = make_signal_decision(
             pair_id=pair, as_of=now, z_score=2.5, regime="MEAN_REVERTING",
-            quality_grade="A", intent=EntryIntent(pair_id=pair, confidence=0.7, z_score=2.5),
-            blocked=False, size_multiplier=1.0,
+            quality_grade="A", intent=entry, blocked=False, size_multiplier=1.0,
         )
         # One blocked decision
-        d2 = SignalDecision(
+        d2 = make_signal_decision(
             pair_id=pair, as_of=now, z_score=1.0, regime="CRISIS",
             quality_grade="F", intent=None,
             blocked=True, block_reasons=["quality F"],
         )
         # One with no intent (z below threshold)
-        d3 = SignalDecision(
+        d3 = make_signal_decision(
             pair_id=PairId("GOOG", "META"), as_of=now, z_score=0.5,
             regime="MEAN_REVERTING", quality_grade="B", intent=None,
             blocked=False,
@@ -549,14 +553,18 @@ class TestP1PortfolioIntegration:
         )
         assert isinstance(intents[0], EntryIntent)
         assert intents[0].pair_id == pair
-        # Check enrichment
-        assert getattr(intents[0], "quality_grade", None) == "A"
-        assert getattr(intents[0], "regime", None) == "MEAN_REVERTING"
+        # Check enrichment fields (typed, not monkey-patched)
+        assert intents[0].quality_grade == "A", (
+            "quality_grade must be set as typed field on EntryIntent"
+        )
+        assert intents[0].regime == "MEAN_REVERTING", (
+            "regime must be set as typed field on EntryIntent"
+        )
 
     def test_bridge_runs_allocation_cycle(self):
         """P1-PORTINT: bridge_signals_to_allocator produces allocation decisions."""
         from core.portfolio_bridge import bridge_signals_to_allocator
-        from core.signal_pipeline import SignalDecision
+        from core.signal_contracts import make_signal_decision
         from core.contracts import PairId, SignalDirection
         from core.intents import EntryIntent
         from datetime import datetime
@@ -565,13 +573,14 @@ class TestP1PortfolioIntegration:
         now = datetime.utcnow()
 
         decisions = [
-            SignalDecision(
+            make_signal_decision(
                 pair_id=pair, as_of=now, z_score=2.5, regime="MEAN_REVERTING",
                 quality_grade="A",
                 intent=EntryIntent(
                     pair_id=pair, confidence=0.7, z_score=2.5,
                     direction=SignalDirection.LONG_SPREAD,
                     entry_z_threshold=2.0, exit_z_target=0.5, stop_z=4.0,
+                    quality_grade="A", regime="MEAN_REVERTING", half_life_days=15.0,
                 ),
                 blocked=False, size_multiplier=1.0,
                 metadata={"half_life": 15.0},
@@ -595,7 +604,7 @@ class TestP1PortfolioIntegration:
     def test_bridge_empty_decisions_returns_empty(self):
         """P1-PORTINT: No eligible intents produces empty allocation with diagnostics."""
         from core.portfolio_bridge import bridge_signals_to_allocator
-        from core.signal_pipeline import SignalDecision
+        from core.signal_contracts import make_signal_decision
         from core.contracts import PairId
         from datetime import datetime
 
@@ -604,7 +613,7 @@ class TestP1PortfolioIntegration:
 
         # All blocked
         decisions = [
-            SignalDecision(
+            make_signal_decision(
                 pair_id=pair, as_of=now, z_score=1.0, regime="CRISIS",
                 quality_grade="F", intent=None, blocked=True,
                 block_reasons=["quality F"],
@@ -618,7 +627,7 @@ class TestP1PortfolioIntegration:
     def test_unfunded_has_rationale(self):
         """P1-PORTINT: Unfunded allocations carry explicit rationale."""
         from core.portfolio_bridge import bridge_signals_to_allocator
-        from core.signal_pipeline import SignalDecision
+        from core.signal_contracts import make_signal_decision
         from core.contracts import PairId, SignalDirection
         from core.intents import EntryIntent
         from datetime import datetime
@@ -627,7 +636,7 @@ class TestP1PortfolioIntegration:
         decisions = []
         for i in range(10):
             pair = PairId(f"SYM{i:02d}A", f"SYM{i:02d}B")
-            decisions.append(SignalDecision(
+            decisions.append(make_signal_decision(
                 pair_id=pair,
                 as_of=datetime.utcnow(),
                 z_score=2.0 + i * 0.1,
@@ -661,13 +670,13 @@ class TestP1SafetyGating:
     """P1-SAFE: is_safe_to_trade() blocks entries via portfolio bridge."""
 
     def _make_valid_decision(self):
-        from core.signal_pipeline import SignalDecision
+        from core.signal_contracts import make_signal_decision
         from core.contracts import PairId, SignalDirection
         from core.intents import EntryIntent
         from datetime import datetime
 
         pair = PairId("AAPL", "MSFT")
-        return SignalDecision(
+        return make_signal_decision(
             pair_id=pair,
             as_of=datetime.utcnow(),
             z_score=2.5,
@@ -676,6 +685,7 @@ class TestP1SafetyGating:
             intent=EntryIntent(
                 pair_id=pair, confidence=0.7, z_score=2.5,
                 direction=SignalDirection.LONG_SPREAD,
+                quality_grade="A", regime="MEAN_REVERTING",
             ),
             blocked=False,
             size_multiplier=1.0,
