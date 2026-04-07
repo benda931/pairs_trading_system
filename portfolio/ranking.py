@@ -13,13 +13,16 @@ Ranking doctrine:
   - Every score component is recorded for audit
 
 Score decomposition (all [0,1]):
-  1. signal_strength_score   — z-score attractiveness vs threshold
-  2. signal_quality_score    — quality grade A+→F → numeric
-  3. regime_suitability_score — how favourable is the current regime
-  4. reversion_probability   — estimated success probability (rule/ML)
-  5. diversification_value   — marginal diversification contribution
-  6. stability_score         — rolling spread stability
-  7. freshness_score         — model/signal recency penalty
+  1. signal_strength_score    — z-score attractiveness vs threshold       (w=0.20)
+  2. signal_quality_score     — quality grade A+→F → numeric              (w=0.16)
+  3. regime_suitability_score — how favourable is the current regime      (w=0.15)
+  4. reversion_probability    — estimated success probability (rule/ML)   (w=0.12)
+  5. diversification_value    — marginal diversification contribution      (w=0.07)
+  6. stability_score          — rolling spread stability                   (w=0.05)
+  7. freshness_score          — model/signal recency penalty               (w=0.00)
+  8. capital_efficiency_score — expected P&L per unit capital × time      (w=0.08)
+  9. liquidity_score          — ADV participation rate executability       (w=0.07)
+ 10. edge_quality_score       — OOS walk-forward edge quality              (w=0.10)
 
 composite = weighted sum, with diversification_value and overlap_penalty applied last.
 
@@ -35,18 +38,24 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Optional, Protocol, runtime_checkable
 
+import numpy as np
+
 from core.contracts import (
     PairId,
     RegimeLabel,
     SignalQualityGrade,
 )
 from core.intents import EntryIntent
+from core.transaction_costs import TransactionCostModel, estimate_trade_cost
 from portfolio.contracts import (
     OpportunitySet,
     RankedOpportunity,
 )
 
 logger = logging.getLogger("portfolio.ranking")
+
+# Module-level singleton — avoids re-instantiating per opportunity
+_tc_model = TransactionCostModel()
 
 
 # ── ML hook protocol ──────────────────────────────────────────────
@@ -65,20 +74,40 @@ class RankingMLHookProtocol(Protocol):
 
 @dataclass
 class RankingWeights:
-    """Configurable weights for the 7 ranking dimensions."""
-    signal_strength: float = 0.25
-    signal_quality: float = 0.20
-    regime_suitability: float = 0.20
-    reversion_probability: float = 0.15
-    diversification_value: float = 0.10
+    """
+    Configurable weights for the 10 ranking dimensions.
+
+    Weight allocation (must sum to 1.0):
+      signal_strength    0.20  — z-score attractiveness
+      signal_quality     0.16  — grade A+→F
+      regime_suitability 0.15  — regime fit
+      reversion_prob     0.12  — conviction / ML probability
+      diversification    0.07  — marginal portfolio diversification
+      stability          0.05  — half-life stability
+      freshness          0.00  — signal age (operational, no alpha weight)
+      capital_efficiency 0.08  — expected P&L per unit capital × time (NEW)
+      liquidity          0.07  — ADV participation rate (NEW)
+      edge_quality       0.10  — OOS walk-forward edge (NEW)
+                         ────
+                         1.00
+    """
+    signal_strength: float = 0.20
+    signal_quality: float = 0.16
+    regime_suitability: float = 0.15
+    reversion_probability: float = 0.12
+    diversification_value: float = 0.07
     stability: float = 0.05
-    freshness: float = 0.05
+    freshness: float = 0.00
+    capital_efficiency: float = 0.08
+    liquidity: float = 0.07
+    edge_quality: float = 0.10
 
     def __post_init__(self) -> None:
         total = sum([
             self.signal_strength, self.signal_quality, self.regime_suitability,
             self.reversion_probability, self.diversification_value,
             self.stability, self.freshness,
+            self.capital_efficiency, self.liquidity, self.edge_quality,
         ])
         if abs(total - 1.0) > 0.01:
             raise ValueError(f"RankingWeights must sum to 1.0, got {total:.3f}")
@@ -191,6 +220,117 @@ def _half_life_stability_score(half_life_days: float) -> float:
     if half_life_days <= 90:
         return 0.55
     return 0.3         # Too slow — weak mean reversion
+
+
+def _capital_efficiency_score(
+    half_life: Optional[float],
+    spread_vol: float,
+    abs_z: float,
+    entry_z_threshold: float = 2.0,
+) -> float:
+    """
+    Capital efficiency: expected convergence P&L per unit of capital × time.
+
+    Logic: A pair with HL=10d and |z|=2.5 frees up capital 3x faster than
+    HL=30d. Higher turnover at same risk = better use of capital.
+
+    Score = (expected_z_reversion / half_life) normalised to [0, 1]
+    expected_z_reversion ≈ |z| - exit_z (≈ |z| - 0.5)
+    """
+    if half_life is None or half_life <= 0 or np.isnan(half_life) or np.isinf(half_life):
+        return 0.5  # neutral
+    if abs_z <= 0 or spread_vol <= 0:
+        return 0.5
+
+    expected_reversion = max(0.0, abs_z - 0.5)   # target: exit at z=0.5
+    # Capital efficiency: reversion magnitude / holding period
+    raw_efficiency = expected_reversion / half_life
+    # Normalise: 0.05 reversion/day → score=0.5; 0.15+ → score=1.0; <0.01 → score=0.0
+    score = float(np.clip((raw_efficiency - 0.01) / 0.14, 0.0, 1.0))
+    return score
+
+
+def _liquidity_score(
+    avg_dollar_vol_x: Optional[float] = None,
+    avg_dollar_vol_y: Optional[float] = None,
+    gross_notional: float = 100_000.0,
+    adv_participation_cap: float = 0.05,  # max 5% of ADV
+) -> float:
+    """
+    Liquidity quality score [0, 1].
+
+    Checks whether the intended trade size is executable without significant
+    market impact. Uses participation rate = trade_size / ADV.
+
+    adv_participation_cap: maximum acceptable fraction of ADV (5% is institutional standard).
+    """
+    if avg_dollar_vol_x is None or avg_dollar_vol_y is None:
+        return 0.7  # unknown → assume reasonable liquidity (don't penalise missing data)
+
+    min_adv = min(avg_dollar_vol_x, avg_dollar_vol_y)
+    if min_adv <= 0:
+        return 0.1  # effectively illiquid
+
+    # Each leg is roughly half the gross notional
+    leg_size = gross_notional / 2.0
+    participation_rate = leg_size / min_adv
+
+    if participation_rate <= 0.01:      # <1% ADV: highly liquid
+        return 1.0
+    elif participation_rate <= 0.05:    # 1-5%: good
+        return 1.0 - (participation_rate - 0.01) / 0.04 * 0.3   # 1.0 → 0.7
+    elif participation_rate <= 0.20:    # 5-20%: acceptable but degraded
+        return 0.7 - (participation_rate - 0.05) / 0.15 * 0.5   # 0.7 → 0.2
+    else:                               # >20%: illiquid
+        return max(0.0, 0.2 - (participation_rate - 0.20) * 0.5)
+
+
+def _edge_quality_score(
+    oos_sharpe: Optional[float] = None,
+    oos_ic: Optional[float] = None,
+    n_oos_trades: int = 0,
+    stability_score: Optional[float] = None,
+) -> float:
+    """
+    Historical OOS edge quality [0, 1].
+
+    Uses walk-forward OOS results if available. Rewards:
+    - Consistent OOS Sharpe (0.5–2.0 is good)
+    - Positive OOS IC with statistical significance
+    - Sufficient trade count (n >= 10 for meaningful stats)
+    """
+    components = []
+
+    # OOS Sharpe component
+    if oos_sharpe is not None and not np.isnan(oos_sharpe):
+        if oos_sharpe <= 0:
+            sharpe_score = 0.0
+        elif oos_sharpe >= 2.0:
+            sharpe_score = 1.0
+        else:
+            sharpe_score = oos_sharpe / 2.0
+        # Discount for insufficient trades
+        if n_oos_trades < 5:
+            sharpe_score *= 0.3
+        elif n_oos_trades < 10:
+            sharpe_score *= 0.6
+        components.append((sharpe_score, 0.6))
+
+    # OOS IC component
+    if oos_ic is not None and not np.isnan(oos_ic):
+        ic_score = float(np.clip((oos_ic + 0.05) / 0.15, 0.0, 1.0))  # IC=0.05→0.33, IC=0.20→1.0
+        components.append((ic_score, 0.4))
+
+    # Stability score component (from pair_validator)
+    if stability_score is not None and not np.isnan(stability_score):
+        components.append((float(np.clip(stability_score, 0.0, 1.0)), 0.3))
+
+    if not components:
+        return 0.5  # no historical data → neutral
+
+    total_weight = sum(w for _, w in components)
+    weighted_score = sum(s * w for s, w in components) / total_weight
+    return float(np.clip(weighted_score, 0.0, 1.0))
 
 
 # ── Overlap penalty ───────────────────────────────────────────────
@@ -325,6 +465,8 @@ class OpportunityRanker:
                 half_life = float("nan")
             generated_at = getattr(intent, "generated_at", None)
             skip = getattr(intent, "skip_recommended", False)
+            # Spread volatility — used by capital efficiency score
+            spread_vol = float(intent.metadata.get("spread_vol", 1.0) or 1.0)
 
             # ── Hard vetoes ───────────────────────────────────────
             if quality_grade in cfg.blocking_grades:
@@ -343,17 +485,42 @@ class OpportunityRanker:
             stab = _half_life_stability_score(half_life)
             dv = 1.0  # diversification_value computed after all pairs scored
 
+            # ── New extended scores ───────────────────────────────
+            abs_z = abs(z_score)
+            cap_eff = _capital_efficiency_score(
+                half_life=half_life,
+                spread_vol=spread_vol,
+                abs_z=abs_z,
+            )
+            liq = _liquidity_score(
+                avg_dollar_vol_x=intent.metadata.get("avg_dollar_vol_x"),
+                avg_dollar_vol_y=intent.metadata.get("avg_dollar_vol_y"),
+                gross_notional=cfg.default_notional if hasattr(cfg, "default_notional") else 100_000.0,
+            )
+            edge_q = _edge_quality_score(
+                oos_sharpe=intent.metadata.get("oos_sharpe"),
+                oos_ic=intent.metadata.get("oos_ic"),
+                n_oos_trades=int(intent.metadata.get("n_oos_trades", 0)),
+                stability_score=intent.metadata.get("stability_score"),
+            )
+
             if ss > 0.7:
                 strengths.append(f"strong_z:{z_score:.2f}")
             if sq >= 0.80:
                 strengths.append(f"high_quality:{quality_grade}")
             if rs >= 0.85:
                 strengths.append(f"ideal_regime:{regime_str}")
+            if cap_eff >= 0.70:
+                strengths.append(f"high_cap_efficiency:{cap_eff:.2f}")
+            if edge_q >= 0.70:
+                strengths.append(f"strong_oos_edge:{edge_q:.2f}")
 
             if ss < 0.3:
                 penalties.append(f"weak_signal:{z_score:.2f}")
             if stab < 0.5:
                 penalties.append(f"poor_stability:hl={half_life:.1f}d")
+            if liq < 0.3:
+                penalties.append(f"low_liquidity:{liq:.2f}")
 
             # ── Overlap penalty ───────────────────────────────────
             overlap_penalty, overlap_notes = _compute_overlap_penalty(
@@ -362,17 +529,67 @@ class OpportunityRanker:
             penalties.extend(overlap_notes)
 
             # ── Composite score ───────────────────────────────────
+            signals: list[str] = []
             composite = (
-                w.signal_strength    * ss
-                + w.signal_quality   * sq
+                w.signal_strength      * ss
+                + w.signal_quality     * sq
                 + w.regime_suitability * rs
                 + w.reversion_probability * rp
                 + w.diversification_value * dv
-                + w.stability        * stab
-                + w.freshness        * fs
+                + w.stability          * stab
+                + w.freshness          * fs
+                + w.capital_efficiency * cap_eff
+                + w.liquidity          * liq
+                + w.edge_quality       * edge_q
             )
             # Apply overlap penalty to composite
             composite = max(0.0, composite - overlap_penalty)
+
+            # ── Transaction cost gate ─────────────────────────────
+            # Estimate round-trip costs and compute breakeven_z. If the entry
+            # z-score barely covers costs, penalise or zero out the composite.
+            try:
+                tc_estimate = _tc_model.estimate(
+                    notional_x=50_000,   # half of standard notional
+                    notional_y=50_000,
+                    price_x=100.0, price_y=100.0,   # normalised
+                    adv_x=intent.metadata.get("avg_dollar_vol_x"),
+                    adv_y=intent.metadata.get("avg_dollar_vol_y"),
+                    spread_bps_x=intent.metadata.get("spread_bps_x"),
+                    spread_bps_y=intent.metadata.get("spread_bps_y"),
+                    holding_days=max(5, int(half_life)) if (half_life and not math.isnan(half_life)) else 20,
+                    spread_vol_pct=float(intent.metadata.get("spread_vol_pct", 0.02)),
+                )
+
+                # Store cost audit fields in intent metadata snapshot
+                tc_total_bps = tc_estimate.total_bps
+                tc_breakeven_z = tc_estimate.breakeven_z
+
+                if tc_breakeven_z > 0:
+                    z_coverage = abs_z / max(tc_breakeven_z, 1e-6)
+                    if z_coverage < 1.0:
+                        # Can't cover costs at current z — zero composite
+                        composite = 0.0
+                        signals.append("cost_exceeds_signal")
+                    elif z_coverage < 2.0:
+                        # z covers costs but thin margin — scale down
+                        cost_factor = (z_coverage - 1.0)   # 0 at breakeven, 1 at 2x breakeven
+                        composite *= max(0.3, cost_factor)
+                        signals.append(f"thin_cost_margin_{z_coverage:.1f}x")
+                    # else: z >> breakeven → no penalty
+
+            except Exception as _tc_exc:
+                tc_total_bps = float("nan")
+                tc_breakeven_z = float("nan")
+                logger.debug("TC estimate failed for %s: %s", pair_id.label, _tc_exc)
+
+            # Merge TC signals into penalties list for audit
+            penalties.extend(signals)
+            # Emit cost audit tags regardless of penalty outcome
+            if not math.isnan(tc_total_bps):
+                penalties.append(f"tc_cost_bps:{tc_total_bps:.1f}")
+            if not math.isnan(tc_breakeven_z):
+                penalties.append(f"tc_breakeven_z:{tc_breakeven_z:.3f}")
 
             opp = RankedOpportunity(
                 pair_id=pair_id,
@@ -384,6 +601,9 @@ class OpportunityRanker:
                 diversification_value=dv,
                 stability_score=stab,
                 freshness_score=fs,
+                capital_efficiency_score=cap_eff,
+                liquidity_score=liq,
+                edge_quality_score=edge_q,
                 composite_score=composite,
                 rank=0,  # assigned below
                 quality_grade=quality_grade,
@@ -519,13 +739,16 @@ class OpportunityRanker:
             # Recompute composite with updated diversification_value
             w = cfg.weights
             opp.composite_score = (
-                w.signal_strength    * opp.signal_strength_score
-                + w.signal_quality   * opp.signal_quality_score
+                w.signal_strength      * opp.signal_strength_score
+                + w.signal_quality     * opp.signal_quality_score
                 + w.regime_suitability * opp.regime_suitability_score
                 + w.reversion_probability * opp.reversion_probability
                 + w.diversification_value * dv
-                + w.stability        * opp.stability_score
-                + w.freshness        * opp.freshness_score
+                + w.stability          * opp.stability_score
+                + w.freshness          * opp.freshness_score
+                + w.capital_efficiency * opp.capital_efficiency_score
+                + w.liquidity          * opp.liquidity_score
+                + w.edge_quality       * opp.edge_quality_score
             )
             opp.composite_score = max(0.0, opp.composite_score - opp.overlap_penalty)
 

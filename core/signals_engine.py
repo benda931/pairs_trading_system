@@ -410,10 +410,18 @@ except Exception:  # pragma: no cover
 
 
 def _calc_zscore_series(x: pd.Series, window: int) -> pd.Series:
+    """Rolling z-score with ddof=1 and 4σ winsorization for outlier resilience."""
     x = pd.to_numeric(x, errors="coerce")
-    mu = x.rolling(window).mean()
-    sd = x.rolling(window).std(ddof=1)
-    return (x - mu) / sd
+    # Winsorize: clip at ±4σ using expanding window to avoid look-ahead
+    roll_mu  = x.rolling(window, min_periods=max(5, window//4)).mean()
+    roll_std = x.rolling(window, min_periods=max(5, window//4)).std(ddof=1)
+    lower = roll_mu - 4.0 * roll_std
+    upper = roll_mu + 4.0 * roll_std
+    x_clean = x.clip(lower=lower, upper=upper)
+    # Recompute on clipped series
+    mu = x_clean.rolling(window, min_periods=max(5, window//4)).mean()
+    sd = x_clean.rolling(window, min_periods=max(5, window//4)).std(ddof=1)
+    return (x_clean - mu) / sd.replace(0, np.nan)
 
 
 def _last_non_nan(s: pd.Series, default: float = np.nan) -> float:
@@ -467,26 +475,46 @@ def _compute_spread_and_beta_series(
     s1: pd.Series,
     s2: pd.Series,
     beta_window: int,
+    recalc_freq: int = 5,
 ) -> Tuple[pd.Series, pd.Series, float, float]:
     """
-    מחזיר:
-    - beta_series (rolling)
-    - spread series לפי β האחרון
-    - beta_last
-    - beta_stability_metric (סטיית תקן נורמליזציה של β מתגלגל)
+    Build spread using rolling beta (re-estimated every recalc_freq bars).
+    Returns: (beta_series, spread_series, beta_last, beta_stability)
+
+    Rolling beta eliminates the stale-hedge problem: as the relationship
+    between s1 and s2 evolves, the spread tracks the true residual.
     """
-    beta_series = _rolling_beta(s1, s2, beta_window)
-    beta_last = _last_non_nan(beta_series, default=1.0)
-    spread = s1 - beta_last * s2
+    n = len(s1)
+    window = beta_window
+    beta_arr = np.full(n, np.nan)
 
-    # מדד יציבות β – רעיון מתקדם: std(β) / |β_last|
-    try:
-        beta_std = float(beta_series.dropna().std(ddof=0))
-        beta_stability = float(beta_std / max(abs(beta_last), 1e-6))
-    except Exception:
-        beta_stability = np.nan
+    # Compute rolling beta: for each bar i >= window, re-estimate on [i-window:i]
+    # Only recalculate every recalc_freq bars for efficiency
+    last_beta = np.nan
+    for i in range(window, n):
+        if (i - window) % recalc_freq == 0 or np.isnan(last_beta):
+            sub1 = s1.iloc[i - window:i].values
+            sub2 = s2.iloc[i - window:i].values
+            if len(sub2) >= 10 and np.std(sub2) > 1e-10:
+                # OLS: s1 = alpha + beta * s2
+                cov_mat = np.cov(sub1, sub2)
+                last_beta = cov_mat[0, 1] / (cov_mat[1, 1] + 1e-12)
+        beta_arr[i] = last_beta
 
-    return beta_series, spread, float(beta_last), beta_stability
+    beta_series = pd.Series(beta_arr, index=s1.index)
+
+    # Build spread using rolling beta (avoid look-ahead: beta[i] estimated from [i-window:i])
+    spread = s1 - beta_series * s2
+
+    # Stability: CV of rolling beta
+    valid_betas = beta_series.dropna()
+    beta_last = float(valid_betas.iloc[-1]) if len(valid_betas) > 0 else 1.0
+    if len(valid_betas) > 5 and abs(valid_betas.mean()) > 1e-10:
+        beta_stability = 1.0 - min(1.0, float(valid_betas.std() / abs(valid_betas.mean())))
+    else:
+        beta_stability = 0.5
+
+    return beta_series, spread, beta_last, beta_stability
 
 
 # ========= בניית SignalGenerator מתוך SignalProfile =========
@@ -746,6 +774,62 @@ def compute_pair_signal(
     except Exception:
         cointegration_strength = None
 
+    # ---------- ADF p-value (for MR scoring downstream) ----------
+    adf_pval_for_meta: float = float("nan")
+    try:
+        adf_cols = [c for c in sig_df.columns if c.startswith("adf_p_value")]
+        if adf_cols:
+            _p = _last_non_nan(sig_df[adf_cols[0]])
+            if not np.isnan(_p):
+                adf_pval_for_meta = float(_p)
+    except Exception:
+        pass
+
+    # ---------- Variance Ratio (Lo-MacKinlay, lag=10) ----------
+    variance_ratio_val: float = float("nan")
+    vr_z_stat_val: float = float("nan")
+    try:
+        _spread_arr = spread.dropna().values
+        _n = len(_spread_arr)
+        _lag = min(10, max(2, _n // 5))
+        if _n >= _lag * 2:
+            _returns = np.diff(_spread_arr)
+            _var1 = np.var(_returns, ddof=1)
+            if _var1 > 1e-12:
+                _q_ret = _spread_arr[_lag:] - _spread_arr[:-_lag]
+                _varq = np.var(_q_ret, ddof=1)
+                _vr = _varq / (_lag * _var1)
+                _vz = (_vr - 1.0) / np.sqrt(
+                    2.0 * (2.0 * _lag - 1.0) * (_lag - 1.0) / (3.0 * _lag * _n)
+                )
+                variance_ratio_val = float(_vr)
+                vr_z_stat_val = float(_vz)
+    except Exception:
+        pass
+
+    # ---------- Z-velocity (1-bar rate of change of z-score) ----------
+    z_velocity_val: float = float("nan")
+    try:
+        _z_clean = z_main.dropna()
+        if len(_z_clean) >= 2:
+            z_velocity_val = float(_z_clean.iloc[-1] - _z_clean.iloc[-2])
+    except Exception:
+        pass
+
+    # ---------- Correlation Dislocation ----------
+    corr_dislocation_score: float = 0.0
+    corr_repair_likely: bool = False
+    corr_direction: str = "stable"
+    try:
+        returns_x = s1.pct_change().dropna()
+        returns_y = s2.pct_change().dropna()
+        _disloc = compute_correlation_dislocation_score(returns_x, returns_y)
+        corr_dislocation_score = float(_disloc.get("dislocation_score", 0.0))
+        corr_repair_likely = bool(_disloc.get("repair_likely", False))
+        corr_direction = str(_disloc.get("direction", "stable"))
+    except Exception:
+        pass
+
     # ---------- Flags & Tiering ----------
     fragility_flags: List[str] = []
 
@@ -818,6 +902,15 @@ def compute_pair_signal(
         "fragility_flags": fragility_flags,
         "deploy_tier": deploy_tier,
         "edge_hint": edge_hint,
+        # MR quality fields (used by compute_mr_score downstream)
+        "adf_pval": adf_pval_for_meta,
+        "variance_ratio": variance_ratio_val,
+        "vr_z_stat": vr_z_stat_val,
+        "z_velocity": z_velocity_val,
+        # Correlation dislocation fields
+        "corr_dislocation_score": corr_dislocation_score,
+        "corr_repair_likely": corr_repair_likely,
+        "corr_direction": corr_direction,
     }
 
     ps = PairSignal(
@@ -2790,6 +2883,169 @@ def export_signals_to_json(
         return None
 
 
+# ========= Mean-Reversion Quality Score =========
+
+def compute_mr_score(
+    spread: pd.Series,
+    adf_pval: float = np.nan,
+    hurst: float = np.nan,
+    half_life: float = np.nan,
+    variance_ratio: float = np.nan,
+    z_velocity: float = np.nan,
+) -> float:
+    """
+    Composite mean-reversion quality score [0, 1].
+
+    Components (weighted):
+      40% - ADF stationarity strength  (lower p-value = stronger)
+      25% - Hurst exponent             (lower H = stronger mean-reversion)
+      20% - Half-life quality          (15-30d optimal, penalise extremes)
+      15% - Variance ratio             (VR < 1 = mean-reverting in returns)
+
+    z_velocity: if provided, applies a timing modifier (approaching zero = boost).
+    """
+    score = 0.0
+    weight_used = 0.0
+
+    # ADF strength (40%): p=0 → 1.0, p=0.1 → 0.0
+    if not np.isnan(adf_pval):
+        adf_score = max(0.0, 1.0 - adf_pval / 0.10)
+        score += 0.40 * adf_score
+        weight_used += 0.40
+
+    # Hurst (25%): H=0 → 1.0, H=0.5 → 0.0, H>0.5 → negative (clamped)
+    if not np.isnan(hurst):
+        hurst_score = max(0.0, 1.0 - hurst / 0.5)
+        score += 0.25 * hurst_score
+        weight_used += 0.25
+
+    # Half-life quality (20%): ideal 10-30 days; penalise <5 or >60
+    if not np.isnan(half_life) and half_life > 0 and not np.isinf(half_life):
+        if 10 <= half_life <= 30:
+            hl_score = 1.0
+        elif half_life < 10:
+            hl_score = max(0.0, half_life / 10.0)  # too fast
+        elif half_life <= 60:
+            hl_score = max(0.0, 1.0 - (half_life - 30) / 30.0)  # getting slow
+        else:
+            hl_score = 0.2  # very slow, weak edge
+        score += 0.20 * hl_score
+        weight_used += 0.20
+
+    # Variance ratio (15%): VR < 1 = mean-reverting
+    if not np.isnan(variance_ratio):
+        vr_score = max(0.0, min(1.0, 2.0 * (1.0 - variance_ratio)))  # VR=0.5 → 1.0, VR=1.0 → 0.0
+        score += 0.15 * vr_score
+        weight_used += 0.15
+
+    # Normalise to available components
+    if weight_used < 0.01:
+        return 0.5  # no data → neutral
+    base_score = score / weight_used
+
+    # Timing modifier: spread approaching zero (z_velocity * sign(z) < 0) = slight boost
+    if not np.isnan(z_velocity):
+        if z_velocity < -0.05:   # converging
+            base_score = min(1.0, base_score * 1.10)
+        elif z_velocity > 0.10:  # diverging (escape phase)
+            base_score = base_score * 0.85
+
+    return float(np.clip(base_score, 0.0, 1.0))
+
+
+# ========= Correlation Dislocation Score =========
+
+def compute_correlation_dislocation_score(
+    returns_x: pd.Series,
+    returns_y: pd.Series,
+    short_window: int = 20,
+    long_window: int = 126,
+    min_history: int = 200,
+) -> dict:
+    """
+    Correlation Dislocation Score — detects when a pair's rolling correlation
+    has deviated significantly from its long-run baseline.
+
+    A large negative dislocation (correlation has dropped) combined with a
+    historically high baseline = high probability of eventual repair.
+
+    Returns:
+        dislocation_score:  float [0, 1] — 1 = severe dislocation
+        dislocation_z:      float — z-score of current corr vs long-run baseline
+        short_corr:         float — recent correlation
+        long_corr:          float — long-run baseline correlation
+        repair_likely:      bool — True if dislocation is large and pair historically stable
+        direction:          str — "widening" | "repairing" | "stable"
+    """
+    result = {
+        "dislocation_score": 0.0,
+        "dislocation_z": 0.0,
+        "short_corr": np.nan,
+        "long_corr": np.nan,
+        "repair_likely": False,
+        "direction": "stable",
+    }
+
+    try:
+        # Align and get returns
+        df = pd.concat([returns_x.rename("x"), returns_y.rename("y")], axis=1).dropna()
+        if len(df) < min_history:
+            return result
+
+        # Long-run correlation (baseline)
+        long_corr = float(df["x"].rolling(long_window).corr(df["y"]).mean())
+
+        # Short-run correlation (recent)
+        short_corr = float(df["x"].iloc[-short_window:].corr(df["y"].iloc[-short_window:]))
+
+        if np.isnan(long_corr) or np.isnan(short_corr):
+            return result
+
+        # Rolling correlation series for std estimation
+        roll_corr = df["x"].rolling(short_window).corr(df["y"]).dropna()
+        corr_std  = float(roll_corr.std()) + 1e-8
+
+        # Dislocation z-score: how many sigma below long-run average is current corr?
+        dislocation_z = (long_corr - short_corr) / corr_std
+
+        # Score: normalised to [0, 1]; z=2 → score=0.5, z=4+ → score=1.0
+        dislocation_score = float(np.clip(dislocation_z / 4.0, 0.0, 1.0))
+
+        # Direction: is correlation recovering or still widening?
+        prev_short_corr = float(df["x"].iloc[-short_window*2:-short_window].corr(
+            df["y"].iloc[-short_window*2:-short_window]
+        ))
+        if not np.isnan(prev_short_corr):
+            if short_corr > prev_short_corr + 0.05:
+                direction = "repairing"
+            elif short_corr < prev_short_corr - 0.05:
+                direction = "widening"
+            else:
+                direction = "stable"
+        else:
+            direction = "stable"
+
+        # Repair likely if: large dislocation + historically high correlation + not getting worse
+        repair_likely = (
+            dislocation_score > 0.4
+            and long_corr > 0.70
+            and direction != "widening"
+        )
+
+        result.update({
+            "dislocation_score": dislocation_score,
+            "dislocation_z": float(dislocation_z),
+            "short_corr": short_corr,
+            "long_corr": long_corr,
+            "repair_likely": repair_likely,
+            "direction": direction,
+        })
+    except Exception as e:
+        logger.warning("CorrelationDislocationScore failed: %s", e)
+
+    return result
+
+
 # ========= Public API for core/signals_engine =========
 
 __all__ = [
@@ -2838,4 +3094,8 @@ __all__ = [
     "signals_to_backtest_jobs",
     "extract_fragile_pairs_for_risk",
     "tag_execution_window",
+    # MR quality scoring
+    "compute_mr_score",
+    # Correlation dislocation
+    "compute_correlation_dislocation_score",
 ]

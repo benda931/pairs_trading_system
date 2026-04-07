@@ -33,6 +33,9 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Optional
 
+import numpy as np
+import pandas as pd
+
 from core.contracts import PairId
 from core.intents import EntryIntent
 from portfolio.capital import CapitalManager
@@ -63,6 +66,86 @@ from portfolio.ranking import OpportunityRanker, RankingConfig
 from portfolio.sizing import SizingConfig, SizingEngine
 
 logger = logging.getLogger("portfolio.allocator")
+
+
+# ── Spread covariance manager ─────────────────────────────────────
+
+class SpreadCovarianceManager:
+    """
+    Estimates pairwise correlation of spread returns for active positions.
+
+    Used to detect hidden concentration: pairs that appear independent by
+    leg-overlap but are correlated through shared factor exposure (e.g., all
+    long-SPY-correlated).  Complements the instrument-level shared-leg check
+    in ExposureAnalyzer with a return-based view.
+    """
+
+    def __init__(self, window: int = 63, min_obs: int = 30) -> None:
+        self.window = window
+        self.min_obs = min_obs
+        self._spread_returns: dict[str, pd.Series] = {}
+
+    def update(self, pair_id: str, spread_return: float, ts: pd.Timestamp) -> None:
+        """Record the latest spread return for a pair."""
+        if pair_id not in self._spread_returns:
+            self._spread_returns[pair_id] = pd.Series(dtype=float)
+        new_pt = pd.Series([spread_return], index=[ts])
+        self._spread_returns[pair_id] = pd.concat(
+            [self._spread_returns[pair_id], new_pt]
+        ).iloc[-self.window * 2:]
+
+    def correlation_matrix(self, pair_ids: list[str]) -> pd.DataFrame:
+        """
+        Returns pairwise Pearson correlation matrix of spread returns.
+
+        Pairs with fewer than ``min_obs`` observations are treated as
+        uncorrelated (off-diagonal = 0.0).
+        """
+        data: dict[str, pd.Series] = {}
+        for pid in pair_ids:
+            series = self._spread_returns.get(pid, pd.Series(dtype=float))
+            if len(series) >= self.min_obs:
+                data[pid] = series.iloc[-self.window:]
+
+        if len(data) < 2:
+            return pd.DataFrame(
+                np.eye(len(pair_ids)),
+                index=pair_ids,
+                columns=pair_ids,
+            )
+
+        df = pd.DataFrame(data).dropna(how="all")
+        corr = df.corr().reindex(index=pair_ids, columns=pair_ids).fillna(0.0)
+        np.fill_diagonal(corr.values, 1.0)
+        return corr
+
+    def max_pairwise_correlation(self, pair_ids: list[str]) -> float:
+        """Returns the maximum absolute off-diagonal correlation between any two active pairs."""
+        if len(pair_ids) < 2:
+            return 0.0
+        corr = self.correlation_matrix(pair_ids)
+        corr_vals = corr.values.copy()
+        np.fill_diagonal(corr_vals, 0.0)
+        return float(np.max(np.abs(corr_vals)))
+
+    def effective_n_independent(self, pair_ids: list[str]) -> float:
+        """
+        Effective number of independent positions (eigenvalue-based diversification ratio).
+
+        Equals ``len(pair_ids)`` when all pairs are fully independent, and
+        approaches 1 when all pairs are perfectly correlated.
+        """
+        if len(pair_ids) < 2:
+            return float(len(pair_ids))
+        corr = self.correlation_matrix(pair_ids)
+        eigenvalues = np.linalg.eigvalsh(corr.values)
+        eigenvalues = eigenvalues[eigenvalues > 0]
+        if len(eigenvalues) == 0:
+            return 1.0
+        # DR = (sum λ)² / sum(λ²) — equivalent to (trace)² / ||λ||²
+        total  = float(np.sum(eigenvalues))
+        sum_sq = float(np.sum(eigenvalues ** 2))
+        return float(total ** 2 / sum_sq) if sum_sq > 0 else 1.0
 
 
 # ── Allocator configuration ───────────────────────────────────────
@@ -119,6 +202,7 @@ class PortfolioAllocator:
         self._ranker = OpportunityRanker(config=self._cfg.ranking)
         self._sizer = SizingEngine(config=self._cfg.sizing)
         self._exposure_analyzer = ExposureAnalyzer(config=self._cfg.exposure)
+        self._covariance_manager = SpreadCovarianceManager()
 
         # Cycle-level state (reset each cycle)
         self._current_cycle_id: str = ""
@@ -418,6 +502,29 @@ class PortfolioAllocator:
         n_soft = sum(1 for d in decisions if not d.approved and d.constraint_result.soft_violations)
         diag.n_hard_violations = n_hard
         diag.n_soft_violations = n_soft
+
+        # ── Spread-return correlation check (hidden concentration) ─
+        # Active pair IDs across all currently open positions.
+        active_pair_ids = [d.pair_id.label for d in active_allocations if d.approved]
+        if len(active_pair_ids) >= 2:
+            max_corr = self._covariance_manager.max_pairwise_correlation(active_pair_ids)
+            eff_n    = self._covariance_manager.effective_n_independent(active_pair_ids)
+
+            if max_corr > 0.60:
+                warn_msg = (
+                    f"High spread correlation: max pairwise = {max_corr:.2f} "
+                    "(hidden concentration risk)"
+                )
+                diag.binding_constraints.append(warn_msg)
+                logger.warning("Cycle %s — %s", cycle_id, warn_msg)
+
+            if eff_n < len(active_pair_ids) * 0.5:
+                warn_msg = (
+                    f"Low effective diversification: {eff_n:.1f} independent positions "
+                    f"out of {len(active_pair_ids)} active"
+                )
+                diag.binding_constraints.append(warn_msg)
+                logger.warning("Cycle %s — %s", cycle_id, warn_msg)
 
         logger.info(
             "Cycle %s complete: %d funded, %d signal-blocked, %d risk-blocked, %d capital-blocked",

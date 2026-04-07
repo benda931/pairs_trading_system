@@ -71,10 +71,15 @@ class SizingConfig:
     min_single_pair_weight: float = 0.005 # 0.5% — below this: not executable
     max_gross_leverage: float = 4.0
 
-    # Conviction scaling
+    # Conviction / Kelly scaling
     conviction_scaling_enabled: bool = True
     conviction_dead_zone: float = 0.25    # Below this: scale linearly from 0
     conviction_saturation: float = 0.90  # Above this: no further increase
+    kelly_fraction: float = 0.5          # Half-Kelly is standard practice
+    max_kelly_scalar: float = 1.5        # Cap on Kelly-derived multiplier
+
+    # Drawdown convexity
+    drawdown_convexity: float = 2.0      # >1 = convex ramp (faster early de-risk)
 
     # Quality grade multipliers
     quality_multipliers: dict[str, float] = field(default_factory=lambda: {
@@ -110,8 +115,8 @@ class SizingConfig:
 
 # ── Sizing helpers ────────────────────────────────────────────────
 
-def _conviction_scalar(conviction: float, cfg: SizingConfig) -> float:
-    """Map conviction [0,1] → size scalar, with dead-zone and saturation."""
+def _conviction_scalar_legacy(conviction: float, cfg: SizingConfig) -> float:
+    """Original conviction-based scalar (fallback when no pair stats available)."""
     if not cfg.conviction_scaling_enabled:
         return 1.0
     c = max(0.0, min(1.0, conviction))
@@ -122,6 +127,57 @@ def _conviction_scalar(conviction: float, cfg: SizingConfig) -> float:
     if c >= sat:
         return 1.2     # small bonus for very high conviction
     return 1.0 + 0.2 * (c - dz) / max(1e-6, sat - dz)
+
+
+# Keep the old name as an alias so any external callers are not broken.
+_conviction_scalar = _conviction_scalar_legacy
+
+
+def _kelly_scalar(
+    conviction: float,
+    cfg: SizingConfig,
+    pair_stats: Optional[dict] = None,
+) -> tuple[float, str]:
+    """
+    Kelly-calibrated size scalar [0, max_kelly_scalar].
+
+    If pair_stats provides win_rate, avg_win_pct, avg_loss_pct from historical
+    walk-forward results, uses half-Kelly formula.
+    Falls back to conviction-based scalar when stats unavailable.
+
+    Args:
+        conviction:  Signal conviction [0, 1]
+        cfg:         SizingConfig (supplies kelly_fraction, max_kelly_scalar)
+        pair_stats:  Dict with keys: win_rate, avg_win_pct, avg_loss_pct, n_trades
+
+    Returns:
+        (scalar, sizing_method) where sizing_method is "kelly" or "conviction"
+    """
+    if not cfg.conviction_scaling_enabled:
+        return 1.0, "conviction"
+
+    if pair_stats is not None:
+        win_rate = float(pair_stats.get("win_rate", 0.0))
+        avg_win  = abs(float(pair_stats.get("avg_win_pct", 0.0)))
+        avg_loss = abs(float(pair_stats.get("avg_loss_pct", 0.0)))
+        n_trades = int(pair_stats.get("n_trades", 0))
+
+        # Need minimum sample size for Kelly to be meaningful
+        if win_rate > 0 and avg_win > 0 and avg_loss > 0 and n_trades >= 20:
+            b = avg_win / avg_loss           # payoff ratio
+            p, q = win_rate, 1.0 - win_rate
+            f_full = (p * b - q) / b         # full Kelly fraction
+            f_half = cfg.kelly_fraction * max(0.0, f_full)
+            # Normalise: f_half=0 → scalar=0.5 (cautious), f_half≥0.25 → scalar=max
+            # Maps [0, 0.25] Kelly fraction to [0.5, max_kelly_scalar] scalar
+            kelly_scalar = 0.5 + (f_half / 0.25) * (cfg.max_kelly_scalar - 0.5)
+            kelly_scalar = float(np.clip(kelly_scalar, 0.0, cfg.max_kelly_scalar))
+            # Blend with conviction: conviction gates minimum quality
+            conviction_gate = max(0.0, (conviction - 0.15) / 0.85)  # 0 below 0.15
+            return float(kelly_scalar * conviction_gate), "kelly"
+
+    # Fallback: original conviction scalar logic
+    return _conviction_scalar_legacy(conviction, cfg), "conviction"
 
 
 def _quality_scalar(grade: str, cfg: SizingConfig) -> float:
@@ -135,10 +191,36 @@ def _regime_scalar(regime: str, cfg: SizingConfig) -> float:
 
 
 def _drawdown_scalar(drawdown_state: Optional[DrawdownState], cfg: SizingConfig) -> float:
-    """Drawdown throttle factor from portfolio state."""
+    """
+    Convex drawdown de-risking scalar.
+
+    Uses DrawdownState.throttle_factor as the current-drawdown proxy.  When
+    throttle_factor sits between 0 and 1 the convex ramp is applied; at 0 the
+    position is fully stopped out, at 1 it is fully sized.
+
+    convexity > 1 means de-risking is faster at small drawdowns and tapers
+    near the full-stop level — better tail-risk management than a linear ramp.
+
+           1.0 ─┐
+                │╲
+                │  ╲    convex (quadratic at convexity=2.0)
+                │    ╲___
+           0.0 ─┼────────── full stop
+    """
     if drawdown_state is None or not cfg.drawdown_throttle_enabled:
         return 1.0
-    return max(0.0, min(1.0, drawdown_state.throttle_factor))
+    # throttle_factor runs from 1.0 (no drawdown) down to 0.0 (full stop).
+    # Convert to a normalised drawdown fraction t ∈ [0, 1] where t=0 means
+    # no drawdown and t=1 means full stop, then apply convex ramp.
+    raw = max(0.0, min(1.0, drawdown_state.throttle_factor))
+    if raw >= 1.0:
+        return 1.0
+    if raw <= 0.0:
+        return 0.0
+    # t = how far into the drawdown band we are (0 = just started, 1 = full stop)
+    t = 1.0 - raw
+    convexity = max(1.0, cfg.drawdown_convexity)
+    return float(max(0.0, 1.0 - t ** convexity))
 
 
 def _split_legs(
@@ -202,6 +284,8 @@ class SizingEngine:
         throttle_state: Optional[ThrottleState] = None,
         current_drawdown: float = 0.0,
         vix_level: float = 20.0,
+        pair_stats: Optional[dict] = None,
+        half_life: Optional[float] = None,
     ) -> SizingDecision:
         """
         Compute a SizingDecision for one ranked opportunity.
@@ -218,6 +302,9 @@ class SizingEngine:
         throttle_state : ThrottleState — current throttle settings
         current_drawdown : float — current portfolio drawdown fraction
         vix_level : float — VIX for leverage dampening
+        pair_stats : dict — optional historical stats for Kelly sizing
+            keys: win_rate, avg_win_pct, avg_loss_pct, n_trades
+        half_life : float — mean-reversion half-life in days (for capital efficiency)
         """
         cfg = self._cfg
         pair_id = opportunity.pair_id
@@ -240,10 +327,11 @@ class SizingEngine:
         base_weight = self._base_weight(
             spread_vol=spread_vol,
             n_positions=max(1, n_active_positions + 1),  # +1 for this new position
+            half_life=half_life,
         )
 
         # ── 3. Scalar stack ───────────────────────────────────────
-        conv_s  = _conviction_scalar(conviction, cfg)
+        conv_s, sizing_method = _kelly_scalar(conviction, cfg, pair_stats)
         qual_s  = _quality_scalar(quality_grade, cfg)
         reg_s   = _regime_scalar(regime, cfg)
         dd_s    = _drawdown_scalar(drawdown_state, cfg)
@@ -312,6 +400,7 @@ class SizingEngine:
             drawdown_scalar=combined_dd_throttle,
             quality_scalar=qual_s,
             regime_scalar=reg_s,
+            sizing_method=sizing_method,
             was_capped=was_capped,
             cap_reason=cap_reason,
             min_executable_size=cfg.min_executable_notional,
@@ -384,20 +473,44 @@ class SizingEngine:
         self,
         spread_vol: Optional[float],
         n_positions: int,
+        half_life: Optional[float] = None,
     ) -> float:
-        """Compute base weight before scalar adjustments."""
+        """
+        Compute base weight before scalar adjustments.
+
+        Parameters
+        ----------
+        spread_vol : optional spread-specific realised vol
+        n_positions : number of positions (including the new one)
+        half_life : mean-reversion half-life in days (optional).
+            Shorter half-lives imply faster capital turnover and receive a
+            small capital-efficiency boost:
+                HL=10d → ×1.15, HL=30d → ×1.00, HL=60d → ×0.90
+        """
         cfg = self._cfg
         if cfg.mode == "equal_weight":
-            return min(cfg.max_single_pair_weight, 1.0 / n_positions)
+            raw_weight = min(cfg.max_single_pair_weight, 1.0 / n_positions)
         elif cfg.mode == "risk_parity" and spread_vol:
             # Single-pair risk parity: inverse vol, normalised to 1/n
             # The batch method will override this with portfolio-level weights
-            return min(cfg.max_single_pair_weight, cfg.default_spread_vol / max(1e-6, spread_vol) / n_positions)
+            raw_weight = min(
+                cfg.max_single_pair_weight,
+                cfg.default_spread_vol / max(1e-6, spread_vol) / n_positions,
+            )
         else:
             # vol_target: base = target_vol / spread_vol, bounded
             sv = spread_vol or cfg.default_spread_vol
             w = (cfg.target_portfolio_vol / max(1e-6, sv)) / n_positions
-            return min(cfg.max_single_pair_weight, max(cfg.min_single_pair_weight, w))
+            raw_weight = min(cfg.max_single_pair_weight, max(cfg.min_single_pair_weight, w))
+
+        # Capital efficiency boost: shorter HL = faster turnover = higher
+        # effective return on capital.
+        # Normalise: HL=10d → 1.15×, HL=30d → 1.00×, HL=60d → 0.90×
+        if half_life is not None and 5 <= half_life <= 60:
+            hl_efficiency = 1.0 + 0.15 * max(-1.0, min(1.0, (30.0 - half_life) / 20.0))
+            raw_weight *= hl_efficiency
+
+        return raw_weight
 
     @staticmethod
     def _infer_direction(z_score: float) -> str:

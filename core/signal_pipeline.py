@@ -72,6 +72,7 @@ from core.threshold_engine import ThresholdEngine, ThresholdConfig, ThresholdSet
 from core.regime_engine import RegimeEngine, RegimeFeatureSet, build_regime_features
 from core.signal_quality import SignalQualityEngine, QualityConfig
 from core.lifecycle import TradeLifecycleStateMachine, LifecycleRegistry, CooldownPolicy
+from core.signals_engine import compute_mr_score
 
 if TYPE_CHECKING:
     pass
@@ -177,6 +178,12 @@ class SignalPipeline:
         self._cached_blocked: bool = False
         self._regime_bar_counter: int = 0
 
+        # Regime transition detection — track the first N bars after a
+        # transition into MEAN_REVERTING, which are the highest-IC entry window.
+        self._prev_regime: Optional[RegimeLabel] = None
+        self._bars_since_transition: int = 999
+        self._transition_boost_window: int = 10   # bars after transition with boosted confidence
+
     # ──────────────────────────────────────────────────────────────
     # FULL EVALUATION (for live / portfolio-intent path)
     # ──────────────────────────────────────────────────────────────
@@ -233,9 +240,31 @@ class SignalPipeline:
         )
 
         # ── Step 3: Signal Quality Assessment ────────────────────
+        # Compute proper MR score from signal properties (replaces hardcoded 0.5)
+        mr_score = compute_mr_score(
+            spread=spread_series,
+            half_life=half_life if half_life is not None else float("nan"),
+        )
         quality_result = self._assess_quality(
             conviction, mr_score, regime_label, block_reasons, warnings,
         )
+
+        # ── Step 3b: Regime Transition Boost ─────────────────────
+        # The first _transition_boost_window bars after a transition into
+        # MEAN_REVERTING carry the highest empirical IC; boost signal_confidence
+        # (widen position size through size_multiplier, not the entry threshold).
+        transition_boost_meta: dict = {}
+        signal_confidence = (
+            quality_result.size_multiplier if quality_result is not None else conviction
+        )
+        if self._bars_since_transition <= self._transition_boost_window:
+            boost_frac = 1.0 - self._bars_since_transition / self._transition_boost_window
+            transition_boost = 1.0 + 0.20 * boost_frac
+            signal_confidence = min(1.0, signal_confidence * transition_boost)
+            transition_boost_meta["regime_transition_boost"] = round(transition_boost, 3)
+            transition_boost_meta["bars_since_transition"] = self._bars_since_transition
+            if quality_result is not None:
+                quality_result.size_multiplier = signal_confidence
 
         # ── Step 4: Lifecycle Check ──────────────────────────────
         can_enter = self._lifecycle.can_enter()
@@ -321,6 +350,7 @@ class SignalPipeline:
                 ),
                 "half_life": half_life,
                 "correlation": correlation,
+                **transition_boost_meta,
             },
         )
 
@@ -546,9 +576,29 @@ class SignalPipeline:
         threshold_set = self._compute_thresholds(
             regime, conviction, half_life, warnings,
         )
+        # Compute proper MR score from signal properties (replaces hardcoded 0.5)
+        mr_score = compute_mr_score(
+            spread=spread_series,
+            half_life=half_life if half_life is not None else float("nan"),
+        )
         quality_result = self._assess_quality(
             conviction, mr_score, regime, block_reasons, warnings,
         )
+
+        # Detect regime transition into MEAN_REVERTING and manage boost counter.
+        # Must happen before caching so the boost is active in the same cycle.
+        new_regime = regime
+        if self._prev_regime is not None and self._prev_regime != new_regime:
+            if new_regime == RegimeLabel.MEAN_REVERTING:
+                self._bars_since_transition = 0
+                logger.info(
+                    "Regime transition → MEAN_REVERTING for %s (boost window active)",
+                    self.pair_id,
+                )
+            else:
+                self._bars_since_transition = 999
+        self._prev_regime = new_regime
+        self._bars_since_transition += 1
 
         self._cached_regime = regime
         self._cached_regime_confidence = confidence
@@ -556,10 +606,19 @@ class SignalPipeline:
         self._cached_blocked = len(block_reasons) > 0
         if quality_result is not None:
             self._cached_quality_grade = quality_result.grade.value
-            self._cached_size_mult = quality_result.size_multiplier
+            base_size_mult = quality_result.size_multiplier
         else:
             self._cached_quality_grade = "UNKNOWN"
-            self._cached_size_mult = 1.0
+            base_size_mult = 1.0
+
+        # Apply transition boost to cached size multiplier so bar-by-bar path
+        # (evaluate_bar) also benefits from the entry-window boost.
+        if self._bars_since_transition <= self._transition_boost_window:
+            boost_frac = 1.0 - self._bars_since_transition / self._transition_boost_window
+            transition_boost = 1.0 + 0.20 * boost_frac
+            self._cached_size_mult = min(1.0, base_size_mult * transition_boost)
+        else:
+            self._cached_size_mult = base_size_mult
 
     @property
     def lifecycle_state(self):

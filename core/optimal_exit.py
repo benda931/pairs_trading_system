@@ -388,3 +388,70 @@ class OptimalExitEngine:
             tighten_rate=0.02,
             asymmetric_ratio=1.3,
         )
+
+
+# ── Standalone OU-based optimal exit z ───────────────────────────────────────
+
+def optimal_exit_z_ou(
+    half_life: float,
+    holding_days_so_far: int,
+    entry_z: float,
+    current_z: float,
+    spread_vol: float,
+    transaction_cost_pct: float = 0.001,
+    target_sharpe: float = 0.5,
+) -> float:
+    """
+    Compute the optimal exit z-score using OU process dynamics.
+
+    Rather than exiting at a fixed z=0.5, this computes the expected future
+    P&L as a function of current z and remaining expected holding time.
+
+    Logic: Exit when expected_remaining_pnl < transaction_cost_of_holding.
+
+    The OU speed of mean reversion: theta = ln(2) / half_life
+    Expected z at time t: E[z(t)] = current_z * exp(-theta * t)
+    Expected P&L from here: integral of E[z] from 0 to T
+
+    Returns: optimal exit z (lower = tighter, higher = hold longer)
+    """
+    if half_life <= 0 or np.isnan(half_life) or np.isinf(half_life):
+        return 0.5  # fallback to standard
+
+    theta = np.log(2) / half_life   # OU mean-reversion speed
+
+    # Expected time to exit: remaining half-lives until current z decays to noise
+    # z decays exponentially: z(t) = current_z * exp(-theta * t)
+    # Exit when z(t) reaches noise level (≈ 0.3-0.5σ)
+    noise_floor = max(0.3, transaction_cost_pct / max(spread_vol, 1e-6))
+
+    if abs(current_z) <= noise_floor:
+        return float(noise_floor)  # Already at exit territory
+
+    # Time for z to decay to noise_floor from current_z
+    time_to_noise = -np.log(noise_floor / abs(current_z)) / theta  # in days
+
+    # Expected P&L from current z to exit:
+    # = integral(current_z * exp(-theta*t), 0, time_to_noise) * spread_vol
+    # = current_z / theta * (1 - exp(-theta * time_to_noise)) * spread_vol
+    expected_pnl_pct = abs(current_z) / theta * (1 - np.exp(-theta * time_to_noise)) * spread_vol
+
+    # Daily holding cost (borrow + opportunity cost)
+    daily_holding_cost = transaction_cost_pct / max(holding_days_so_far + 1, 1)
+
+    # If expected remaining P&L doesn't justify holding: exit now
+    if expected_pnl_pct < daily_holding_cost * 5:  # need 5x cost coverage
+        return float(min(abs(current_z) + 0.1, abs(entry_z) - 0.1))  # exit imminently
+
+    # Standard case: exit at noise floor (tighter than fixed 0.5 for fast-reverting pairs)
+    # For slow pairs (HL > 30d), widen exit slightly to avoid premature exit
+    if half_life < 10:
+        exit_z = noise_floor * 0.8  # Very fast: exit early
+    elif half_life < 20:
+        exit_z = noise_floor
+    elif half_life < 40:
+        exit_z = noise_floor * 1.2
+    else:
+        exit_z = noise_floor * 1.5  # Slow: let it run more
+
+    return float(np.clip(exit_z, 0.1, abs(entry_z) * 0.8))

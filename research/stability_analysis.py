@@ -33,6 +33,7 @@ Usage:
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Optional
 
@@ -46,6 +47,92 @@ from research.discovery_contracts import (
 )
 
 logger = logging.getLogger("research.stability_analysis")
+
+
+# ── Stability score weights ────────────────────────────────────────
+
+@dataclass
+class StabilityWeights:
+    """
+    Weights for stability score components.
+    Default values are domain-expert estimates. Use calibrate_weights()
+    to fit from historical validation data.
+    """
+    correlation_stability: float = 0.25
+    beta_stability:        float = 0.30
+    adf_pass_rate:         float = 0.25
+    cointegration_rate:    float = 0.20
+
+    # Penalty weights
+    break_penalty:  float = 0.30
+    regime_penalty: float = 0.15
+
+    def __post_init__(self) -> None:
+        total = (self.correlation_stability + self.beta_stability +
+                 self.adf_pass_rate + self.cointegration_rate)
+        if abs(total - 1.0) > 0.01:
+            # Auto-normalise
+            self.correlation_stability /= total
+            self.beta_stability        /= total
+            self.adf_pass_rate         /= total
+            self.cointegration_rate    /= total
+
+    @classmethod
+    def calibrate_weights(
+        cls,
+        component_scores: list[dict],
+        oos_pass_labels:  list[int],
+        min_samples: int = 50,
+    ) -> "StabilityWeights":
+        """
+        Fit stability weights via logistic regression.
+
+        Args:
+            component_scores: list of dicts with keys
+                              corr_stability, beta_stability, adf_pass_rate, coint_rate
+            oos_pass_labels:  list of 0/1 labels (1 = pair passed OOS validation)
+
+        Returns calibrated StabilityWeights, or default if insufficient data.
+        """
+        if len(component_scores) < min_samples:
+            logger.info(
+                "Insufficient data for weight calibration (%d < %d) — using defaults",
+                len(component_scores), min_samples,
+            )
+            return cls()
+
+        try:
+            from sklearn.linear_model import LogisticRegression
+            import numpy as np  # noqa: F811 — already imported at module level
+
+            X = np.array([[
+                d.get("corr_stability", 0.5),
+                d.get("beta_stability", 0.5),
+                d.get("adf_pass_rate",  0.5),
+                d.get("coint_rate",     0.5),
+            ] for d in component_scores])
+            y = np.array(oos_pass_labels)
+
+            lr = LogisticRegression(fit_intercept=True, max_iter=500)
+            lr.fit(X, y)
+
+            # Normalise coefficients to positive weights
+            coefs = lr.coef_[0]
+            coefs = np.maximum(coefs, 0.0)  # Force non-negative
+            if coefs.sum() > 0:
+                coefs /= coefs.sum()
+                return cls(
+                    correlation_stability=float(coefs[0]),
+                    beta_stability=float(coefs[1]),
+                    adf_pass_rate=float(coefs[2]),
+                    cointegration_rate=float(coefs[3]),
+                )
+        except ImportError:
+            logger.warning("sklearn not available; using default stability weights")
+        except Exception as e:
+            logger.warning("Weight calibration failed: %s — using defaults", e)
+
+        return cls()
 
 
 # ── Rolling correlation ────────────────────────────────────────────
@@ -152,13 +239,18 @@ class StructuralBreakDetector:
     3. Rolling mean shift: detects regime change in spread level
     """
 
+    # Brown-Durbin-Evans critical values (two-sided) at standard significance levels
+    _BDE_CRITICAL = {0.01: 1.63, 0.05: 1.36, 0.10: 1.22}
+
     def __init__(
         self,
-        window: int = 126,   # half-year windows for rolling ADF
-        cusum_threshold: float = 2.5,  # sigma threshold for CUSUM
+        window: int = 126,          # half-year windows for rolling ADF
+        significance_level: float = 0.05,  # BDE significance level for CUSUM test
     ):
         self.window = window
-        self.cusum_threshold = cusum_threshold
+        self.significance_level = significance_level
+        # Compute BDE critical value; fall back to 5% (1.36) for unrecognised levels
+        self._bde_cv = self._BDE_CRITICAL.get(significance_level, 1.36)
 
     def detect(
         self,
@@ -197,7 +289,12 @@ class StructuralBreakDetector:
         # Normalise by sqrt(n) (standard CUSUM scaling)
         n = len(spread_clean)
         cusum_stat = cusum_range / np.sqrt(n)
-        has_cusum_break = cusum_stat > self.cusum_threshold
+
+        # Brown-Durbin-Evans CUSUM: reject H₀ (parameter stability) at chosen significance
+        # level if cusum_stat > BDE critical value.  The stat is already normalised by √n,
+        # so the BDE 5% critical value is simply 1.36 (not divided by √n again).
+        bde_threshold_5pct = self._bde_cv   # Brown-Durbin-Evans critical value
+        has_cusum_break = cusum_stat > bde_threshold_5pct
 
         # Find approximate break date (where CUSUM is most extreme)
         break_date = None
@@ -220,7 +317,7 @@ class StructuralBreakDetector:
         # Confidence: weighted combination of signals
         confidence = 0.0
         if has_cusum_break:
-            confidence += min(1.0, (cusum_stat - self.cusum_threshold) / self.cusum_threshold) * 0.6
+            confidence += min(1.0, (cusum_stat - bde_threshold_5pct) / bde_threshold_5pct) * 0.6
         if has_mean_shift:
             confidence += min(1.0, (max_mean_shift - 3.0) / 3.0) * 0.4
         if rolling_adf_pass_rate < 0.5:
@@ -396,11 +493,13 @@ class StabilityAnalyzer:
         coint_window: int = 252,           # ~1 year for rolling cointegration
         coint_step: int = 21,              # Monthly re-evaluation of cointegration
         min_stable_windows: float = 0.60,  # Require 60% of rolling windows to be stable
+        weights: Optional[StabilityWeights] = None,  # Score component weights
     ):
         self.rolling_window = rolling_window
         self.coint_window = coint_window
         self.coint_step = coint_step
         self.min_stable_windows = min_stable_windows
+        self.weights = weights if weights is not None else StabilityWeights()
         self._break_detector = StructuralBreakDetector(window=rolling_window)
         self._regime_checker = RegimeSuitabilityChecker(lookback_days=63)
 
@@ -532,36 +631,54 @@ class StabilityAnalyzer:
         report.is_stable = len(instability_reasons) == 0
 
         # ── Stability score (0–1) ────────────────────────────────────
-        score_components = []
+        w = self.weights  # StabilityWeights instance
 
-        # Correlation stability component
-        if not np.isnan(report.corr_std):
-            corr_stab = max(0.0, 1.0 - report.corr_std / 0.5)
-            score_components.append(corr_stab * 0.25)
+        # Compute each raw component value (0–1 scale)
+        corr_stability_component = (
+            max(0.0, 1.0 - report.corr_std / 0.5)
+            if not np.isnan(report.corr_std) else None
+        )
+        beta_stability_component = (
+            max(0.0, 1.0 - report.beta_cv / 0.6)
+            if not np.isnan(report.beta_cv) else None
+        )
+        adf_pass_rate_component = (
+            report.adf_rolling_pass_rate
+            if not np.isnan(report.adf_rolling_pass_rate) else None
+        )
+        coint_pass_rate_component = (
+            report.coint_rolling_pass_rate
+            if not np.isnan(report.coint_rolling_pass_rate) else None
+        )
 
-        # Hedge ratio stability component
-        if not np.isnan(report.beta_cv):
-            beta_stab = max(0.0, 1.0 - report.beta_cv / 0.6)
-            score_components.append(beta_stab * 0.30)
+        # Assemble weighted score — only include components that have data,
+        # re-normalising weights on the fly so missing components don't
+        # silently drag the score toward zero.
+        weighted_sum = 0.0
+        weight_total = 0.0
+        if corr_stability_component is not None:
+            weighted_sum += w.correlation_stability * corr_stability_component
+            weight_total += w.correlation_stability
+        if beta_stability_component is not None:
+            weighted_sum += w.beta_stability * beta_stability_component
+            weight_total += w.beta_stability
+        if adf_pass_rate_component is not None:
+            weighted_sum += w.adf_pass_rate * adf_pass_rate_component
+            weight_total += w.adf_pass_rate
+        if coint_pass_rate_component is not None:
+            weighted_sum += w.cointegration_rate * coint_pass_rate_component
+            weight_total += w.cointegration_rate
 
-        # ADF rolling pass rate
-        if not np.isnan(report.adf_rolling_pass_rate):
-            score_components.append(report.adf_rolling_pass_rate * 0.25)
-
-        # Cointegration rolling pass rate
-        if not np.isnan(report.coint_rolling_pass_rate):
-            score_components.append(report.coint_rolling_pass_rate * 0.20)
+        raw_score = (weighted_sum / weight_total) if weight_total > 0.0 else 0.5
 
         # Structural break penalty
-        break_penalty = report.break_confidence if report.has_structural_break else 0.0
-        score_raw = sum(score_components) / max(len(score_components), 1) if score_components else 0.5
-        score_raw = max(0.0, score_raw - break_penalty * 0.3)
+        break_confidence = report.break_confidence if report.has_structural_break else 0.0
+        raw_score -= w.break_penalty * break_confidence
 
         # Regime penalty
-        if not report.regime_suitable:
-            score_raw = max(0.0, score_raw - 0.15)
+        raw_score -= w.regime_penalty if not report.regime_suitable else 0.0
 
-        report.stability_score = float(min(1.0, score_raw))
+        report.stability_score = float(min(1.0, max(0.0, raw_score)))
 
         logger.debug(
             "%s: stability_score=%.2f, is_stable=%s, regime=%s",

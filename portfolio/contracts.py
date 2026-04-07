@@ -313,6 +313,11 @@ class RankedOpportunity:
     strengths: list[str] = field(default_factory=list)   # Key positives
     penalties: list[str] = field(default_factory=list)   # Soft penalties applied
 
+    # ── Extended ranking scores ──────────────────────────────────
+    capital_efficiency_score: float = 0.5   # Expected P&L per unit capital × time
+    liquidity_score: float = 0.7            # Trade-size executability vs ADV
+    edge_quality_score: float = 0.5         # OOS walk-forward edge quality
+
     # ── ML overlay ───────────────────────────────────────────────
     ml_ranking_score: Optional[float] = None
     ml_model_id: Optional[str] = None
@@ -333,6 +338,9 @@ class RankedOpportunity:
             "reversion_probability": round(self.reversion_probability, 4),
             "diversification_value": round(self.diversification_value, 4),
             "stability": round(self.stability_score, 4),
+            "capital_efficiency": round(self.capital_efficiency_score, 4),
+            "liquidity": round(self.liquidity_score, 4),
+            "edge_quality": round(self.edge_quality_score, 4),
             "overlap_penalty": round(self.overlap_penalty, 4),
             "regime": self.regime,
             "quality_grade": self.quality_grade,
@@ -405,6 +413,9 @@ class SizingDecision:
     quality_scalar: float = 1.0        # Quality grade multiplier
     regime_scalar: float = 1.0         # Regime multiplier
 
+    # ── Sizing method used ───────────────────────────────────────
+    sizing_method: str = "conviction"  # "kelly" or "conviction"
+
     # ── Constraints applied ──────────────────────────────────────
     was_capped: bool = False
     cap_reason: str = ""
@@ -428,6 +439,7 @@ class SizingDecision:
             "conviction_scalar": round(self.conviction_scalar, 4),
             "vol_target_scalar": round(self.vol_target_scalar, 4),
             "drawdown_scalar": round(self.drawdown_scalar, 4),
+            "sizing_method": self.sizing_method,
             "was_capped": self.was_capped,
             "is_executable": self.is_executable,
         }

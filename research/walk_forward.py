@@ -125,9 +125,14 @@ class ExperimentResult:
     validation_pass_rate: float = np.nan  # % folds that passed validation
     consistent_sharpe: float = np.nan     # std of fold Sharpes (lower = more consistent)
 
+    # Regime-conditional breakdown
+    regime_conditional_sharpe: dict[str, float] = field(default_factory=dict)
+    regime_dependent: bool = False        # True = strategy only works in MEAN_REVERTING
+
     # Overall verdict
     viable: bool = False
     viability_reason: str = ""
+    warnings: list[str] = field(default_factory=list)
 
     # Metadata
     run_at: datetime = field(default_factory=datetime.utcnow)
@@ -149,8 +154,11 @@ class ExperimentResult:
             "avg_max_drawdown": self.avg_max_drawdown,
             "validation_pass_rate": self.validation_pass_rate,
             "consistent_sharpe": self.consistent_sharpe,
+            "regime_conditional_sharpe": self.regime_conditional_sharpe,
+            "regime_dependent": self.regime_dependent,
             "viable": self.viable,
             "viability_reason": self.viability_reason,
+            "warnings": self.warnings,
             "run_at": self.run_at,
             "total_price_days": self.total_price_days,
         }
@@ -273,6 +281,38 @@ def _run_simple_backtest(
         "win_rate": float(np.mean([p > 0 for p in pnls])),
         "avg_holding_days": float(np.mean([t.holding_days for t in trades])),
     }
+
+
+# ── Regime-segmented validation helpers ──────────────────────────
+
+def _segment_by_regime(
+    fold_results: list[dict],
+    regime_key: str = "dominant_regime",
+) -> dict[str, list[dict]]:
+    """Group fold results by dominant regime during test period."""
+    segmented: dict[str, list[dict]] = {}
+    for fold in fold_results:
+        regime = fold.get(regime_key, "UNKNOWN")
+        if regime not in segmented:
+            segmented[regime] = []
+        segmented[regime].append(fold)
+    return segmented
+
+
+def _compute_regime_conditional_sharpe(
+    fold_results: list[dict],
+) -> dict[str, float]:
+    """
+    Compute average OOS Sharpe separately for each regime.
+    Returns dict: regime_label → avg_sharpe.
+    """
+    segmented = _segment_by_regime(fold_results)
+    regime_sharpes: dict[str, float] = {}
+    for regime, folds in segmented.items():
+        sharpes = [f.get("oos_sharpe", 0.0) for f in folds if f.get("oos_sharpe") is not None]
+        if sharpes:
+            regime_sharpes[regime] = float(np.mean(sharpes))
+    return regime_sharpes
 
 
 # ── Walk-forward split generator ──────────────────────────────────
@@ -657,6 +697,40 @@ class WalkForwardHarness:
             if len(valid) < 2:
                 reasons.append(f"only {len(valid)} valid fold(s)")
             result.viability_reason = "; ".join(reasons)
+
+        # ── Regime-segmented Sharpe breakdown ────────────────────────
+        # Build fold dicts compatible with _compute_regime_conditional_sharpe.
+        # The dominant_regime is sourced from the validation report's stability
+        # regime label (computed on the training window); oos_sharpe maps to the
+        # fold's backtest Sharpe on the held-out test window.
+        fold_dicts_for_regime: list[dict] = []
+        for f in valid:
+            dominant_regime = "UNKNOWN"
+            if f.validation is not None:
+                # PairValidationReport may expose regime_label via its stability report
+                dominant_regime = getattr(f.validation, "regime_label", "UNKNOWN") or "UNKNOWN"
+            fold_dicts_for_regime.append({
+                "dominant_regime": dominant_regime,
+                "oos_sharpe": f.sharpe if not np.isnan(f.sharpe) else None,
+            })
+
+        regime_sharpes = _compute_regime_conditional_sharpe(fold_dicts_for_regime)
+        result.regime_conditional_sharpe = regime_sharpes
+
+        # Flag regime-dependent strategies: performs well only in MEAN_REVERTING
+        if regime_sharpes:
+            mr_sharpe = regime_sharpes.get("MEAN_REVERTING", 0.0)
+            other_sharpes = [v for k, v in regime_sharpes.items() if k != "MEAN_REVERTING"]
+            avg_other = float(np.mean(other_sharpes)) if other_sharpes else 0.0
+            result.regime_dependent = (mr_sharpe > 0.5) and (avg_other < 0.1)
+            if result.regime_dependent:
+                result.warnings = result.warnings + [
+                    f"Strategy appears regime-dependent: MR Sharpe={mr_sharpe:.2f}, Other={avg_other:.2f}"
+                ]
+                logger.warning(
+                    "%s: regime-dependent — MR Sharpe=%.2f, other avg=%.2f",
+                    result.pair_id.label, mr_sharpe, avg_other,
+                )
 
 
 # ── Batch runner ──────────────────────────────────────────────────

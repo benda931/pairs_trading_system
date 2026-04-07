@@ -102,6 +102,13 @@ class GovernanceEngine:
                 criteria_failed.append(f"{criterion} [eval_error: {exc}]")
                 logger.warning("Criterion evaluation failed: %s — %s", criterion, exc)
 
+        # Leakage audit check — blocks promotion on HIGH-risk dimensions
+        leakage_ok, leakage_reason = self._check_leakage_audit(run_artifact)
+        if not leakage_ok:
+            criteria_failed.append(f"leakage_audit [{leakage_reason}]")
+        else:
+            criteria_met.append(f"leakage_audit [{leakage_reason}]")
+
         # Determine outcome
         if not criteria_failed:
             outcome = PromotionOutcome.PROMOTE
@@ -258,6 +265,69 @@ class GovernanceEngine:
 
         should_retire = len(reasons) > 0
         return should_retire, reasons
+
+    # ------------------------------------------------------------------
+    # Leakage audit check
+    # ------------------------------------------------------------------
+
+    def _check_leakage_audit(
+        self,
+        run_artifact: TrainingRunArtifact,
+    ) -> tuple[bool, str]:
+        """
+        Fail governance if the leakage audit shows HIGH risk on any dimension.
+
+        A default-constructed LeakageAuditReport (never explicitly run) has
+        all boolean risk flags False and passed=True.  That is treated as
+        inconclusive (not run) and does NOT block promotion — only an explicitly
+        set risk flag blocks.
+
+        Parameters
+        ----------
+        run_artifact : TrainingRunArtifact
+            The artifact produced by the training run.
+
+        Returns
+        -------
+        tuple[bool, str] : (passed, reason_key)
+        """
+        audit = getattr(run_artifact, "leakage_audit", None)
+        if audit is None:
+            # No leakage_audit attribute at all — log warning but don't block
+            # (backward-compatible: older artifacts predate the audit field).
+            logger.warning(
+                "No LeakageAuditReport in run_artifact for model %s "
+                "— leakage not verified",
+                getattr(run_artifact, "model_id", "unknown"),
+            )
+            return True, "leakage_audit_missing"
+
+        # Check boolean risk dimensions — any True flag means HIGH risk.
+        risk_flags: dict[str, bool] = {
+            "future_feature_risk":     bool(getattr(audit, "future_feature_risk", False)),
+            "future_label_risk":       bool(getattr(audit, "future_label_risk", False)),
+            "normalization_leak_risk": bool(getattr(audit, "normalization_leak_risk", False)),
+            "overlap_label_risk":      bool(getattr(audit, "overlap_label_risk", False)),
+        }
+
+        high_risks = [k for k, v in risk_flags.items() if v]
+        if high_risks:
+            msg = f"HIGH risk flags: {high_risks}"
+            logger.error(
+                "GOVERNANCE BLOCK — leakage audit failed for model %s — %s",
+                getattr(run_artifact, "model_id", "unknown"),
+                msg,
+            )
+            return False, msg
+
+        embargo_ok = bool(getattr(audit, "embargo_adequate", True))
+        purge_ok   = bool(getattr(audit, "purge_adequate", True))
+        if not embargo_ok:
+            return False, "leakage_audit: embargo_adequate=False"
+        if not purge_ok:
+            return False, "leakage_audit: purge_adequate=False"
+
+        return True, "leakage_audit_passed"
 
     def enforce_retirement(
         self,

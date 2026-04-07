@@ -27,7 +27,10 @@ from __future__ import annotations
 
 import logging
 import math
+from dataclasses import dataclass
 from typing import Optional, Tuple
+
+import numpy as np
 
 logger = logging.getLogger("core.ic_reporting")
 
@@ -247,4 +250,233 @@ class ICReport:
             "alpha": self.alpha,
             "label": self.label,
             "formatted": str(self),
+        }
+
+
+# ---------------------------------------------------------------------------
+# Regime-conditional IC tracking
+# ---------------------------------------------------------------------------
+
+@dataclass
+class RegimeICRecord:
+    """IC computed separately for each market regime."""
+
+    regime: str
+    ic: float
+    t_stat: float
+    n_samples: int
+    is_significant: bool
+
+    def __str__(self) -> str:
+        sig = "✓" if self.is_significant else "✗"
+        return f"{self.regime}: IC={self.ic:+.3f} (t={self.t_stat:.2f}, N={self.n_samples}) {sig}"
+
+
+class RegimeConditionalIC:
+    """
+    Tracks information coefficient (IC) separately for each market regime.
+
+    Critical insight: a strategy with IC=0.05 overall may have IC=0.12 in
+    MEAN_REVERTING regimes and IC=-0.03 in TRENDING regimes.  Trading only
+    in high-IC regimes is the core regime-filtering alpha.
+
+    Usage
+    -----
+        tracker = RegimeConditionalIC()
+        tracker.add_observation(predicted_z=2.3, actual_return=0.015, regime="MEAN_REVERTING")
+        report = tracker.compute_report()
+    """
+
+    def __init__(self) -> None:
+        # {regime: [(predicted, actual), ...]}
+        self._observations: dict[str, list[tuple[float, float]]] = {}
+
+    def add_observation(
+        self,
+        predicted_z: float,
+        actual_return: float,
+        regime: str,
+    ) -> None:
+        """Record one prediction-realisation pair for a given regime."""
+        if np.isnan(predicted_z) or np.isnan(actual_return):
+            return
+        if regime not in self._observations:
+            self._observations[regime] = []
+        self._observations[regime].append((float(predicted_z), float(actual_return)))
+
+    def compute_report(self, min_samples: int = 15) -> dict[str, RegimeICRecord]:
+        """
+        Compute Spearman IC for each regime with >= min_samples observations.
+
+        Returns
+        -------
+        dict mapping regime_name → RegimeICRecord.
+        """
+        from scipy.stats import spearmanr
+
+        results: dict[str, RegimeICRecord] = {}
+        for regime, obs in self._observations.items():
+            if len(obs) < min_samples:
+                continue
+            preds = [x[0] for x in obs]
+            actuals = [x[1] for x in obs]
+            try:
+                ic, _p_val = spearmanr(preds, actuals)
+                n = len(obs)
+                t_stat, _ = compute_ic_tstat(float(ic), n)
+                results[regime] = RegimeICRecord(
+                    regime=regime,
+                    ic=float(ic),
+                    t_stat=float(t_stat),
+                    n_samples=n,
+                    is_significant=abs(t_stat) >= 1.65,
+                )
+            except Exception:
+                pass
+        return results
+
+    def best_regime(self) -> Optional[str]:
+        """Returns the regime with the highest significant positive IC, or None."""
+        report = self.compute_report()
+        significant = {
+            r: rec for r, rec in report.items() if rec.is_significant and rec.ic > 0
+        }
+        if not significant:
+            return None
+        return max(significant, key=lambda r: significant[r].ic)
+
+    def worst_regime(self) -> Optional[str]:
+        """Returns the regime with the most negative significant IC, or None."""
+        report = self.compute_report()
+        significant = {
+            r: rec for r, rec in report.items() if rec.is_significant and rec.ic < 0
+        }
+        if not significant:
+            return None
+        return min(significant, key=lambda r: significant[r].ic)
+
+    def summary(self) -> str:
+        """Human-readable summary of regime-conditional IC."""
+        report = self.compute_report()
+        if not report:
+            return "RegimeConditionalIC: insufficient data"
+        lines = ["Regime-Conditional IC:"]
+        for rec in sorted(report.values(), key=lambda r: -r.ic):
+            lines.append(f"  {rec}")
+        return "\n".join(lines)
+
+    def to_dict(self) -> dict:
+        """Serialise to dict for persistence."""
+        report = self.compute_report()
+        return {
+            regime: {
+                "ic": rec.ic,
+                "t_stat": rec.t_stat,
+                "n_samples": rec.n_samples,
+                "significant": rec.is_significant,
+            }
+            for regime, rec in report.items()
+        }
+
+    def n_observations(self) -> dict[str, int]:
+        """Return observation counts per regime."""
+        return {r: len(obs) for r, obs in self._observations.items()}
+
+
+# ---------------------------------------------------------------------------
+# Pair-level performance tracker (for Kelly-sizing calibration)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class PairTradeRecord:
+    """Single trade outcome for a pair."""
+
+    pair_id: str
+    entry_z: float
+    exit_z: float
+    pnl_pct: float
+    holding_days: int
+    regime: str
+    is_win: bool
+    timestamp: str = ""
+
+
+class PairPerformanceTracker:
+    """
+    Tracks historical trade outcomes per pair for Kelly-sizing calibration.
+
+    Provides win_rate, avg_win_pct, avg_loss_pct for each pair.
+    Used by portfolio/sizing.py Kelly scalar.
+    """
+
+    def __init__(self, max_records_per_pair: int = 200) -> None:
+        self._records: dict[str, list[PairTradeRecord]] = {}
+        self._max = max_records_per_pair
+
+    def record_trade(
+        self,
+        pair_id: str,
+        entry_z: float,
+        exit_z: float,
+        pnl_pct: float,
+        holding_days: int,
+        regime: str = "UNKNOWN",
+    ) -> None:
+        """Record a completed trade outcome."""
+        import datetime
+
+        if pair_id not in self._records:
+            self._records[pair_id] = []
+        rec = PairTradeRecord(
+            pair_id=pair_id,
+            entry_z=entry_z,
+            exit_z=exit_z,
+            pnl_pct=pnl_pct,
+            holding_days=holding_days,
+            regime=regime,
+            is_win=pnl_pct > 0,
+            timestamp=datetime.datetime.utcnow().isoformat(),
+        )
+        self._records[pair_id].append(rec)
+        if len(self._records[pair_id]) > self._max:
+            self._records[pair_id] = self._records[pair_id][-self._max:]
+
+    def get_pair_stats(self, pair_id: str, min_trades: int = 10) -> Optional[dict]:
+        """
+        Returns Kelly-compatible stats dict or None if insufficient history.
+
+        Returns
+        -------
+        dict with keys: win_rate, avg_win_pct, avg_loss_pct, n_trades, sharpe.
+        """
+        records = self._records.get(pair_id, [])
+        if len(records) < min_trades:
+            return None
+
+        wins = [r.pnl_pct for r in records if r.is_win]
+        losses = [r.pnl_pct for r in records if not r.is_win]
+        all_pnl = [r.pnl_pct for r in records]
+
+        win_rate = len(wins) / len(records)
+        avg_win = float(np.mean(wins)) if wins else 0.0
+        avg_loss = float(np.mean(losses)) if losses else 0.0
+        pnl_std = float(np.std(all_pnl, ddof=1)) if len(all_pnl) > 1 else 1.0
+        sharpe_est = (
+            float(np.mean(all_pnl)) / pnl_std * np.sqrt(252) if pnl_std > 0 else 0.0
+        )
+
+        return {
+            "win_rate": win_rate,
+            "avg_win_pct": avg_win,
+            "avg_loss_pct": avg_loss,
+            "n_trades": len(records),
+            "sharpe": sharpe_est,
+        }
+
+    def get_all_stats(self) -> dict[str, dict]:
+        """Returns stats for all pairs with sufficient history."""
+        return {
+            pid: stats
+            for pid in self._records
+            if (stats := self.get_pair_stats(pid)) is not None
         }
