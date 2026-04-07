@@ -258,3 +258,52 @@ def bridge_signals_to_allocator(
     )
 
     return allocations, diagnostics
+
+
+class EnvironmentMismatchError(Exception):
+    """Raised when portfolio environment and gateway environment are incompatible."""
+    pass
+
+
+def environment_check(portfolio_env: str, gateway_env: str) -> None:
+    """
+    Verify portfolio environment matches gateway environment before any order submission.
+
+    A paper portfolio allocation must NEVER flow to a live gateway.
+    A live portfolio allocation must NEVER flow to a paper gateway.
+
+    This is a hard stop — raises EnvironmentMismatchError on any mismatch.
+    Call this before forwarding any ExecutionIntent to the order router.
+
+    Parameters
+    ----------
+    portfolio_env : str
+        Environment of the portfolio allocation ("paper", "live", "research").
+    gateway_env : str
+        Environment of the target gateway ("paper", "live", "dry_run").
+
+    Raises
+    ------
+    EnvironmentMismatchError
+        If portfolio_env and gateway_env are incompatible.
+    """
+    LIVE_ENVS = {"live", "production", "prod"}
+    PAPER_ENVS = {"paper", "paper_trading", "sim", "simulation"}
+
+    portfolio_is_live = portfolio_env.lower() in LIVE_ENVS
+    gateway_is_live = gateway_env.lower() in LIVE_ENVS
+    portfolio_is_paper = portfolio_env.lower() in PAPER_ENVS
+    gateway_is_paper = gateway_env.lower() in PAPER_ENVS
+
+    if portfolio_is_live and not gateway_is_live:
+        raise EnvironmentMismatchError(
+            f"LIVE portfolio allocation targeted at non-live gateway '{gateway_env}'. "
+            f"Live capital must only flow through a live gateway. "
+            f"Check your gateway configuration."
+        )
+    if portfolio_is_paper and gateway_is_live:
+        raise EnvironmentMismatchError(
+            f"PAPER portfolio allocation targeted at LIVE gateway '{gateway_env}'. "
+            f"Paper allocations must never submit to live broker. "
+            f"This would execute paper-simulated orders with real money."
+        )

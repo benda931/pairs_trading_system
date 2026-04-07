@@ -215,16 +215,19 @@ def run_walk_forward(
         # Use train data to estimate beta (no test data leakage!)
         beta = float(np.cov(train_px.values, train_py.values)[0, 1] / np.var(train_px.values))
 
-        # Apply to test data
-        full_px = px.iloc[:fb["test_end"]]
-        full_py = py.iloc[:fb["test_end"]]
-        spread = full_py - beta * full_px
-        mu = spread.rolling(lookback, min_periods=lookback // 2).mean()
-        sig = spread.rolling(lookback, min_periods=lookback // 2).std().replace(0, np.nan)
-        z = ((spread - mu) / sig).fillna(0.0)
+        # --- CORRECTED: Point-in-time z-score normalization ---
+        # Step 1: compute normalization params from the END of training data only
+        train_spread = train_py - beta * train_px
+        norm_window = train_spread.iloc[-lookback:] if len(train_spread) >= lookback else train_spread
+        norm_mean = float(norm_window.mean())
+        norm_std  = float(norm_window.std(ddof=1))
+        if norm_std < 1e-10:
+            norm_std = float(train_spread.std(ddof=1))  # fallback to full train std
+        norm_std = max(norm_std, 1e-10)
 
-        # Simulate OOS
-        test_z = z.iloc[fb["test_start"]:fb["test_end"]]
+        # Step 2: apply FIXED normalization to test spread (NO future data leakage)
+        test_spread = test_py - beta * test_px
+        test_z = ((test_spread - norm_mean) / norm_std).fillna(0.0)
         test_px_s = test_px
         test_py_s = test_py
         eq = 100000.0

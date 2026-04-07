@@ -189,7 +189,10 @@ class ThresholdConfig:
 
     # ── Confidence-aware exit tightening ─────────────────────────
     confidence_exit_tightening: bool = True
-    low_confidence_exit_z_multiplier: float = 1.5  # When confidence < 0.3, exit sooner
+    # Low confidence → tighten exit (exit sooner, don't hold through uncertainty)
+    # multiplier < 1.0 means exit_z shrinks → position exits at lower z
+    low_confidence_exit_z_multiplier: float = 0.75  # When confidence < 0.3, tighten exit
+    low_confidence_exit_tightening_threshold: float = 0.3
 
     # ── ML overlay hook ──────────────────────────────────────────
     ml_threshold_override_enabled: bool = False
@@ -243,6 +246,7 @@ class ThresholdEngine:
         signal_confidence: float = 1.0,
         half_life_days: float = np.nan,
         is_reentry: bool = False,
+        garch_vol_forecast: Optional[float] = None,   # 1-step GARCH conditional vol forecast
     ) -> ThresholdSet:
         """
         Compute thresholds for the current signal context.
@@ -255,6 +259,8 @@ class ThresholdEngine:
         signal_confidence : Signal engine confidence [0, 1]
         half_life_days : Estimated half-life (used for exit calibration)
         is_reentry : If True, use re-entry thresholds (slightly wider)
+        garch_vol_forecast : Optional 1-step GARCH conditional vol forecast.
+            When provided, replaces the realized vol ratio for volatility scaling.
         """
         cfg = self._cfg
         modifiers: list[str] = []
@@ -280,13 +286,33 @@ class ThresholdEngine:
             modifiers.append(f"regime={regime.value}")
         else:
             # ── 3. Volatility-scaled ──────────────────────────────
-            vol_mult = self._compute_vol_multiplier(current_spread_vol, baseline_spread_vol)
+            # Use GARCH conditional vol if available, else fall back to realized vol ratio
+            baseline_vol = baseline_spread_vol if not math.isnan(baseline_spread_vol) else np.nan
+            if garch_vol_forecast is not None and garch_vol_forecast > 0:
+                vol_mult_raw = garch_vol_forecast / baseline_vol if (not math.isnan(baseline_vol) and baseline_vol > 0) else 1.0
+                logger.debug(
+                    "Threshold using GARCH vol forecast: %.4f (baseline: %.4f)",
+                    garch_vol_forecast, baseline_vol if not math.isnan(baseline_vol) else 0.0,
+                )
+                # Apply sensitivity and caps consistent with _compute_vol_multiplier
+                if cfg.vol_scale_enabled:
+                    mult = 1.0 + cfg.vol_scale_sensitivity * (vol_mult_raw - 1.0)
+                    mult = max(cfg.vol_scale_min_multiplier, min(cfg.vol_scale_max_multiplier, mult))
+                    if cfg.vol_scale_only_widens and mult < 1.0:
+                        mult = 1.0
+                    vol_mult = mult
+                else:
+                    vol_mult = 1.0
+                modifiers.append("garch_vol_scaled")
+            else:
+                vol_mult = self._compute_vol_multiplier(current_spread_vol, baseline_spread_vol)
             entry_z = cfg.base_entry_z * vol_mult
-            exit_z  = cfg.base_exit_z
+            exit_z  = cfg.base_exit_z * min(vol_mult, 1.5)   # Cap at 1.5x to prevent exit becoming unreachable
             stop_z  = cfg.base_stop_z * max(1.0, vol_mult)  # stop widens more aggressively
 
             if vol_mult != 1.0:
                 modifiers.append(f"vol_scaled={vol_mult:.3f}")
+                modifiers.append("vol_exit_scaled")
 
             ts = ThresholdSet(
                 entry_z=entry_z,
@@ -299,9 +325,10 @@ class ThresholdEngine:
             )
 
         # ── 4. Confidence-aware exit tightening ───────────────────
-        if cfg.confidence_exit_tightening and signal_confidence < 0.3:
+        if cfg.confidence_exit_tightening and signal_confidence < cfg.low_confidence_exit_tightening_threshold:
             ts.exit_z *= cfg.low_confidence_exit_z_multiplier
-            modifiers.append(f"low_confidence_exit_tightened")
+            # NOTE: multiplier < 1.0 → tightens exit → exits sooner under uncertainty
+            modifiers.append("low_confidence_exit_tightened")
 
         # ── 5. Half-life calibration of exit target ───────────────
         if not math.isnan(half_life_days) and half_life_days > 0:

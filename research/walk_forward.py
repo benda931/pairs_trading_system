@@ -249,10 +249,16 @@ def _run_simple_backtest(
     pnls = [t.pnl for t in trades]
     cumulative = np.cumsum(pnls)
 
-    # Sharpe (annualised from per-trade returns, crude but consistent)
-    avg_pnl = np.mean(pnls)
-    std_pnl = np.std(pnls)
-    sharpe = avg_pnl / max(std_pnl, 1e-8) * np.sqrt(len(pnls))  # not annualised — relative
+    # Sharpe (annualised from per-trade returns)
+    # Use sqrt(252) for annualization — sqrt(n_trades) was wrong (not annualised)
+    n_trades = len(pnls)
+    if n_trades >= 2:
+        avg_pnl = float(np.mean(pnls))
+        std_pnl = float(np.std(pnls, ddof=1))
+        sharpe = avg_pnl / max(std_pnl, 1e-8) * np.sqrt(252)
+    else:
+        avg_pnl = float(np.mean(pnls)) if pnls else 0.0
+        sharpe = 0.0
 
     # Max drawdown
     running_max = np.maximum.accumulate(cumulative)

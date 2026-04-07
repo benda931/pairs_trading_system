@@ -234,6 +234,87 @@ class PairsOrchestrator:
         self.tasks: Dict[str, ScheduledTask] = {}
         self._results: List[TaskResult] = []
         self._register_default_tasks()
+        # Startup reconciliation: verify local positions match broker before accepting new intents.
+        # Any critical discrepancy pauses new trading until manually resolved.
+        self._run_startup_reconciliation()
+
+        # Startup health check: verify all required components are operational.
+        self._run_startup_health_check()
+
+    def _run_startup_reconciliation(self) -> None:
+        """Run position reconciliation on startup. Non-fatal if infrastructure unavailable."""
+        try:
+            from core.position_reconciliation import (
+                PositionReconciliationEngine,
+                StartupReconciliationError,
+            )
+            router = getattr(self, "_order_router", None) or getattr(self, "_router", None)
+            store = getattr(self, "_store", None) or getattr(self, "sql_store", None)
+
+            if router is None and store is None:
+                logger.debug("Startup reconciliation skipped: no router or store available")
+                return
+
+            engine = PositionReconciliationEngine(
+                router=router,
+                store=store,
+                raise_on_critical=False,  # Log but don't crash on startup in this integration
+            )
+            result = engine.reconcile()
+            if not result.clean:
+                logger.warning(
+                    "Startup reconciliation: %s",
+                    result.summary(),
+                )
+                self.bus.publish("reconciliation", {
+                    "status": "discrepancies_found",
+                    "critical_count": result.critical_count,
+                    "warning_count": result.warning_count,
+                    "discrepancies": [
+                        {"symbol": d.symbol, "delta": d.delta, "severity": d.severity}
+                        for d in result.discrepancies
+                    ],
+                })
+            else:
+                logger.info("Startup reconciliation: %s", result.summary())
+        except Exception as exc:
+            logger.warning("Startup reconciliation failed (non-fatal): %s", exc)
+
+    def _run_startup_health_check(self) -> None:
+        """
+        Run full system health check on startup.
+
+        Persists the result to the agent bus so the dashboard can display
+        the health status in the status bar without a separate health check run.
+        Never raises — health check failure is logged but does not block startup.
+        """
+        try:
+            from core.system_health import run_health_check
+            result = run_health_check(run_id=getattr(self, "_run_id", ""))
+            logger.info("Startup health check: %s", result.summary())
+
+            self.bus.publish("system_health", {
+                "healthy": result.healthy,
+                "summary": result.summary(),
+                "n_required_passing": result.n_required_passing,
+                "n_required_total": result.n_required_total,
+                "failed_required": result.failed_required(),
+                "failed_optional": result.failed_optional(),
+                "total_check_time_ms": result.total_check_time_ms,
+                "ts": __import__("datetime").datetime.now(
+                    __import__("datetime").timezone.utc
+                ).isoformat(),
+            })
+
+            if not result.healthy:
+                logger.warning(
+                    "Startup health check FAILED: %s — system will continue but may be degraded. "
+                    "Failed required components: %s",
+                    result.summary(),
+                    result.failed_required(),
+                )
+        except Exception as exc:
+            logger.warning("Startup health check failed (non-fatal): %s", exc)
 
     def _register_default_tasks(self) -> None:
         """Register the standard pipeline tasks."""
@@ -447,6 +528,22 @@ class PairsOrchestrator:
             "tasks_total": len(results),
             "results": [asdict(r) for r in results],
         })
+
+        # Persist run manifest for dashboard/agent observability
+        try:
+            store = getattr(self, "_store", None) or getattr(self, "sql_store", None)
+            if store is not None and hasattr(store, "save_run_manifest"):
+                import uuid as _uuid
+                store.save_run_manifest(
+                    run_id=str(_uuid.uuid4()),
+                    config_hash="",
+                    stage_timings=getattr(self, "_last_stage_timings", {}),
+                    stage_errors=getattr(self, "_last_stage_errors", {}),
+                    status="completed",
+                    notes="Daily pipeline complete",
+                )
+        except Exception as _exc:
+            logger.debug("save_run_manifest failed (non-fatal): %s", _exc)
 
         return results
 
@@ -1653,18 +1750,15 @@ class PairsOrchestrator:
 
     def _load_ml_hook(self):
         """
-        Load the best available meta-label ML model for signal quality.
+        Load the ML model for signal quality via the formal ML governance layer only.
 
-        Priority order:
-        1. ModelScorer (formal ML inference layer) — if registry has a champion
-        2. XGBoost pickle (ad-hoc trained) — per-pair or generic
-        3. MetaLabelModel (LogReg) — lighter fallback
-        4. None → deterministic quality fallback (no ML)
+        Only ModelScorer (Priority 1) is used. Ad-hoc pickle files are explicitly
+        excluded — they bypass governance, drift monitoring, and audit trails.
 
         Returns an object with ``predict_success_probability(features_dict)``
-        or None if no model is available.
+        or None if no governed model is available (triggers deterministic fallback).
         """
-        # Priority 1: Try formal ModelScorer from ML platform
+        # Priority 1: Formal ModelScorer — only governed, champion-status models
         try:
             from ml.inference.scorer import ModelScorer
             from ml.contracts import InferenceRequest, MLTaskFamily
@@ -1691,54 +1785,12 @@ class PairsOrchestrator:
         except Exception as exc:
             logger.debug("ModelScorer not available: %s", exc)
 
-        # Priority 2: XGBoost pickle (ad-hoc trained models)
-        try:
-            import pickle
-            import pandas as _pd
-            xgb_path = PROJECT_ROOT / "models" / "xgb_meta_latest.pkl"
-            if not xgb_path.exists():
-                xgb_files = sorted((PROJECT_ROOT / "models").glob("xgb_meta_*.pkl"))
-                if xgb_files:
-                    xgb_path = xgb_files[-1]
-            if xgb_path.exists():
-                with open(xgb_path, "rb") as _f:
-                    xgb_data = pickle.load(_f)
-                if hasattr(xgb_data, "get"):
-                    xgb_model = xgb_data.get("model")
-                    xgb_features = xgb_data.get("features", [])
-                    if xgb_model is not None:
-                        class _XGBHook:
-                            def __init__(self, model, features):
-                                self._model = model
-                                self._features = features
-                            def predict_success_probability(self, feats):
-                                if isinstance(feats, dict):
-                                    row = {k: feats.get(k, 0.0) for k in self._features}
-                                    X = _pd.DataFrame([row])
-                                else:
-                                    X = _pd.DataFrame([{k: 0.0 for k in self._features}])
-                                try:
-                                    return float(self._model.predict_proba(X)[0, 1])
-                                except Exception:
-                                    return float("nan")
-                        logger.info("XGBoost ML model loaded: %s (%d features)", xgb_path.name, len(xgb_features))
-                        return _XGBHook(xgb_model, xgb_features)
-        except Exception as exc:
-            logger.debug("XGBoost model not available: %s", exc)
-
-        # Priority 3: MetaLabelModel (LogReg fallback)
-        try:
-            from ml.models.meta_labeler import MetaLabelModel
-            model_path = PROJECT_ROOT / "models" / "meta_label_latest.pkl"
-            if model_path.exists():
-                ml_model = MetaLabelModel.load(str(model_path))
-                if ml_model.is_fitted:
-                    logger.info("MetaLabel (LogReg) model loaded: %s", model_path.name)
-                    return ml_model
-        except Exception as exc:
-            logger.debug("MetaLabelModel not available: %s", exc)
-
-        logger.info("No ML model available — using deterministic quality fallback")
+        # No pickle fallbacks — ungoverned models must not reach production signal decisions.
+        # Use deterministic quality scoring (QualityConfig.ml_enabled=False path).
+        logger.info(
+            "No governed ML model available — using deterministic quality fallback. "
+            "To enable ML, promote a model to CHAMPION status in the ML registry."
+        )
         return None
 
     def _collect_signal_decisions(

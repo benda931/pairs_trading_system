@@ -2992,6 +2992,36 @@ def _infer_sample_size_from_perf(perf: Dict[str, Any]) -> int:
 
     return max(1, t_default)
 
+
+def _format_ic_metric(ic_value: Any, n_periods: Any) -> str:
+    """Format IC with t-statistic and significance indicator.
+
+    IC without t-stat is uninterpretable — add N and significance.
+    Wraps core.ic_reporting.format_ic_report with a safe fallback.
+
+    Parameters
+    ----------
+    ic_value : float-like
+        Information Coefficient value.
+    n_periods : int-like
+        Number of periods/samples used to compute IC.
+
+    Returns
+    -------
+    str
+        Formatted IC string, e.g. "IC=+0.065 (t=2.58, N=200) ✓ significant at α=0.05"
+    """
+    # Format IC with t-statistic for statistical context
+    # IC without t-stat is uninterpretable — add N and significance
+    try:
+        from core.ic_reporting import format_ic_report
+        return format_ic_report(float(ic_value), int(n_periods))
+    except Exception:
+        if ic_value is None or (hasattr(ic_value, '__float__') and ic_value != ic_value):
+            return "IC=N/A"
+        return f"IC={float(ic_value):+.4f} (N={n_periods})"
+
+
 def _compute_structural_penalties(
     metrics: Dict[str, float],
     perf: Dict[str, Any],
@@ -6013,6 +6043,28 @@ def render_optimization_tab(
             best_param_score = pd.to_numeric(df["ParamScore"], errors="coerce").max()
             if pd.notna(best_param_score):
                 c6.metric("Best ParamScore", f"{best_param_score:.3f}")
+
+        # IC display — shown only when an IC column is present in opt_df
+        # Uses _format_ic_metric to always include t-stat and significance
+        ic_col = next(
+            (c for c in df.columns if str(c).lower() in ("ic", "ic_mean", "ic_score", "information_coefficient")),
+            None,
+        )
+        if ic_col is not None:
+            ic_series = pd.to_numeric(df[ic_col], errors="coerce").dropna()
+            if not ic_series.empty:
+                ic_mean = float(ic_series.mean())
+                n_ic = int(len(ic_series))
+                ic_label = _format_ic_metric(ic_mean, n_ic)
+                st.caption(f"**Mean {ic_col}:** {ic_label}")
+                try:
+                    import math as _math
+                    from core.ic_reporting import format_ic_report
+                    if ic_mean is not None and not _math.isnan(float(ic_mean)) and n_ic is not None:
+                        ic_formatted = format_ic_report(float(ic_mean), int(n_ic), label="Walk-Forward IC")
+                        st.caption(ic_formatted)
+                except Exception:
+                    pass
     except Exception:
         pass
 

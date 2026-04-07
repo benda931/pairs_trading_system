@@ -106,6 +106,112 @@ def ic_t_stat(ic: float, n: int) -> float:
     return ic * math.sqrt(n) / denom
 
 
+def ic_with_tstat(
+    y_true: "pd.Series",
+    y_pred: "pd.Series",
+) -> tuple:
+    """
+    Compute Information Coefficient with t-statistic and sample size.
+
+    An IC without a t-statistic is uninterpretable — IC=0.065 on 20 samples
+    (t=0.82, p=0.42) is noise; the same IC on 200 samples (t=2.58, p=0.01)
+    is signal. Both numbers MUST always be reported together.
+
+    Parameters
+    ----------
+    y_true : pd.Series
+        Realized outcomes.
+    y_pred : pd.Series
+        Model predictions / scores.
+
+    Returns
+    -------
+    tuple : (ic, t_stat, n_samples)
+        ic        : Spearman rank correlation (IC).
+        t_stat    : t-statistic for the IC (IC / SE, where SE = sqrt((1-IC²)/(N-2))).
+        n_samples : Number of valid (non-NaN) pairs used.
+
+    Notes
+    -----
+    Returns (nan, nan, 0) on any error or if N < 4.
+    The t_stat follows a t-distribution with N-2 degrees of freedom under H0: IC=0.
+    Minimum meaningful sample: N >= 30 for asymptotic normality.
+    """
+    try:
+        # Align and drop NaN pairs
+        combined = pd.DataFrame({"y": y_true, "p": y_pred}).dropna()
+        n = len(combined)
+        if n < 4:
+            return float("nan"), float("nan"), 0
+
+        if _SCIPY_AVAILABLE:
+            ic_val, _ = _spearmanr(combined["y"], combined["p"])
+        else:
+            # Fallback: numpy rank correlation
+            def _rank(x: np.ndarray) -> np.ndarray:
+                order = np.argsort(x)
+                ranks = np.empty_like(order, dtype=float)
+                ranks[order] = np.arange(1, len(x) + 1, dtype=float)
+                return ranks
+
+            arr_y = combined["y"].values.astype(float)
+            arr_p = combined["p"].values.astype(float)
+            r_true = _rank(arr_y)
+            r_pred = _rank(arr_p)
+            d2 = np.sum((r_true - r_pred) ** 2)
+            ic_val = 1.0 - 6.0 * d2 / (n * (n * n - 1))
+
+        ic_val = float(ic_val)
+
+        if not (-1.0 <= ic_val <= 1.0):
+            return float("nan"), float("nan"), n
+
+        # t-statistic: IC * sqrt(N-2) / sqrt(1 - IC²)
+        denom = max(1.0 - ic_val ** 2, 1e-12)
+        t_stat = ic_val * ((n - 2) ** 0.5) / (denom ** 0.5)
+
+        return ic_val, float(t_stat), n
+
+    except Exception as exc:
+        import logging
+        logging.getLogger("ml.evaluation.metrics").debug("ic_with_tstat failed: %s", exc)
+        return float("nan"), float("nan"), 0
+
+
+def ic_is_significant(ic: float, n: int, alpha: float = 0.05) -> bool:
+    """
+    Return True if the IC is statistically significant at the given level.
+
+    Uses the t-distribution with N-2 degrees of freedom.
+    Minimum recommended N: 30.
+
+    Parameters
+    ----------
+    ic : float
+        Information Coefficient value.
+    n : int
+        Number of samples used to compute IC.
+    alpha : float
+        Significance level (default 0.05, two-tailed).
+
+    Returns
+    -------
+    bool : True if |t_stat| >= critical value at alpha level.
+    """
+    if not math.isfinite(ic) or n < 4:
+        return False
+    try:
+        from scipy.stats import t as t_dist
+        denom = max(1.0 - ic ** 2, 1e-12)
+        t_stat = ic * ((n - 2) ** 0.5) / (denom ** 0.5)
+        # Two-tailed critical value
+        critical = t_dist.ppf(1 - alpha / 2, df=n - 2)
+        return abs(t_stat) >= critical
+    except Exception:
+        # Approximate: |IC| * sqrt(N) > 1.96 for alpha≈0.05 (two-tailed)
+        return abs(ic) * (n ** 0.5) >= 1.96
+
+
 # ---------------------------------------------------------------------------
 # Classification Metrics
 # ---------------------------------------------------------------------------

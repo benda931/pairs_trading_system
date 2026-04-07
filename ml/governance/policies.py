@@ -259,6 +259,64 @@ class GovernanceEngine:
         should_retire = len(reasons) > 0
         return should_retire, reasons
 
+    def enforce_retirement(
+        self,
+        model: "ModelMetadata",
+        health: "ModelHealthStatus",
+        registry=None,
+    ) -> tuple:
+        """
+        Evaluate retirement criteria AND retire the model if criteria are met.
+
+        Unlike evaluate_retirement_criteria() which only returns a recommendation,
+        this method actually sets model.status = RETIRED in the registry.
+
+        This closes the gap where retirement decisions were computed but never acted on.
+
+        Parameters
+        ----------
+        model : ModelMetadata
+            Model to evaluate.
+        health : ModelHealthStatus
+            Current health status.
+        registry : MLModelRegistry, optional
+            If provided, calls registry.update_status() to persist the retirement.
+            If None, only returns the decision without persisting.
+
+        Returns
+        -------
+        tuple : (retired: bool, reasons: list[str])
+        """
+        should_retire, reasons = self.evaluate_retirement_criteria(model, health)
+
+        if not should_retire:
+            return False, reasons
+
+        # Act on the decision
+        logger.warning(
+            "Retiring model %s (task=%s): %s",
+            model.model_id,
+            model.task_family.value,
+            "; ".join(reasons),
+        )
+
+        # Update registry if available
+        if registry is not None:
+            try:
+                if hasattr(registry, "update_status"):
+                    registry.update_status(model.model_id, ModelStatus.RETIRED)
+                    logger.info("Model %s status set to RETIRED in registry", model.model_id)
+                else:
+                    logger.warning(
+                        "Cannot retire model %s: registry has no update_status method",
+                        model.model_id,
+                    )
+            except Exception as exc:
+                logger.error("Failed to retire model %s: %s", model.model_id, exc)
+                return False, [f"retirement_write_failed: {exc}"]
+
+        return True, reasons
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -282,12 +340,38 @@ def _artifact_context(
     ctx["cv_ic_std"] = _nanf(run_artifact.cv_ic_std)
     ctx["calibration_brier_improvement"] = _nanf(run_artifact.calibration_brier_improvement)
 
-    # Alias for criteria
-    ctx["walk_forward_ic_mean"] = ctx["cv_ic_mean"]
+    # walk_forward_ic_mean must come from a genuine walk-forward test, not from CV.
+    # CV and walk-forward are NOT equivalent — walk-forward simulates production deployment order.
+    wf_ic = _nanf(getattr(run_artifact, "walk_forward_ic_mean", float("nan")))
+    if math.isfinite(wf_ic):
+        ctx["walk_forward_ic_mean"] = wf_ic
+    else:
+        # walk_forward_ic_mean not computed — fail the criterion explicitly
+        # rather than silently aliasing to CV IC (which would mask a missing test).
+        ctx["walk_forward_ic_mean"] = float("nan")
+        import logging as _log
+        _log.getLogger("ml.governance").warning(
+            "walk_forward_ic_mean not populated for model %s — criterion will fail. "
+            "Run a genuine walk-forward test (rolling-origin OOS) and populate "
+            "TrainingRunArtifact.walk_forward_ic_mean.",
+            metadata.model_id,
+        )
 
-    # Robustness score: approximate from cv_ic_mean (positive IC suggests robustness)
-    # The full robustness requires ic_values list; we approximate here
-    ctx["robustness_score"] = 0.6 if _nanf(run_artifact.cv_ic_mean) > 0 else 0.4
+    # Robustness: fraction of CV folds with positive IC.
+    # Requires cv_ic_per_fold to be populated by the training runner.
+    # Falls back to a conservative 0.4 if fold data is unavailable.
+    cv_folds = getattr(run_artifact, "cv_ic_per_fold", None) or []
+    if cv_folds:
+        ctx["robustness_score"] = float(sum(1 for ic in cv_folds if ic > 0) / len(cv_folds))
+    else:
+        # No fold-level data available — cannot assess robustness; fail safe.
+        ctx["robustness_score"] = 0.4
+        import logging as _log
+        _log.getLogger("ml.governance").warning(
+            "cv_ic_per_fold not populated for model %s — robustness_score defaulting to 0.4 (fail-safe). "
+            "Populate TrainingRunArtifact.cv_ic_per_fold from the training runner to enable real robustness scoring.",
+            metadata.model_id,
+        )
 
     # From champion comparison
     if comparison is not None:

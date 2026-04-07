@@ -2,14 +2,16 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from enum import Enum
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 import numpy as np
 import pandas as pd
 
 from .dashboard_models import (
     DashboardContext,
-    DashboardSnapshot,
+    DashboardSnapshot as _DashboardModelSnapshot,
     MarketSnapshot,
     PortfolioSnapshot,
     PortfolioExposureBreakdown,
@@ -27,6 +29,165 @@ from .app_context import AppContext  # אצלך כבר קיים
 from .sql_store import SqlStore      # קיים אצלך
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Dashboard Operational State — computed ONCE per render cycle
+# ---------------------------------------------------------------------------
+
+class DashboardOperationalState(str, Enum):
+    """
+    Top-level operational state of the system as seen by the dashboard.
+
+    This state is computed once from the DashboardSnapshot and drives:
+    - Status bar visual treatment (color, alerts)
+    - Tab availability (e.g., no execution tabs when DEGRADED)
+    - Alert prominence (APPROVAL_REQUIRED shows top-level banner)
+
+    States are mutually exclusive and ordered by severity.
+    The dashboard compute cycle should always produce exactly one state.
+    """
+    PRODUCTION_CLEAN     = "production_clean"     # All systems nominal, no alerts
+    PRODUCTION_ALERT     = "production_alert"     # Minor alerts, trading continues
+    APPROVAL_REQUIRED    = "approval_required"    # Pending approvals blocking workflow
+    DEGRADED             = "degraded"             # System degraded, reduced capability
+    FAILURE              = "failure"              # Critical failure, manual intervention needed
+
+
+def compute_operational_state(snapshot) -> DashboardOperationalState:
+    """
+    Derive the DashboardOperationalState from a DashboardSnapshot.
+
+    This function is the single authority on "what operational state are we in."
+    It must be called ONCE per render cycle, and the result passed to all tabs.
+    Tabs must NOT compute their own operational state — they receive it as a parameter.
+
+    Parameters
+    ----------
+    snapshot : DashboardSnapshot (or any object with the fields below)
+        Current system snapshot. Fields used:
+        - snapshot.incidents (list or count of open incidents)
+        - snapshot.pending_approvals (list or count of pending approvals)
+        - snapshot.ml_blocked_models (list of BLOCKED model_ids)
+        - snapshot.system_errors (list of current system errors)
+        - snapshot.pipeline_last_success (datetime or None)
+        - snapshot.has_open_positions (bool)
+        - snapshot.risk_breach (bool)
+
+    Returns
+    -------
+    DashboardOperationalState
+    """
+    # Helper: safely get a count from a field that may be a list, int, or None
+    def _count(field_val) -> int:
+        if field_val is None:
+            return 0
+        if isinstance(field_val, (int, float)):
+            return int(field_val)
+        try:
+            return len(field_val)
+        except TypeError:
+            return 0
+
+    try:
+        system_errors = _count(getattr(snapshot, "system_errors", None))
+        risk_breach = bool(getattr(snapshot, "risk_breach", False))
+        open_incidents = _count(getattr(snapshot, "incidents", None))
+        pipeline_ok = getattr(snapshot, "pipeline_last_success", None) is not None
+
+        # FAILURE: system errors, risk breach with open positions, or pipeline dead
+        if system_errors > 0:
+            return DashboardOperationalState.FAILURE
+        if risk_breach and bool(getattr(snapshot, "has_open_positions", False)):
+            return DashboardOperationalState.FAILURE
+        if not pipeline_ok and bool(getattr(snapshot, "has_open_positions", False)):
+            return DashboardOperationalState.DEGRADED
+
+        # DEGRADED: incidents present, ML models blocked
+        ml_blocked = _count(getattr(snapshot, "ml_blocked_models", None))
+        if open_incidents > 0 or ml_blocked > 0:
+            return DashboardOperationalState.DEGRADED
+
+        # APPROVAL_REQUIRED: pending approvals exist
+        pending_approvals = _count(getattr(snapshot, "pending_approvals", None))
+        if pending_approvals > 0:
+            return DashboardOperationalState.APPROVAL_REQUIRED
+
+        # PRODUCTION_ALERT: minor issues (pipeline stale, non-blocking)
+        if not pipeline_ok:
+            return DashboardOperationalState.PRODUCTION_ALERT
+
+        # All clear
+        return DashboardOperationalState.PRODUCTION_CLEAN
+
+    except Exception:
+        # compute_operational_state must never crash — fail to DEGRADED
+        return DashboardOperationalState.DEGRADED
+
+
+@dataclass
+class DashboardSnapshot:
+    """
+    Complete data snapshot for the dashboard render cycle.
+
+    Built once per render cycle by DashboardService.build_snapshot().
+    Passed as a parameter to every tab renderer — tabs do NOT read
+    from session state directly.
+
+    This ensures all tabs see the same generation of data and eliminates
+    the implicit coupling through session state that causes tab-level
+    inconsistencies.
+    """
+    # Core data
+    run_id: str = ""
+    snapshot_at: str = field(
+        default_factory=lambda: datetime.now(tz=timezone.utc).isoformat()
+    )
+
+    # Pipeline state
+    pipeline_last_success: Optional[str] = None   # ISO-8601 of last successful pipeline run
+    pipeline_last_status: str = "unknown"          # "completed" | "partial" | "failed" | "unknown"
+    stage_timings: dict = field(default_factory=dict)
+    stage_errors: dict = field(default_factory=dict)
+
+    # Operational state indicators (used by compute_operational_state)
+    system_errors: list = field(default_factory=list)
+    risk_breach: bool = False
+    has_open_positions: bool = False
+    pending_approvals: list = field(default_factory=list)
+    incidents: list = field(default_factory=list)
+    ml_blocked_models: list = field(default_factory=list)
+
+    # Signal funnel
+    signal_funnel: Optional[Any] = None   # SignalFunnelSnapshot
+
+    # Positions
+    positions: list = field(default_factory=list)
+
+    # Risk
+    portfolio_var: float = float("nan")
+    portfolio_leverage: float = float("nan")
+    max_drawdown: float = float("nan")
+
+    # ML
+    champion_models: list = field(default_factory=list)    # List of model_ids with CHAMPION status
+    stale_models: list = field(default_factory=list)       # Models needing retraining
+
+    # Regime
+    current_regime: str = "unknown"
+
+    # VIX / macro
+    vix_level: float = float("nan")
+
+    # Agent status (for agents tab)
+    agent_statuses: list = field(default_factory=list)
+
+    # Dashboard operational state (computed from above fields)
+    operational_state: Optional[Any] = None   # DashboardOperationalState, set after build
+
+    def __post_init__(self):
+        """Compute operational state after all fields are set."""
+        self.operational_state = compute_operational_state(self)
 
 
 class DashboardService:
@@ -64,7 +225,7 @@ class DashboardService:
         self.enable_persistence = enable_persistence
 
         # Cache קליל של ה-snapshot האחרון
-        self._last_snapshot: Optional[DashboardSnapshot] = None
+        self._last_snapshot: Optional[_DashboardModelSnapshot] = None
 
     # ------------------------------------------------------------------
     # Helpers כלליים
@@ -1048,9 +1209,94 @@ class DashboardService:
         )
 
     # ------------------------------------------------------------------
+    # Lightweight pipeline-state snapshot
+    # ------------------------------------------------------------------
+    def build_snapshot(self, run_id: str = "") -> "DashboardSnapshot":
+        """
+        Build a complete DashboardSnapshot from current system state.
+
+        This is the single entry point for dashboard data assembly.
+        Call once per render cycle; pass the result to all tab renderers.
+
+        Returns
+        -------
+        DashboardSnapshot with all fields populated (best-effort).
+        Never raises — any failed field is left at its default value.
+        """
+        snap = DashboardSnapshot(run_id=run_id)
+
+        # Pipeline state
+        try:
+            pipeline_data = self._load_latest_pipeline_run()
+            if pipeline_data:
+                snap.pipeline_last_success = pipeline_data.get("ts_utc")
+                snap.pipeline_last_status = pipeline_data.get("status", "unknown")
+                snap.stage_errors = pipeline_data.get("stage_errors", {})
+                snap.stage_timings = pipeline_data.get("stage_timings", {})
+                if snap.stage_errors:
+                    snap.system_errors = list(snap.stage_errors.values())
+        except Exception as exc:
+            logger.debug("build_snapshot: pipeline_data failed: %s", exc)
+
+        # Pending approvals
+        try:
+            from approvals.engine import get_approval_engine
+            engine = get_approval_engine()
+            snap.pending_approvals = [
+                {"request_id": r.request_id, "action_type": getattr(r, "action_type", "")}
+                for r in engine.get_pending_requests()
+            ]
+        except Exception as exc:
+            logger.debug("build_snapshot: approvals failed: %s", exc)
+
+        # ML blocked models
+        try:
+            from ml.registry import get_ml_registry
+            from ml.contracts import ModelStatus
+            registry = get_ml_registry()
+            snap.ml_blocked_models = [
+                m.model_id for m in registry.list_all()
+                if getattr(m, "status", None) == ModelStatus.BLOCKED
+            ]
+            snap.champion_models = [
+                m.model_id for m in registry.list_all()
+                if getattr(m, "status", None) == ModelStatus.CHAMPION
+            ]
+        except Exception as exc:
+            logger.debug("build_snapshot: ml_registry failed: %s", exc)
+
+        # Recompute operational state with fully populated snapshot
+        snap.operational_state = compute_operational_state(snap)
+        return snap
+
+    def _load_latest_pipeline_run(self) -> Optional[dict]:
+        """Load the most recent pipeline run manifest from storage."""
+        try:
+            if self.sql_store is not None and hasattr(self.sql_store, "raw_query"):
+                df = self.sql_store.raw_query(
+                    "SELECT * FROM pipeline_run_manifests "
+                    "ORDER BY ts_utc DESC LIMIT 1"
+                )
+                if df is not None and not df.empty:
+                    row = df.iloc[0].to_dict()
+                    # Deserialize JSON columns
+                    for col in ("stage_timings_json", "stage_errors_json"):
+                        if col in row:
+                            key = col.replace("_json", "")
+                            try:
+                                import json
+                                row[key] = json.loads(row[col])
+                            except Exception:
+                                row[key] = {}
+                    return row
+        except Exception as exc:
+            logger.debug("_load_latest_pipeline_run: %s", exc)
+        return None
+
+    # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
-    def build_dashboard_snapshot(self, dctx: DashboardContext) -> DashboardSnapshot:
+    def build_dashboard_snapshot(self, dctx: DashboardContext) -> _DashboardModelSnapshot:
         """
         פונקציה ראשית: בונה Snapshot מלא לדשבורד.
         """
@@ -1066,7 +1312,7 @@ class DashboardService:
         except Exception:
             pass
 
-        snapshot = DashboardSnapshot(
+        snapshot = _DashboardModelSnapshot(
             ctx=dctx,
             as_of=self._now_utc(),
             market=market,
@@ -1093,13 +1339,13 @@ class DashboardService:
     # ------------------------------------------------------------------
     # Utilities נוספים לשימוש דשבורד/Agents
     # ------------------------------------------------------------------
-    def get_last_snapshot(self) -> Optional[DashboardSnapshot]:
+    def get_last_snapshot(self) -> Optional[_DashboardModelSnapshot]:
         """מחזיר את ה-snapshot האחרון מהזיכרון (אם קיים)."""
         return self._last_snapshot
 
     def load_last_snapshot_from_sql(
         self, ctx_key: Optional[str] = None
-    ) -> Optional[DashboardSnapshot]:
+    ) -> Optional[_DashboardModelSnapshot]:
         """
         טעינת snapshot אחרון מ-SQL (למשל בעת restart של האפליקציה).
         """
@@ -1119,8 +1365,8 @@ class DashboardService:
 
     def diff_snapshots(
         self,
-        old: Optional[DashboardSnapshot],
-        new: DashboardSnapshot,
+        old: Optional[_DashboardModelSnapshot],
+        new: _DashboardModelSnapshot,
     ) -> Dict[str, Any]:
         """
         Diff בסיסי בין שני snapshotים — לציור חיצים / Alerts.

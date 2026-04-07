@@ -264,6 +264,65 @@ class SignalQualityGrade(str, enum.Enum):
     F      = "F"    # Skip: do not trade this setup
 
 
+class OrderState(str, enum.Enum):
+    """
+    Lifecycle states for a single order leg.
+
+    Transitions:
+        DRAFT → PRE_TRADE_PENDING → SUBMITTED → ACKNOWLEDGED
+        ACKNOWLEDGED → PARTIALLY_FILLED → FILLED
+        ACKNOWLEDGED → CANCELLED | REJECTED | EXPIRED | STALE | ERROR
+    """
+    DRAFT             = "draft"             # Intent created, not yet sent for pre-trade check
+    PRE_TRADE_PENDING = "pre_trade_pending" # Awaiting pre-trade validation
+    PRE_TRADE_FAILED  = "pre_trade_failed"  # Pre-trade check blocked submission
+    SUBMITTED         = "submitted"         # Sent to broker, no acknowledgement yet
+    ACKNOWLEDGED      = "acknowledged"      # Broker acknowledged receipt
+    PARTIALLY_FILLED  = "partially_filled"  # Some quantity filled, rest pending
+    FILLED            = "filled"            # Fully executed
+    CANCELLED         = "cancelled"         # Successfully cancelled
+    REJECTED          = "rejected"          # Broker rejected the order
+    EXPIRED           = "expired"           # Time-in-force expired without fill
+    STALE             = "stale"             # No update received within timeout window
+    ERROR             = "error"             # Unexpected error state
+    RESCUE_PENDING    = "rescue_pending"    # Naked position; rescue order in progress
+    RESCUED           = "rescued"           # Naked position closed by rescue order
+
+
+class LegSyncState(str, enum.Enum):
+    """
+    Synchronization state for a paired trade (two-leg coordination).
+
+    X = first leg (typically the entry signal leg)
+    Y = second leg (the hedge/pairing leg)
+    """
+    BOTH_PENDING        = "both_pending"        # Neither leg submitted yet
+    X_SUBMITTED         = "x_submitted"         # Leg X sent to broker, Y waiting
+    Y_SUBMITTED         = "y_submitted"         # Leg Y sent to broker, X waiting
+    BOTH_SUBMITTED      = "both_submitted"      # Both legs submitted, awaiting fills
+    X_FILLED_Y_PENDING  = "x_filled_y_pending"  # X filled, Y still working — CRITICAL state
+    Y_FILLED_X_PENDING  = "y_filled_x_pending"  # Y filled, X still working — CRITICAL state
+    BOTH_FILLED         = "both_filled"         # Both legs filled — complete entry/exit
+    X_FAILED            = "x_failed"            # X failed; Y not submitted — clean failure
+    Y_FAILED_NAKED      = "y_failed_naked"       # X filled but Y failed — NAKED POSITION
+    X_FAILED_NAKED      = "x_failed_naked"       # Y filled but X failed — NAKED POSITION
+    BOTH_CANCELLED      = "both_cancelled"      # Both legs cancelled cleanly
+    RESCUE_IN_PROGRESS  = "rescue_in_progress"  # LegRescue executing to close naked position
+    RESCUED             = "rescued"             # Naked position closed, pair flat
+
+
+class LegRole(str, enum.Enum):
+    """Role of a single leg within a paired trade."""
+    ENTRY_LEG_X   = "entry_leg_x"    # Entry: long/short the signal leg
+    ENTRY_LEG_Y   = "entry_leg_y"    # Entry: the hedge leg
+    EXIT_LEG_X    = "exit_leg_x"     # Exit: close the X position
+    EXIT_LEG_Y    = "exit_leg_y"     # Exit: close the Y position
+    HEDGE_ADJUST  = "hedge_adjust"   # Hedge ratio rebalancing order
+    SCALE_LEG_X   = "scale_leg_x"    # Scale-in/out: X leg
+    SCALE_LEG_Y   = "scale_leg_y"    # Scale-in/out: Y leg
+    RESCUE        = "rescue"         # Emergency rescue for naked position
+
+
 # ══════════════════════════════════════════════════════════════════
 # 2. CORE DOMAIN OBJECTS
 # ══════════════════════════════════════════════════════════════════
@@ -939,6 +998,53 @@ class ActionThrottleConfig:
     max_emergency_actions_per_day: int = 5
 
 
+
+# ---------------------------------------------------------------------------
+# Execution — Order Record (durable per-leg per-slice execution artifact)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class OrderRecord:
+    """
+    Durable per-leg per-slice execution artifact.
+
+    Written to storage BEFORE submission (executed=False).
+    Updated to executed=True after broker acknowledgement.
+
+    On any process restart, any OrderRecord with executed=False represents
+    an unresolved order intent — the startup reconciliation should check
+    broker state for these records.
+
+    Idempotency key: client_order_id = UUID5(intent_id + leg_role + slice_seq)
+    is deterministic — submitting the same intent twice produces the same
+    client_order_id, allowing brokers to reject duplicates.
+    """
+    record_id: str = ""                    # Internal record UUID
+    client_order_id: str = ""             # UUID5(intent_id + leg_role + slice_seq) — idempotency key
+    intent_id: str = ""                   # Parent ExecutionIntent ID
+    pair_id: str = ""
+    symbol: str = ""
+    action: str = ""                      # "BUY" | "SELL"
+    quantity: float = 0.0
+    order_type: str = "MKT"
+    leg_role: str = ""                    # LegRole value
+    slice_seq: int = 0                    # Slice sequence number (for TWAP/VWAP)
+    order_state: str = "draft"            # OrderState value
+    leg_sync_state: str = "both_pending"  # LegSyncState value
+    executed: bool = False                # False until broker acknowledgement
+    broker_order_id: Optional[int] = None
+    fill_price: Optional[float] = None
+    fill_quantity: float = 0.0
+    commission: float = 0.0
+    env: str = "paper"                    # "paper" | "live"
+    created_at: str = ""
+    submitted_at: str = ""
+    filled_at: str = ""
+    error_message: str = ""
+    audit_path: str = ""                  # Path to pre-execution audit file
+    notes: str = ""
+
+
 __all__ = [
     # Enums
     "PairLifecycleState", "TradeLifecycleState", "ValidationResult", "RegimeLabel",
@@ -965,4 +1071,6 @@ __all__ = [
     # Production Safety
     "StateProvider", "InMemoryStateProvider",
     "EngineContract", "ActionThrottleConfig",
+    # Execution
+    "OrderRecord",
 ]

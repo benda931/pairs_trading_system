@@ -81,6 +81,7 @@ class SignalQualityScore:
     # ML overlay
     ml_override: bool = False
     ml_probability: float = np.nan
+    ml_model_id: str = ""    # Model that produced the ML override (for audit/rollback)
 
     def to_dict(self) -> dict:
         return {
@@ -319,8 +320,10 @@ class SignalQualityEngine:
         # ── ML overlay ────────────────────────────────────────────
         ml_override = False
         ml_prob = np.nan
+        ml_model_id = ""
         if cfg.ml_enabled and self._ml_hook is not None and features is not None:
             ml_prob, grade, ml_override = self._apply_ml_overlay(grade, features)
+            ml_model_id = getattr(self._ml_hook, "model_id", "") or ""
 
         # ── Finalize recommendations ──────────────────────────────
         skip = grade == SignalQualityGrade.F
@@ -341,6 +344,7 @@ class SignalQualityEngine:
             warnings=warnings,
             ml_override=ml_override,
             ml_probability=ml_prob,
+            ml_model_id=ml_model_id,
         )
 
     # ── Private helpers ───────────────────────────────────────────
@@ -430,6 +434,26 @@ class SignalQualityEngine:
                 and features.break_risk > 0.6):
             score *= max(0.2, 1.0 - features.break_risk)
             reasons.append(f"Break risk elevated ({features.break_risk:.0%})")
+
+        # Spread momentum veto — penalize if spread is accelerating away from mean
+        # z_velocity > 0 means |z| is growing (bad timing for mean-reversion entry)
+        z_velocity = features.z_velocity if not math.isnan(features.z_velocity) else None
+        z_score_val = features.z_score if not math.isnan(features.z_score) else None
+        if z_velocity is not None and z_score_val is not None:
+            # velocity * sign(z) > 0 means spread is moving away from mean
+            escape_momentum = float(z_velocity) * (1.0 if float(z_score_val) >= 0 else -1.0)
+            if escape_momentum > 0.05:       # Spread accelerating away
+                score *= 0.60        # 40% penalty for bad timing
+                warnings.append(
+                    f"Spread momentum veto: escape_momentum={escape_momentum:.3f} "
+                    f"(spread accelerating away from mean)"
+                )
+                # Stronger penalty if acceleration is high
+                if escape_momentum > 0.15:
+                    score *= 0.70    # Additional 30% penalty for strong escape
+                    reasons.append(
+                        f"Strong escape momentum ({escape_momentum:.3f}): poor entry timing"
+                    )
 
         return max(0.0, min(1.0, score)), reasons, warnings
 

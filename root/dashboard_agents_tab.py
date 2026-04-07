@@ -545,6 +545,133 @@ def _render_agents_internal_fallback(
     except Exception as _brun_err:
         st.caption(f"Batch runner unavailable: {_brun_err}")
 
+    st.markdown("---")
+
+    # ========= חלק 9 – Approvals Inbox =========
+    _render_approvals_inbox()
+
+
+def _render_approvals_inbox() -> None:
+    """Render the Approvals Inbox section.
+
+    Displays all pending ApprovalRequests from the ApprovalEngine and allows
+    the dashboard user to APPROVE or REJECT each request individually.
+
+    The section wires directly to ApprovalEngine.decide(), which persists the
+    decision in the engine's in-memory store and routes it to any registered
+    handlers.  KeyError is caught when a request has already been finalized
+    (e.g. approved in a previous page cycle).
+    """
+    st.markdown("#### 9️⃣ Approvals Inbox")
+    st.caption(
+        "Pending agent action requests awaiting human review. "
+        "Select a request and click APPROVE or REJECT to finalise it."
+    )
+
+    try:
+        from approvals.engine import get_approval_engine
+        from approvals.contracts import ApprovalStatus
+    except ImportError as _imp_err:
+        st.warning(f"ApprovalEngine unavailable: {_imp_err}")
+        return
+
+    try:
+        engine = get_approval_engine()
+        pending = engine.get_pending_requests()
+    except Exception as _fetch_err:
+        st.error(f"Could not fetch pending requests: {_fetch_err}")
+        return
+
+    if not pending:
+        st.info("No pending approval requests.")
+        return
+
+    # Build a display table
+    rows = []
+    for req in pending:
+        rows.append(
+            {
+                "request_id": req.request_id,
+                "agent": req.agent_name,
+                "action_type": req.action_type,
+                "risk_class": req.risk_class,
+                "environment": req.environment,
+                "requested_at": req.requested_at,
+                "description": req.action_description[:80]
+                + ("..." if len(req.action_description) > 80 else ""),
+            }
+        )
+
+    df_pending = pd.DataFrame(rows)
+    st.dataframe(df_pending, use_container_width=True)
+
+    st.markdown("**Adjudicate a request**")
+
+    req_ids = [r.request_id for r in pending]
+    selected_id = st.selectbox(
+        "Select request ID",
+        options=req_ids,
+        key="approvals_inbox_select_id",
+    )
+
+    # Show full description of selected request
+    selected_req = next((r for r in pending if r.request_id == selected_id), None)
+    if selected_req is not None:
+        with st.expander("Request details", expanded=False):
+            st.write(f"**Agent:** {selected_req.agent_name}")
+            st.write(f"**Action type:** {selected_req.action_type}")
+            st.write(f"**Risk class:** {selected_req.risk_class}")
+            st.write(f"**Environment:** {selected_req.environment}")
+            st.write(f"**Mode:** {selected_req.approval_mode}")
+            st.write(f"**Description:** {selected_req.action_description}")
+            st.write(f"**Context:** {selected_req.context_summary}")
+            if selected_req.notes:
+                st.write(f"**Notes:** {selected_req.notes}")
+
+    col_approve, col_reject = st.columns(2)
+
+    with col_approve:
+        if st.button("✅ APPROVE", key="approvals_inbox_approve_btn", use_container_width=True):
+            if selected_id:
+                try:
+                    engine.decide(
+                        request_id=selected_id,
+                        status=ApprovalStatus.APPROVED,
+                        decided_by="dashboard_user",
+                        rationale="Manual approval via dashboard",
+                    )
+                    st.success(f"Approved: {selected_id}")
+                    st.rerun()
+                except KeyError:
+                    st.warning(f"Request {selected_id} not found or already finalized.")
+                except ValueError as _ve:
+                    st.warning(str(_ve))
+                except Exception as _exc:
+                    st.error(f"Error: {_exc}")
+            else:
+                st.warning("No request selected.")
+
+    with col_reject:
+        if st.button("❌ REJECT", key="approvals_inbox_reject_btn", use_container_width=True):
+            if selected_id:
+                try:
+                    engine.decide(
+                        request_id=selected_id,
+                        status=ApprovalStatus.REJECTED,
+                        decided_by="dashboard_user",
+                        rationale="Manual rejection via dashboard",
+                    )
+                    st.error(f"Rejected: {selected_id}")
+                    st.rerun()
+                except KeyError:
+                    st.warning(f"Request {selected_id} not found or already finalized.")
+                except ValueError as _ve:
+                    st.warning(str(_ve))
+                except Exception as _exc:
+                    st.error(f"Error: {_exc}")
+            else:
+                st.warning("No request selected.")
+
 
 # -------------------------
 # override: render_agents_tab – keep external, then fallback
@@ -612,11 +739,13 @@ def render_agents_tab(
 try:
     __all__ += [
         "_render_agents_internal_fallback",
+        "_render_approvals_inbox",
         "render_agents_tab",
     ]
 except NameError:  # pragma: no cover
     __all__ = [
         "_render_agents_internal_fallback",
+        "_render_approvals_inbox",
         "render_agents_tab",
     ]
 

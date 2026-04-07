@@ -207,11 +207,52 @@ def train_xgboost_model(
 
     # Evaluate
     from sklearn.metrics import roc_auc_score, brier_score_loss, log_loss
+    from scipy.stats import spearmanr
+    import math
 
     y_pred = model.predict_proba(X_test)[:, 1]
     auc = float(roc_auc_score(y_test, y_pred))
     brier = float(brier_score_loss(y_test, y_pred))
     logloss = float(log_loss(y_test, y_pred))
+
+    # Per-fold IC (Spearman rank correlation between predicted probability and
+    # actual label) — computed via 5-fold expanding-window walk-forward CV on
+    # the training set only (no leakage from X_test).
+    fold_ic_values: list = []
+    n_tr = len(X_train)
+    n_cv_splits = 5
+    fold_size = n_tr // (n_cv_splits + 1)
+    if fold_size >= 5:
+        import copy
+        X_tr_vals = X_train.values
+        y_tr_vals = y_train.values
+        for k in range(n_cv_splits):
+            cv_train_end = (k + 1) * fold_size
+            cv_val_start = cv_train_end
+            cv_val_end = min(cv_train_end + fold_size, n_tr)
+            if cv_val_end - cv_val_start < 5:
+                continue
+            try:
+                cv_est = copy.deepcopy(model)
+                # Refit on CV training slice without early stopping eval_set
+                cv_est.set_params(early_stopping_rounds=None)
+                cv_est.fit(
+                    X_tr_vals[:cv_train_end],
+                    y_tr_vals[:cv_train_end],
+                    verbose=False,
+                )
+                fold_probas = cv_est.predict_proba(X_tr_vals[cv_val_start:cv_val_end])[:, 1]
+                fold_labels = y_tr_vals[cv_val_start:cv_val_end]
+                fold_ic, _ = spearmanr(fold_probas, fold_labels)
+                if not math.isnan(float(fold_ic)):
+                    fold_ic_values.append(float(fold_ic))
+            except Exception as fold_exc:
+                logger.debug("CV fold %d IC failed: %s", k, fold_exc)
+
+    # Populate artifact fields
+    artifact_cv_ic_per_fold = [float(ic) for ic in fold_ic_values]
+    oos_ics = [ic for ic in fold_ic_values if not math.isnan(ic)]
+    artifact_walk_forward_ic_mean = float(np.mean(oos_ics)) if oos_ics else float("nan")
 
     # Feature importance
     importance = dict(zip(X.columns, model.feature_importances_))
@@ -236,6 +277,11 @@ def train_xgboost_model(
         "n_features": len(X.columns),
         "top_features": top_features,
         "model_path": str(model_path),
+        # IC fields — mirrors TrainingRunArtifact.cv_ic_per_fold /
+        # walk_forward_ic_mean for governance engine consumption.
+        "cv_ic_per_fold": artifact_cv_ic_per_fold,
+        "walk_forward_ic_mean": artifact_walk_forward_ic_mean,
+        "cv_ic_mean": float(np.mean(artifact_cv_ic_per_fold)) if artifact_cv_ic_per_fold else float("nan"),
     }
 
 

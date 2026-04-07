@@ -105,6 +105,33 @@ class ModelScorer:
                 return self._apply_fallback(request, "no_model_available")
             return _error_result(request, "no_model_available")
 
+        # 1b. In-training-window guard: if as_of is within the model's training window,
+        # the model has implicitly seen this data during training — reject the request.
+        metadata = getattr(model, "metadata", None)
+        model_id = _get_model_id(model)
+        if request.as_of and metadata is not None and hasattr(metadata, "trained_until") and metadata.trained_until:
+            try:
+                from datetime import datetime, timezone as _tz
+                req_dt = datetime.fromisoformat(request.as_of)
+                until_dt = datetime.fromisoformat(metadata.trained_until)
+                if req_dt.tzinfo is None:
+                    req_dt = req_dt.replace(tzinfo=_tz.utc)
+                if until_dt.tzinfo is None:
+                    until_dt = until_dt.replace(tzinfo=_tz.utc)
+                if req_dt <= until_dt:
+                    logger.warning(
+                        "Inference blocked: as_of=%s is within training window "
+                        "(trained_until=%s) for model %s. "
+                        "This would constitute lookahead bias.",
+                        request.as_of, metadata.trained_until, model_id,
+                    )
+                    return self._apply_fallback(
+                        request,
+                        f"in_training_window: as_of={request.as_of} <= trained_until={metadata.trained_until}",
+                    )
+            except Exception as _exc:
+                logger.debug("trained_until check skipped: %s", _exc)
+
         # 2. Validate features
         required_features = _get_feature_names(model)
         ok, missing = self._validate_features(
@@ -150,8 +177,6 @@ class ModelScorer:
 
         # 6. Confidence — use score distance from 0.5 as proxy
         confidence = float(2.0 * abs(score_val - 0.5))
-
-        model_id = _get_model_id(model)
 
         return InferenceResult(
             request_id=request.request_id,
@@ -219,7 +244,10 @@ class ModelScorer:
         fallback_order = [prefer_status]
         if prefer_status != ModelStatus.CHAMPION:
             fallback_order.append(ModelStatus.CHAMPION)
-        fallback_order += [ModelStatus.CHALLENGER, ModelStatus.CANDIDATE]
+        # Append CHALLENGER if not already present; CANDIDATE is intentionally excluded —
+        # candidate models have not passed governance review and must not serve production inference.
+        if ModelStatus.CHALLENGER not in fallback_order:
+            fallback_order.append(ModelStatus.CHALLENGER)
 
         for status in fallback_order:
             try:
@@ -229,8 +257,8 @@ class ModelScorer:
                     challengers = self._registry.get_challengers(task_family)
                     meta = challengers[0] if challengers else None
                 else:
-                    candidates = self._registry.list_models(task_family, status)
-                    meta = candidates[0] if candidates else None
+                    # Should not be reached with CANDIDATE excluded, but guard anyway.
+                    meta = None
 
                 if meta is not None:
                     obj = self._registry.get_model_object(meta.model_id)

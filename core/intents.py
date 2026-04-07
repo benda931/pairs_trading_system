@@ -424,4 +424,117 @@ __all__ = [
     "HoldIntent", "ReduceIntent", "ExitIntent", "SuspendIntent", "RetireIntent",
     # Decision wrapper
     "SignalDecision",
+    # Agent decision
+    "AgentDecisionType", "AgentDecisionStatus", "AgentDecision",
 ]
+
+
+# ---------------------------------------------------------------------------
+# Agent Decision — typed output from all autonomous agents
+# ---------------------------------------------------------------------------
+
+
+class AgentDecisionType(enum.Enum):
+    """Classification of agent decision types."""
+    PARAMETER_CHANGE        = "parameter_change"       # Suggest changing a config parameter
+    MODEL_PROMOTION         = "model_promotion"        # Recommend promoting a model to champion
+    SIGNAL_APPROVAL         = "signal_approval"        # Approve or block a specific signal
+    RISK_OVERRIDE           = "risk_override"          # Recommend overriding a risk limit
+    INCIDENT_OPEN           = "incident_open"          # Open a new incident
+    INCIDENT_CLOSE          = "incident_close"         # Close an existing incident
+    UNIVERSE_CHANGE         = "universe_change"        # Add/remove pairs from universe
+    REGIME_LABEL            = "regime_label"           # Publish a regime classification
+    ALPHA_SIGNAL            = "alpha_signal"           # Advisory alpha recommendation
+    HEALTH_REPORT           = "health_report"          # System/model health status report
+    REBALANCE               = "rebalance"              # Portfolio rebalance recommendation
+    CUSTOM                  = "custom"                 # Agent-specific decision type
+
+
+class AgentDecisionStatus(enum.Enum):
+    """Lifecycle status of an agent decision."""
+    PENDING_APPROVAL  = "pending_approval"    # Requires human approval before acting
+    AUTO_APPROVED     = "auto_approved"       # Auto-approved by tier policy (no human needed)
+    APPROVED          = "approved"            # Human approved
+    REJECTED          = "rejected"            # Human rejected
+    EXPIRED           = "expired"             # TTL exceeded without action
+    EXECUTED          = "executed"            # Decision has been acted upon
+    FAILED            = "failed"              # Execution failed after approval
+
+
+@dataclass
+class AgentDecision:
+    """
+    Typed output from every autonomous agent.
+
+    ALL agent recommendations MUST be expressed as AgentDecision objects.
+    Agents must never write directly to sql_store — all writes go through
+    the approval queue (if requires_approval=True) or the auto-execution
+    path (if requires_approval=False, agent tier permits auto-exec).
+
+    Design constraints:
+    - Agents are recommendation engines, not execution engines
+    - Human approval is the default for consequential decisions
+    - Every decision has an audit trail: who decided, when, on what evidence
+    - TTL enforcement prevents stale decisions from executing automatically
+
+    Parameters
+    ----------
+    agent_id : str
+        Identifier of the agent that produced this decision.
+    decision_type : AgentDecisionType
+        Classification of the decision.
+    payload : dict
+        Decision-specific data (parameter values, model IDs, etc.).
+    requires_approval : bool
+        True = human must approve before execution (default for all financial decisions).
+        False = auto-executes if agent tier policy permits.
+    confidence : float
+        Agent's self-assessed confidence in this decision [0, 1].
+    evidence : str
+        Human-readable summary of the evidence for this decision.
+        Must be non-empty for any decision that reaches production.
+    expires_at : str
+        ISO-8601 datetime after which this decision auto-expires.
+        Expired decisions are NEVER executed, even if previously approved.
+    status : AgentDecisionStatus
+        Current lifecycle status (default PENDING_APPROVAL).
+    """
+    decision_id: str = field(default_factory=lambda: str(__import__("uuid").uuid4())[:12])
+    agent_id: str = ""
+    decision_type: AgentDecisionType = AgentDecisionType.CUSTOM
+    payload: dict = field(default_factory=dict)
+    requires_approval: bool = True
+    confidence: float = float("nan")
+    evidence: str = ""
+    expires_at: str = ""
+    status: AgentDecisionStatus = AgentDecisionStatus.PENDING_APPROVAL
+    created_at: str = field(
+        default_factory=lambda: __import__("datetime").datetime.now(
+            __import__("datetime").timezone.utc
+        ).isoformat()
+    )
+    approved_by: str = ""
+    approved_at: str = ""
+    rejection_reason: str = ""
+    execution_result: str = ""
+
+    def is_expired(self) -> bool:
+        """Return True if this decision has passed its TTL."""
+        if not self.expires_at:
+            return False
+        try:
+            from datetime import datetime, timezone
+            exp = datetime.fromisoformat(self.expires_at)
+            now = datetime.now(tz=timezone.utc)
+            if exp.tzinfo is None:
+                exp = exp.replace(tzinfo=timezone.utc)
+            return now > exp
+        except Exception:
+            return False
+
+    def is_actionable(self) -> bool:
+        """Return True if this decision may be acted upon right now."""
+        return (
+            self.status in (AgentDecisionStatus.APPROVED, AgentDecisionStatus.AUTO_APPROVED)
+            and not self.is_expired()
+        )

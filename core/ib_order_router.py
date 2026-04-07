@@ -41,7 +41,10 @@ core/ib_order_router.py — IB Order Router (HF-grade Skeleton)
 
 from __future__ import annotations
 
+import uuid
 from dataclasses import dataclass, field
+from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, TYPE_CHECKING, Mapping, Tuple
 
 import logging
@@ -206,6 +209,10 @@ class PairOrderRequest:
     account: Optional[str] = None
     allow_partial: bool = True
     tags: Dict[str, Any] = field(default_factory=dict)
+    intent_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    # intent_id is the idempotency anchor: client_order_id = UUID5(intent_id + leg_index)
+    # The same intent_id submitted twice will produce the same client_order_ids,
+    # allowing brokers to reject duplicates on restart.
 
 
 @dataclass
@@ -399,6 +406,31 @@ class IBOrderRouter:
         מחזיר PairOrderResult עם הצלחה/שגיאה ומזהי Orders.
         """
         risk_params = risk_params or {}
+
+        # Pre-execution audit: write intent BEFORE submission.
+        # If the process crashes between this write and the broker acknowledgement,
+        # the startup reconciliation can detect all unresolved intents.
+        _audit_ts = datetime.utcnow().isoformat()
+        _audit_entry = {
+            "intent_id": request.intent_id,
+            "pair_id": request.pair_id,
+            "submitted": False,
+            "ts_utc": _audit_ts,
+            "legs": [
+                {"symbol": leg.symbol, "action": leg.action, "qty": leg.quantity}
+                for leg in request.legs
+            ],
+            "tags": request.tags,
+        }
+        try:
+            _audit_dir = Path(__file__).resolve().parent.parent / "logs" / "execution_audit"
+            _audit_dir.mkdir(parents=True, exist_ok=True)
+            _audit_path = _audit_dir / f"{request.intent_id}.json"
+            import json as _json
+            _audit_path.write_text(_json.dumps(_audit_entry, default=str), encoding="utf-8")
+        except Exception as _ae:
+            logger.warning("Pre-execution audit write failed: %s — continuing", _ae)
+
         ok, reason = pre_trade_check(
             request,
             max_notional_per_leg=risk_params.get("max_notional_per_leg"),
@@ -422,10 +454,20 @@ class IBOrderRouter:
         order_ids: List[int] = []
         details: Dict[str, Any] = {"pair_id": request.pair_id, "legs": []}
 
-        for leg in request.legs:
+        for i, leg in enumerate(request.legs):
             try:
                 contract = self._make_contract(leg)
                 order = self._make_order(leg, request)
+                # Idempotency key: deterministic UUID5 from intent_id + leg index.
+                # Same intent submitted twice → same client_order_id → broker rejects duplicate.
+                _leg_idempotency_key = str(uuid.uuid5(
+                    uuid.NAMESPACE_OID,
+                    f"{request.intent_id}:{i}",
+                ))
+                try:
+                    order.orderRef = _leg_idempotency_key[:40]  # type: ignore[attr-defined]
+                except Exception:
+                    pass  # orderRef may not be settable on all order types
                 if request.account:
                     try:
                         order.account = request.account  # type: ignore[attr-defined]
@@ -465,12 +507,23 @@ class IBOrderRouter:
                     )
 
         success = len(order_ids) > 0
-        return PairOrderResult(
+        _result = PairOrderResult(
             success=success,
             order_ids=order_ids,
             error=None if success else "No orders placed",
             details=details,
         )
+
+        # Update audit record: mark as submitted
+        try:
+            _audit_entry["submitted"] = success
+            _audit_entry["order_ids"] = order_ids
+            _audit_entry["submitted_at"] = datetime.utcnow().isoformat()
+            _audit_path.write_text(_json.dumps(_audit_entry, default=str), encoding="utf-8")
+        except Exception:
+            pass  # Non-fatal: startup reconciliation handles missing updates
+
+        return _result
 
     def sync_positions_from_ib(self) -> List[Dict[str, Any]]:
         """
@@ -585,3 +638,274 @@ class IBOrderRouter:
         except Exception as e:
             logger.exception("cancel_all_open_orders failed: %s", e)
             return False
+
+
+def rescue_naked_leg(
+    router: IBOrderRouter,
+    symbol: str,
+    quantity: float,
+    action: str,
+    *,
+    pair_id: str = "UNKNOWN",
+    rescue_reason: str = "leg_rescue",
+    account: Optional[str] = None,
+) -> PairOrderResult:
+    """
+    Emergency market order to close a naked position from a failed paired trade.
+
+    Called when leg X has filled but leg Y has been rejected/expired/failed,
+    leaving an unhedged position. Submits a market order opposite to the filled leg
+    to restore a flat position.
+
+    Parameters
+    ----------
+    router : IBOrderRouter
+        Active router with live IB connection.
+    symbol : str
+        Symbol of the naked leg (the leg that filled).
+    quantity : float
+        Absolute quantity of the naked position to close.
+    action : str
+        Closing action: "SELL" to close a long, "BUY" to close a short.
+    pair_id : str
+        Original pair identifier for audit trail.
+    rescue_reason : str
+        Human-readable reason for the rescue (logged and tagged).
+    account : Optional[str]
+        IB account to use (None = default).
+
+    Returns
+    -------
+    PairOrderResult with success=True if the rescue order was submitted.
+
+    Notes
+    -----
+    This function MUST be called immediately when a leg failure is detected.
+    It logs at ERROR level because a naked position is always an error condition.
+    Never silently suppresses failure — if the rescue itself fails, it logs CRITICAL.
+    """
+    logger.error(
+        "NAKED POSITION RESCUE initiated: pair=%s symbol=%s qty=%.2f action=%s reason=%s",
+        pair_id, symbol, quantity, action, rescue_reason,
+    )
+
+    rescue_leg = PairOrderLeg(
+        symbol=symbol,
+        action=action,
+        quantity=abs(quantity),
+        sec_type="STK",
+        currency="USD",
+        exchange="SMART",
+    )
+    rescue_request = PairOrderRequest(
+        pair_id=f"RESCUE:{pair_id}",
+        legs=[rescue_leg],
+        order_type="MKT",      # Market order — speed over price, position must close NOW
+        time_in_force="DAY",
+        account=account,
+        allow_partial=False,   # All-or-nothing rescue — partial close leaves residual risk
+        tags={
+            "rescue": True,
+            "rescue_reason": rescue_reason,
+            "original_pair_id": pair_id,
+        },
+    )
+
+    result = router.submit_pair_order(rescue_request)
+
+    if result.success:
+        logger.error(
+            "NAKED POSITION RESCUE submitted successfully: pair=%s symbol=%s order_ids=%s",
+            pair_id, symbol, result.order_ids,
+        )
+    else:
+        logger.critical(
+            "NAKED POSITION RESCUE FAILED: pair=%s symbol=%s error=%s — "
+            "MANUAL INTERVENTION REQUIRED IMMEDIATELY",
+            pair_id, symbol, result.error,
+        )
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# LegCoordinator — paired leg submission with state tracking
+# ---------------------------------------------------------------------------
+
+class LegCoordinator:
+    """
+    Coordinates submission of a paired trade (two legs) with full state tracking.
+
+    Solves the core problem of sequential pair execution:
+    - Leg X fills successfully → Leg Y rejected → naked position
+    - Solution: track leg sync state, trigger LegRescue automatically
+
+    State machine: LegSyncState (defined in core/contracts.py)
+
+    Parameters
+    ----------
+    router : IBOrderRouter
+        Active order router for broker submission.
+    spread_warn_threshold : float
+        If spread (bid-ask on either leg) exceeds this basis points threshold
+        during execution, emit a warning. Default: 50 bps.
+    """
+
+    def __init__(
+        self,
+        router: IBOrderRouter,
+        spread_warn_threshold: float = 50.0,
+    ):
+        self._router = router
+        self._spread_warn_bps = spread_warn_threshold
+
+    def submit_pair(
+        self,
+        pair_id: str,
+        leg_x: PairOrderLeg,
+        leg_y: PairOrderLeg,
+        *,
+        account: Optional[str] = None,
+        intent_id: Optional[str] = None,
+        tags: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """
+        Submit a two-leg paired trade with automatic rescue on leg failure.
+
+        Protocol:
+        1. Write pre-execution audit (intent_id, BOTH_PENDING)
+        2. Submit leg X
+        3. If X fails → return X_FAILED (clean, no naked position)
+        4. If X succeeds → submit leg Y
+        5. If Y fails → trigger rescue_naked_leg(X) → return Y_FAILED_NAKED
+        6. If both succeed → return BOTH_FILLED
+
+        Parameters
+        ----------
+        pair_id : str
+            Logical pair identifier.
+        leg_x : PairOrderLeg
+            First leg (typically the entry signal direction).
+        leg_y : PairOrderLeg
+            Second leg (the hedge/pairing direction).
+        account : str, optional
+            IB account override.
+        intent_id : str, optional
+            Idempotency anchor. Generated if not provided.
+        tags : dict, optional
+            Additional metadata for the order.
+
+        Returns
+        -------
+        dict with keys:
+            sync_state : str (LegSyncState value)
+            x_result   : PairOrderResult
+            y_result   : PairOrderResult | None
+            rescue_result : PairOrderResult | None
+            success    : bool (True only if BOTH_FILLED)
+        """
+        import uuid as _uuid
+        if intent_id is None:
+            intent_id = str(_uuid.uuid4())
+
+        tags = tags or {}
+        tags["coordinator"] = "LegCoordinator"
+        tags["intent_id"] = intent_id
+
+        output: Dict[str, Any] = {
+            "intent_id": intent_id,
+            "pair_id": pair_id,
+            "sync_state": "both_pending",
+            "x_result": None,
+            "y_result": None,
+            "rescue_result": None,
+            "success": False,
+        }
+
+        logger.info(
+            "LegCoordinator: submitting pair %s (intent_id=%s) X=%s/%s Y=%s/%s",
+            pair_id, intent_id,
+            leg_x.symbol, leg_x.action,
+            leg_y.symbol, leg_y.action,
+        )
+
+        # Step 1: Submit Leg X
+        x_request = PairOrderRequest(
+            pair_id=pair_id,
+            legs=[leg_x],
+            account=account,
+            intent_id=f"{intent_id}:x",
+            tags={**tags, "leg_role": "entry_leg_x"},
+        )
+        output["sync_state"] = "x_submitted"
+        x_result = self._router.submit_pair_order(x_request)
+        output["x_result"] = x_result
+
+        if not x_result.success:
+            # X failed before filling — no naked position, clean failure
+            output["sync_state"] = "x_failed"
+            logger.warning(
+                "LegCoordinator: Leg X failed for %s (intent=%s): %s — pair not entered",
+                pair_id, intent_id, x_result.error,
+            )
+            return output
+
+        # Step 2: Leg X succeeded — submit Leg Y
+        output["sync_state"] = "x_filled_y_pending"
+        logger.info(
+            "LegCoordinator: Leg X filled for %s (order_ids=%s) — submitting Leg Y",
+            pair_id, x_result.order_ids,
+        )
+
+        y_request = PairOrderRequest(
+            pair_id=pair_id,
+            legs=[leg_y],
+            account=account,
+            intent_id=f"{intent_id}:y",
+            tags={**tags, "leg_role": "entry_leg_y"},
+        )
+        output["sync_state"] = "y_submitted"
+        y_result = self._router.submit_pair_order(y_request)
+        output["y_result"] = y_result
+
+        if not y_result.success:
+            # X filled but Y failed — NAKED POSITION — trigger rescue immediately
+            output["sync_state"] = "y_failed_naked"
+            logger.error(
+                "LegCoordinator: NAKED POSITION — Leg Y failed for %s after Leg X filled. "
+                "Triggering rescue for %s (intent=%s).",
+                pair_id, leg_x.symbol, intent_id,
+            )
+
+            # Rescue: close the X position
+            rescue_action = "SELL" if leg_x.action.upper() == "BUY" else "BUY"
+            rescue_result = rescue_naked_leg(
+                router=self._router,
+                symbol=leg_x.symbol,
+                quantity=leg_x.quantity,
+                action=rescue_action,
+                pair_id=pair_id,
+                rescue_reason=f"leg_y_failed: {y_result.error}",
+                account=account,
+            )
+            output["rescue_result"] = rescue_result
+
+            if rescue_result.success:
+                output["sync_state"] = "rescued"
+            else:
+                output["sync_state"] = "rescue_in_progress"  # Manual intervention needed
+                logger.critical(
+                    "LegCoordinator: RESCUE FAILED for %s symbol=%s — MANUAL INTERVENTION REQUIRED",
+                    pair_id, leg_x.symbol,
+                )
+
+            return output
+
+        # Both legs succeeded
+        output["sync_state"] = "both_filled"
+        output["success"] = True
+        logger.info(
+            "LegCoordinator: Both legs filled for %s (X_ids=%s, Y_ids=%s)",
+            pair_id, x_result.order_ids, y_result.order_ids,
+        )
+        return output

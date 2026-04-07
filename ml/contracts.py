@@ -504,6 +504,8 @@ class TrainingRunArtifact:
     test_brier: float = float("nan")
     cv_ic_mean: float = float("nan")
     cv_ic_std: float = float("nan")
+    cv_ic_per_fold: List[float] = field(default_factory=list)   # IC for each CV fold (for robustness)
+    walk_forward_ic_mean: float = float("nan")                   # True walk-forward IC (distinct from CV IC)
     # Feature importance
     top_features: List[str] = field(default_factory=list)
     feature_importances: Dict[str, float] = field(default_factory=dict)
@@ -706,6 +708,7 @@ class ModelMetadata:
     # Training provenance
     train_start: str = ""
     train_end: str = ""
+    trained_until: str = ""   # Latest date for which this model has valid predictions (train_end + label horizon). Inference as_of > trained_until is in-window and prohibited.
     trained_at: str = field(
         default_factory=lambda: datetime.now(tz=timezone.utc).isoformat()
     )
@@ -723,6 +726,9 @@ class ModelMetadata:
     status: ModelStatus = ModelStatus.RESEARCH
     governance_status: GovernanceStatus = GovernanceStatus.PENDING_REVIEW
     promoted_at: str = ""
+    shadow_start: str = ""          # When challenger entered shadow mode (ISO-8601)
+    shadow_end: str = ""            # When shadow period ends (shadow_start + shadow_period_days)
+    shadow_period_days: int = 30    # Minimum shadow period before champion promotion
     retired_at: str = ""
     # Allowed usage
     allowed_consumers: List[str] = field(default_factory=list)

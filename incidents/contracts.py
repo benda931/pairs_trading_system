@@ -66,6 +66,33 @@ class AuditRecordType(str, enum.Enum):
     INCIDENT_CREATED = "INCIDENT_CREATED"
     INCIDENT_UPDATED = "INCIDENT_UPDATED"
     OVERRIDE = "OVERRIDE"
+    # ── Governance layer additions ─────────────────────────────────
+    GOVERNED_ACTION_EXECUTED = "GOVERNED_ACTION_EXECUTED"
+    GOVERNED_ACTION_SUPPRESSED = "GOVERNED_ACTION_SUPPRESSED"
+    GOVERNED_ACTION_VETOED = "GOVERNED_ACTION_VETOED"
+    GOVERNED_ACTION_ADVISORY = "GOVERNED_ACTION_ADVISORY"
+    GOVERNED_ACTION_PENDING = "GOVERNED_ACTION_PENDING"
+    ROLLBACK_EXECUTED = "ROLLBACK_EXECUTED"
+    PRECISION_DEMOTION = "PRECISION_DEMOTION"
+    EMERGENCY_BYPASS_ACTIVATED = "EMERGENCY_BYPASS_ACTIVATED"
+    PATTERN_DETECTED = "PATTERN_DETECTED"
+    SLA_BREACH = "SLA_BREACH"
+
+
+class IncidentTriggerSource(str, enum.Enum):
+    """Records what triggered an IncidentRecord to be opened.
+
+    Enables filtering and postmortem analysis by trigger type.
+    """
+
+    AGENT_ACTION = "agent_action"
+    CIRCUIT_BREAKER = "circuit_breaker"
+    APPROVAL_SLA_BREACH = "approval_sla_breach"
+    PRECISION_DEGRADATION = "precision_degradation"
+    PATTERN_DETECTION = "pattern_detection"
+    EXECUTION_FAILURE = "execution_failure"
+    EMERGENCY_BYPASS = "emergency_bypass"
+    MANUAL = "manual"
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -188,6 +215,11 @@ class IncidentRecord:
     resolution_summary: Optional[str] = None
     postmortem_id: Optional[str] = None
     tags: List[str] = field(default_factory=list)
+    # Governance layer additions
+    trigger_source: Optional[str] = None   # IncidentTriggerSource.value
+    governed_action_id: Optional[str] = None  # GovernedActionRecord.action_id
+    requires_postmortem: bool = False      # True for P0/EMERGENCY_BYPASS incidents
+    postmortem_deadline: Optional[str] = None  # ISO timestamp (24h for P0)
 
 
 # ══════════════════════════════════════════════════════════════════

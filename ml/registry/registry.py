@@ -422,6 +422,160 @@ class MLModelRegistry:
             self._safe_save()
 
     # ------------------------------------------------------------------
+    # Direct status update (governance automation)
+    # ------------------------------------------------------------------
+
+    def update_status(self, model_id: str, new_status: "ModelStatus") -> bool:
+        """
+        Update the status of a model directly.
+
+        Called by:
+        - ModelHealthMonitor._auto_block_model() when drift is CRITICAL
+        - GovernanceEngine.enforce_retirement() when retirement criteria met
+        - Any governance automation that needs to change model lifecycle state
+
+        Unlike promote(), this method does not check PromotionDecision governance rules —
+        it is used for automated governance enforcement (blocking, retirement) where the
+        decision has already been made by a governance component.
+
+        Returns True if successful, False if model not found.
+        """
+        from datetime import datetime, timezone
+        with self._lock:
+            metadata = self._models.get(model_id)
+            if metadata is None:
+                logger.warning("update_status(): model_id %s not found", model_id)
+                return False
+
+            kwargs = {"status": new_status}
+            if new_status == ModelStatus.RETIRED:
+                kwargs["retired_at"] = datetime.now(tz=timezone.utc).isoformat()
+            elif new_status == ModelStatus.CHAMPION:
+                kwargs["promoted_at"] = datetime.now(tz=timezone.utc).isoformat()
+
+            from dataclasses import replace
+            self._models[model_id] = replace(metadata, **kwargs)
+            logger.info(
+                "update_status: model %s %s → %s",
+                model_id, metadata.status.value, new_status.value,
+            )
+
+        if self._storage_path is not None:
+            self._safe_save()
+
+        return True
+
+    def list_all(self) -> List["ModelMetadata"]:
+        """Return all registered models regardless of status or task family."""
+        with self._lock:
+            return list(self._models.values())
+
+    def start_shadow_period(
+        self,
+        model_id: str,
+        shadow_period_days: int = 30,
+    ) -> bool:
+        """
+        Begin a shadow monitoring period for a challenger model.
+
+        During shadow mode, the model scores signals alongside the champion
+        but its scores do NOT influence production decisions. After
+        shadow_period_days, the model becomes eligible for champion promotion
+        via the normal champion/challenger comparison workflow.
+
+        This enforces the minimum 30-day shadow period required before
+        any model can become champion — preventing premature promotions
+        based on short-window performance.
+
+        Parameters
+        ----------
+        model_id : str
+            The challenger model to begin shadow monitoring.
+        shadow_period_days : int
+            How many days to monitor before promotion is allowed.
+
+        Returns
+        -------
+        bool : True if shadow period started successfully.
+        """
+        from datetime import datetime, timezone, timedelta
+        from dataclasses import replace
+
+        with self._lock:
+            metadata = self._models.get(model_id)
+            if metadata is None:
+                logger.warning("start_shadow_period(): model %s not found", model_id)
+                return False
+
+            now = datetime.now(tz=timezone.utc)
+            shadow_end = now + timedelta(days=shadow_period_days)
+
+            updated = replace(
+                metadata,
+                status=ModelStatus.CHALLENGER,
+                shadow_start=now.isoformat(),
+                shadow_end=shadow_end.isoformat(),
+                shadow_period_days=shadow_period_days,
+            )
+            self._models[model_id] = updated
+            logger.info(
+                "Shadow period started for model %s: %d days (ends %s)",
+                model_id, shadow_period_days, shadow_end.date().isoformat(),
+            )
+
+        if self._storage_path is not None:
+            self._safe_save()
+        return True
+
+    def check_shadow_eligibility(self, model_id: str) -> tuple:
+        """
+        Check if a model has completed its shadow period and is eligible for promotion.
+
+        Returns (eligible: bool, reason: str).
+
+        A model is eligible if:
+        1. It has completed the minimum shadow period (shadow_end has passed)
+        2. Its status is CHALLENGER
+        3. Its governance_status is APPROVED or CONDITIONALLY_APPROVED
+        """
+        from datetime import datetime, timezone
+
+        with self._lock:
+            metadata = self._models.get(model_id)
+
+        if metadata is None:
+            return False, f"model {model_id} not found"
+
+        if metadata.status != ModelStatus.CHALLENGER:
+            return False, f"model is {metadata.status.value}, not CHALLENGER"
+
+        if not metadata.shadow_end:
+            return False, "shadow period not started (shadow_end not set)"
+
+        try:
+            shadow_end_dt = datetime.fromisoformat(metadata.shadow_end)
+            if shadow_end_dt.tzinfo is None:
+                shadow_end_dt = shadow_end_dt.replace(tzinfo=timezone.utc)
+            now = datetime.now(tz=timezone.utc)
+
+            if now < shadow_end_dt:
+                remaining = (shadow_end_dt - now).days
+                return False, f"shadow period not complete: {remaining} days remaining"
+        except Exception as exc:
+            return False, f"shadow_end parse error: {exc}"
+
+        from ml.contracts import GovernanceStatus
+        if metadata.governance_status not in (
+            GovernanceStatus.APPROVED,
+            GovernanceStatus.CONDITIONALLY_APPROVED,
+        ):
+            return False, f"governance_status is {metadata.governance_status.value} (need APPROVED)"
+
+        return True, (
+            f"eligible: shadow period complete, governance={metadata.governance_status.value}"
+        )
+
+    # ------------------------------------------------------------------
     # DataFrame view
     # ------------------------------------------------------------------
 

@@ -359,9 +359,10 @@ class KalmanConstructor:
             # Innovation
             y_hat = H @ theta
             innovation = log_x[t] - y_hat
-            S = H @ P_pred @ H + R  # Innovation covariance
+            S = H @ P_pred @ H + R  # Innovation covariance (scalar: H is 1×2, P_pred is 2×2)
 
-            # Kalman gain
+            # Kalman gain: K = P_pred @ H.T / S  (2×1 vector)
+            # H.T == H here since H is a 1-D array; division by scalar S is correct
             K = P_pred @ H / max(S, 1e-12)
 
             # Update

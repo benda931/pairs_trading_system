@@ -30,6 +30,91 @@ from ml.contracts import (
 
 
 # ---------------------------------------------------------------------------
+# Embargo safety check — call before ANY label generation
+# ---------------------------------------------------------------------------
+
+class EmbargoPeriodViolation(Exception):
+    """
+    Raised when label generation would produce future-contaminated labels.
+
+    This exception is deliberately NOT caught by generic except clauses —
+    it must propagate to the caller and halt label generation. A contaminated
+    label series cannot be safely used for model training.
+    """
+    pass
+
+
+def purge_embargo_check(
+    label_name: str,
+    train_end_date: str,
+    dataset_end_date: str,
+    horizon_days: int,
+    embargo_days: int = 5,
+) -> None:
+    """
+    Verify that label generation will not produce future-contaminated labels.
+
+    This check MUST be called before generating any label series. Failure to
+    enforce the embargo buffer is the most common source of backtest contamination
+    in horizon-based labels — labels for the last `horizon_days` require forward
+    prices that extend beyond the dataset, so they silently look into the future.
+
+    Parameters
+    ----------
+    label_name : str
+        Name of the label being generated (for error messages).
+    train_end_date : str
+        ISO date string for the last date in the training set.
+    dataset_end_date : str
+        ISO date string for the last date in the full dataset.
+    horizon_days : int
+        Forward horizon for this label (from LabelDefinition.horizon_days).
+    embargo_days : int
+        Additional buffer beyond the label horizon (default 5 trading days).
+
+    Raises
+    ------
+    EmbargoPeriodViolation
+        If train_end_date + horizon_days + embargo_days > dataset_end_date.
+        This means labels at the end of the training window require prices
+        that are not in the dataset — future contamination is guaranteed.
+
+    Notes
+    -----
+    The required buffer is: horizon_days + embargo_days trading days after train_end.
+    For REVERSION_20D (horizon=20, embargo=5), train_end must be at least 25
+    calendar days before dataset_end.
+    """
+    from datetime import datetime, timedelta
+
+    try:
+        train_end = datetime.fromisoformat(train_end_date)
+        dataset_end = datetime.fromisoformat(dataset_end_date)
+    except (ValueError, TypeError) as exc:
+        raise EmbargoPeriodViolation(
+            f"purge_embargo_check for {label_name!r}: "
+            f"could not parse dates train_end={train_end_date!r}, "
+            f"dataset_end={dataset_end_date!r}: {exc}"
+        )
+
+    required_buffer_days = horizon_days + embargo_days
+    # Use calendar days as a conservative approximation
+    earliest_allowed_train_end = dataset_end - timedelta(days=required_buffer_days)
+
+    if train_end > earliest_allowed_train_end:
+        raise EmbargoPeriodViolation(
+            f"Embargo violation for label {label_name!r}: "
+            f"train_end={train_end_date} is too close to dataset_end={dataset_end_date}. "
+            f"Required buffer: {required_buffer_days} days "
+            f"(horizon={horizon_days} + embargo={embargo_days}). "
+            f"Earliest allowed train_end: {earliest_allowed_train_end.date().isoformat()}. "
+            f"Labels at the tail of the training window would use prices "
+            f"beyond dataset_end — this is future contamination. "
+            f"Either reduce train_end or extend the dataset."
+        )
+
+
+# ---------------------------------------------------------------------------
 # A. Reversion success labels
 # ---------------------------------------------------------------------------
 

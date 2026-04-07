@@ -7,6 +7,10 @@ Thread-safe, in-memory approval engine responsible for:
 - Adjudicating ApprovalRequests based on mode and policy.
 - Maintaining records of decisions, tickets, escalations, and overrides.
 - Exposing a simple metrics API for monitoring.
+- Per-action-type policy function registration (GovernanceRouter integration).
+- SLA breach detection for HUMAN_REQUIRED tickets.
+- Cancellation of pending requests (conflict resolution support).
+- Environment restriction enforcement (LIVE actions use live-only policy fns).
 
 The engine is intentionally stateless with respect to persistence — all
 records live in memory. Production deployments should wrap this class with
@@ -21,8 +25,8 @@ from __future__ import annotations
 
 import threading
 import uuid
-from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from datetime import datetime, timedelta, timezone
+from typing import Any, Callable, Dict, List, Optional
 
 from approvals.contracts import (
     ApprovalDecision,
@@ -99,6 +103,14 @@ class ApprovalEngine:
         self._tickets: Dict[str, HumanReviewTicket] = {}
         self._escalations: Dict[str, EscalationRecord] = {}
         self._overrides: Dict[str, OverrideRecord] = {}
+
+        # Per-action-type policy function registry.
+        # Maps action_type → Callable[[ApprovalRequest], bool]
+        # Each function returns True if the action should be auto-approved.
+        self._policy_fns: Dict[str, Callable[[ApprovalRequest], bool]] = {}
+
+        # Reverse index: action_id → request_id for GovernanceRouter lookups.
+        self._action_id_to_request_id: Dict[str, str] = {}
 
         self._lock = threading.Lock()
 
@@ -231,7 +243,58 @@ class ApprovalEngine:
                 self._decisions[request.request_id] = decision
                 return decision
 
-            # 5. Policy-gated with an engine
+            # 4b. Track action_id → request_id for lookup
+            if request.task_id:
+                self._action_id_to_request_id[request.task_id] = request.request_id
+
+            # 5a. Per-action-type policy function (registered by GovernanceRouter)
+            specific_fn_result = self.check_policy_fn(request)
+            if mode == ApprovalMode.POLICY_GATED and specific_fn_result is not None:
+                if specific_fn_result:
+                    decision = ApprovalDecision(
+                        decision_id=_new_id(),
+                        request_id=request.request_id,
+                        decided_at=_now_iso(),
+                        decided_by="PolicyFn[{}]".format(request.action_type),
+                        status=ApprovalStatus.AUTO_APPROVED,
+                        rationale="Per-action-type policy function approved '{}'.".format(
+                            request.action_type),
+                        conditions=(),
+                        evidence_reviewed=request.evidence_bundle_ids,
+                        override_used=False,
+                    )
+                else:
+                    # Specific policy rejected → escalate to human review
+                    priority = self._derive_priority(request)
+                    ticket = HumanReviewTicket(
+                        ticket_id=_new_id(),
+                        created_at=_now_iso(),
+                        priority=priority,
+                        title="Policy fn rejected — human review: {}".format(
+                            request.action_type),
+                        description=(
+                            "The per-action-type policy function for '{}' returned False.\n"
+                            "Context: {}\nRisk: {}\nEnvironment: {}".format(
+                                request.action_type,
+                                request.context_summary,
+                                request.risk_class,
+                                request.environment,
+                            )
+                        ),
+                        agent_name=request.agent_name,
+                        workflow_run_id=request.workflow_run_id,
+                        approval_request_id=request.request_id,
+                        evidence_bundle_ids=request.evidence_bundle_ids,
+                        due_by=request.expires_at,
+                        assigned_to=None,
+                        status="open",
+                    )
+                    self._tickets[ticket.ticket_id] = ticket
+                    decision = self._create_pending_decision(request)
+                self._decisions[request.request_id] = decision
+                return decision
+
+            # 5b. Policy-gated with an engine
             if mode == ApprovalMode.POLICY_GATED and self._policy_engine is not None:
                 try:
                     result = self._policy_engine.check_policy(
@@ -396,6 +459,82 @@ class ApprovalEngine:
     # QUERY METHODS
     # ──────────────────────────────────────────────────────────────
 
+    def expire_stale_requests(self, max_age_hours: float = 48.0) -> int:
+        """
+        Expire all pending requests older than max_age_hours.
+
+        Requests that sit unreviewed beyond their TTL should auto-expire
+        rather than accumulating forever. Expired requests are set to
+        REJECTED status with a "timed_out" rationale.
+
+        Called automatically from get_pending_requests() to keep the
+        inbox clean.
+
+        Parameters
+        ----------
+        max_age_hours : float
+            Maximum age of a pending request before auto-expiry (default 48h).
+
+        Returns
+        -------
+        int : Number of requests expired.
+        """
+        from datetime import datetime, timezone, timedelta
+
+        cutoff = datetime.now(tz=timezone.utc) - timedelta(hours=max_age_hours)
+        expired_count = 0
+
+        with self._lock:
+            for req_id, req in list(self._requests.items()):
+                decision = self._decisions.get(req_id)
+                if decision is None:
+                    continue
+
+                # Only expire PENDING and ESCALATED requests
+                try:
+                    from approvals.contracts import ApprovalStatus
+                    if decision.status not in (
+                        ApprovalStatus.PENDING,
+                        ApprovalStatus.ESCALATED,
+                    ):
+                        continue
+                except Exception:
+                    continue
+
+                # Check age
+                try:
+                    requested_at_str = getattr(req, "requested_at", None)
+                    if not requested_at_str:
+                        continue
+                    requested_dt = datetime.fromisoformat(requested_at_str)
+                    if requested_dt.tzinfo is None:
+                        requested_dt = requested_dt.replace(tzinfo=timezone.utc)
+                    if requested_dt < cutoff:
+                        # Expire by setting to REJECTED with timeout rationale
+                        # Use dataclasses.replace to create updated frozen object
+                        try:
+                            from dataclasses import replace as _replace
+                            self._decisions[req_id] = _replace(
+                                decision,
+                                status=ApprovalStatus.REJECTED,
+                                rationale="auto_expired: request exceeded TTL without review",
+                                decided_by="system_expiry",
+                                decided_at=datetime.now(tz=timezone.utc).isoformat(),
+                            )
+                            expired_count += 1
+                            logger.info(
+                                "Auto-expired approval request %s (age: %.1fh > %.1fh TTL)",
+                                req_id,
+                                (datetime.now(tz=timezone.utc) - requested_dt).total_seconds() / 3600,
+                                max_age_hours,
+                            )
+                        except Exception as exc:
+                            logger.debug("Could not expire request %s: %s", req_id, exc)
+                except Exception as exc:
+                    logger.debug("expire_stale_requests: date parse failed for %s: %s", req_id, exc)
+
+        return expired_count
+
     def get_pending_requests(self) -> List[ApprovalRequest]:
         """Return all requests whose current decision is PENDING or ESCALATED.
 
@@ -404,6 +543,9 @@ class ApprovalEngine:
         list[ApprovalRequest]
             Unresolved requests, ordered by request submission time.
         """
+        # Auto-expire stale requests before returning the inbox
+        self.expire_stale_requests()
+
         with self._lock:
             pending = []
             for request_id, request in self._requests.items():
@@ -612,6 +754,217 @@ class ApprovalEngine:
                 "override_count": len(self._overrides),
                 "avg_decision_time_seconds": round(avg_decision_time, 2),
             }
+
+    # ──────────────────────────────────────────────────────────────
+    # POLICY FUNCTION REGISTRY
+    # ──────────────────────────────────────────────────────────────
+
+    def register_policy_function(
+        self,
+        action_type: str,
+        policy_fn: Callable[[ApprovalRequest], bool],
+    ) -> None:
+        """Register a per-action-type policy function for POLICY_GATED adjudication.
+
+        The function receives the full `ApprovalRequest` and returns True if the
+        action should be auto-approved, False if it should escalate to human review.
+
+        Policy functions are evaluated during `request_approval()` before falling
+        back to the generic `_policy_engine`. This allows GovernanceRouter to
+        register action-specific evidence-based policy checks.
+
+        Parameters
+        ----------
+        action_type : str
+            E.g. "BLOCK_ENTRY", "DELEVERAGE".
+        policy_fn : Callable[[ApprovalRequest], bool]
+            Should not raise; return False on any uncertainty.
+        """
+        with self._lock:
+            self._policy_fns[action_type] = policy_fn
+
+    def check_policy_fn(self, request: ApprovalRequest) -> Optional[bool]:
+        """Evaluate the registered per-action-type policy function if one exists.
+
+        Returns True (auto-approve), False (escalate), or None (no policy function).
+        """
+        with self._lock:
+            fn = self._policy_fns.get(request.action_type)
+        if fn is None:
+            return None
+        try:
+            return fn(request)
+        except Exception:
+            return False  # Fail-closed: policy exception → escalate to human
+
+    # ──────────────────────────────────────────────────────────────
+    # CANCELLATION
+    # ──────────────────────────────────────────────────────────────
+
+    def cancel_approval(self, request_id: str, reason: str) -> bool:
+        """Cancel a pending approval request.
+
+        Used by GovernanceRouter's ConflictResolver to cancel the losing action
+        when a higher-priority action wins a conflict.
+
+        Parameters
+        ----------
+        request_id : str
+            ID of the ApprovalRequest to cancel.
+        reason : str
+            Cancellation reason (recorded in the decision rationale).
+
+        Returns
+        -------
+        bool
+            True if the request existed and was in a cancellable state (PENDING
+            or ESCALATED). False otherwise.
+        """
+        with self._lock:
+            if request_id not in self._requests:
+                return False
+            existing = self._decisions.get(request_id)
+            if existing and existing.status not in (
+                ApprovalStatus.PENDING, ApprovalStatus.ESCALATED
+            ):
+                return False
+
+            cancelled_decision = ApprovalDecision(
+                decision_id=_new_id(),
+                request_id=request_id,
+                decided_at=_now_iso(),
+                decided_by="ApprovalEngine.cancel_approval",
+                status=ApprovalStatus.REJECTED,
+                rationale="Cancelled by conflict resolution: {}".format(reason),
+                conditions=(),
+                evidence_reviewed=(),
+                override_used=False,
+            )
+            self._decisions[request_id] = cancelled_decision
+
+            # Close the linked ticket if any
+            for ticket_id, ticket in self._tickets.items():
+                if ticket.approval_request_id == request_id and ticket.status == "open":
+                    updated = HumanReviewTicket(
+                        ticket_id=ticket.ticket_id,
+                        created_at=ticket.created_at,
+                        priority=ticket.priority,
+                        title=ticket.title,
+                        description=ticket.description,
+                        agent_name=ticket.agent_name,
+                        workflow_run_id=ticket.workflow_run_id,
+                        approval_request_id=ticket.approval_request_id,
+                        evidence_bundle_ids=ticket.evidence_bundle_ids,
+                        due_by=ticket.due_by,
+                        assigned_to=ticket.assigned_to,
+                        status="closed",
+                        resolution="Cancelled: {}".format(reason),
+                        resolved_at=_now_iso(),
+                    )
+                    self._tickets[ticket_id] = updated
+                    break
+
+        return True
+
+    # ──────────────────────────────────────────────────────────────
+    # LOOKUP BY ACTION ID
+    # ──────────────────────────────────────────────────────────────
+
+    def get_approval_by_action_id(self, action_id: str) -> Optional[ApprovalRequest]:
+        """Return the ApprovalRequest for a given action_id, or None.
+
+        GovernanceRouter uses this to check if an identical action is already
+        pending approval before submitting a duplicate request.
+
+        The lookup relies on `task_id` in ApprovalRequest being set to the
+        action_id by GovernanceRouter when submitting requests.
+        """
+        with self._lock:
+            request_id = self._action_id_to_request_id.get(action_id)
+            if request_id:
+                return self._requests.get(request_id)
+            # Linear fallback scan (O(n) but request volume is low)
+            for req in self._requests.values():
+                if req.task_id == action_id:
+                    self._action_id_to_request_id[action_id] = req.request_id
+                    return req
+        return None
+
+    # ──────────────────────────────────────────────────────────────
+    # SLA BREACH DETECTION
+    # ──────────────────────────────────────────────────────────────
+
+    def get_sla_breached_tickets(
+        self,
+        as_of: Optional[datetime] = None,
+    ) -> List[HumanReviewTicket]:
+        """Return all open tickets whose `due_by` deadline has passed.
+
+        GovernanceRouter calls this periodically to detect SLA breaches and
+        open P2 incidents for unreviewed human-required actions.
+
+        Parameters
+        ----------
+        as_of : datetime, optional
+            The reference time for deadline comparison. Defaults to now.
+
+        Returns
+        -------
+        list[HumanReviewTicket]
+            Open tickets past their deadline, sorted by due_by ascending
+            (most overdue first).
+        """
+        if as_of is None:
+            as_of = datetime.now(timezone.utc)
+
+        with self._lock:
+            tickets = list(self._tickets.values())
+
+        breached = []
+        for ticket in tickets:
+            if ticket.status not in ("open", "in_review"):
+                continue
+            if ticket.due_by is None:
+                continue
+            try:
+                due = datetime.fromisoformat(ticket.due_by)
+                if due.tzinfo is None:
+                    due = due.replace(tzinfo=timezone.utc)
+                if due < as_of:
+                    breached.append(ticket)
+            except (ValueError, TypeError):
+                continue
+
+        return sorted(
+            breached,
+            key=lambda t: t.due_by or "",
+        )
+
+    def check_environment_restriction(
+        self,
+        request: ApprovalRequest,
+        allowed_environments: Optional[List[str]] = None,
+    ) -> bool:
+        """Check whether an ApprovalRequest is allowed in its stated environment.
+
+        Used by GovernanceRouter to block LIVE actions from being evaluated by
+        research-only policy functions. Returns True if the request is allowed,
+        False if it should be rejected due to environment mismatch.
+
+        Parameters
+        ----------
+        request : ApprovalRequest
+        allowed_environments : list[str], optional
+            Environments in which this request type is permitted. If None,
+            no restriction is applied and True is returned.
+
+        Returns
+        -------
+        bool
+        """
+        if allowed_environments is None:
+            return True
+        return request.environment.lower() in [e.lower() for e in allowed_environments]
 
     # ──────────────────────────────────────────────────────────────
     # HELPERS

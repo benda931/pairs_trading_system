@@ -280,11 +280,69 @@ class MLModel:
             self._calibrator.fit_calibration(calib_X_filled, calibration_y)
             self._calibration_applied = True
 
+        # Per-fold IC values for robustness scoring
+        # Time-series CV: 5 expanding-window folds on training data
+        ic_values_per_fold: List[float] = []
+        walk_forward_ic_values: List[float] = []
+        try:
+            n = len(X_fit_filled)
+            if n >= 50:
+                n_splits = 5
+                fold_size = n // (n_splits + 1)
+                for k in range(n_splits):
+                    train_end_k = (k + 1) * fold_size
+                    val_start_k = train_end_k
+                    val_end_k = min(train_end_k + fold_size, n)
+                    if val_end_k - val_start_k < 5:
+                        continue
+                    X_cv_tr = X_fit_filled.values[:train_end_k]
+                    y_cv_tr = y_arr[:train_end_k]
+                    X_cv_val = X_fit_filled.values[val_start_k:val_end_k]
+                    y_cv_val = y_arr[val_start_k:val_end_k]
+                    try:
+                        import copy
+                        cv_est = copy.deepcopy(self._estimator)
+                        cv_est.fit(X_cv_tr, y_cv_tr)
+                        fold_probas = cv_est.predict_proba(X_cv_val)
+                        fold_scores = fold_probas[:, 1] if fold_probas.shape[1] > 1 else fold_probas[:, 0]
+                        fold_ic, _ = stats.spearmanr(fold_scores, y_cv_val)
+                        if not np.isnan(fold_ic):
+                            ic_values_per_fold.append(float(fold_ic))
+                    except Exception as cv_exc:
+                        logger.debug("CV fold %d IC failed: %s", k, cv_exc)
+
+                # Walk-forward IC: rolling-origin OOS (distinct from CV IC)
+                # Each origin trains on all data up to that point, validates on next window.
+                wf_step = max(fold_size, 20)
+                wf_origins = range(fold_size * 2, n - wf_step, wf_step)
+                for origin in wf_origins:
+                    X_wf_tr = X_fit_filled.values[:origin]
+                    y_wf_tr = y_arr[:origin]
+                    X_wf_val = X_fit_filled.values[origin:origin + wf_step]
+                    y_wf_val = y_arr[origin:origin + wf_step]
+                    if len(y_wf_val) < 5:
+                        continue
+                    try:
+                        import copy
+                        wf_est = copy.deepcopy(self._estimator)
+                        wf_est.fit(X_wf_tr, y_wf_tr)
+                        wf_probas = wf_est.predict_proba(X_wf_val)
+                        wf_scores = wf_probas[:, 1] if wf_probas.shape[1] > 1 else wf_probas[:, 0]
+                        wf_ic, _ = stats.spearmanr(wf_scores, y_wf_val)
+                        if not np.isnan(wf_ic):
+                            walk_forward_ic_values.append(float(wf_ic))
+                    except Exception as wf_exc:
+                        logger.debug("Walk-forward origin %d IC failed: %s", origin, wf_exc)
+        except Exception as ic_exc:
+            logger.debug("IC computation skipped: %s", ic_exc)
+
         # Build training artifact
         artifact = self._build_artifact(
             X_fit=X_fit,
             y_fit=y_fit,
             train_end=train_end,
+            ic_values_per_fold=ic_values_per_fold,
+            walk_forward_ic_values=walk_forward_ic_values,
         )
         self._training_artifact = artifact
 
@@ -496,6 +554,8 @@ class MLModel:
         X_fit: pd.DataFrame,
         y_fit: pd.Series,
         train_end: Any,
+        ic_values_per_fold: Optional[List[float]] = None,
+        walk_forward_ic_values: Optional[List[float]] = None,
     ) -> TrainingRunArtifact:
         """Build the TrainingRunArtifact post-fit."""
         feature_hash = hashlib.sha256(
@@ -534,7 +594,17 @@ class MLModel:
             )
             top_features = [k for k, _ in sorted_features[:10]]
 
-        return TrainingRunArtifact(
+        # Aggregate IC metrics from fold lists
+        ic_per_fold: List[float] = ic_values_per_fold or []
+        wf_ic_values: List[float] = walk_forward_ic_values or []
+
+        cv_ic_mean = float(np.mean(ic_per_fold)) if ic_per_fold else float("nan")
+        wf_ic_mean = (
+            float(np.mean([v for v in wf_ic_values if v is not None and v == v]))
+            if wf_ic_values else float("nan")
+        )
+
+        artifact = TrainingRunArtifact(
             run_id=str(uuid.uuid4())[:8],
             model_id=self._model_id,
             task_family=self._task_family.value,
@@ -546,4 +616,16 @@ class MLModel:
             calibration_applied=self._calibration_applied,
             top_features=top_features,
             feature_importances=feature_importances,
+            cv_ic_mean=cv_ic_mean,
         )
+
+        # Per-fold IC values for robustness scoring
+        # Required by governance engine to compute real robustness_score
+        artifact.cv_ic_per_fold = ic_per_fold  # list[float] from CV
+
+        # Walk-forward IC: rolling-origin OOS (distinct from CV IC)
+        # This is a genuine sequential test simulating production deployment order.
+        if wf_ic_values:
+            artifact.walk_forward_ic_mean = wf_ic_mean
+
+        return artifact

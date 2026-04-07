@@ -194,6 +194,11 @@ class SqlStore:
             except Exception as e:
                 logger.warning("Failed to ensure prices schema: %s", e)
 
+            # Environment schema separation: each environment uses its own DuckDB schema.
+            # This prevents queries without WHERE env='...' from mixing environments.
+            # live.* tables are physically separate from paper.* and research.* tables.
+            self._init_env_schemas()
+
             # אינדקסים בסיסיים לטבלאות כבדות (HF-grade)
             try:
                 existing_tables = set(self.list_tables())
@@ -258,7 +263,25 @@ class SqlStore:
         else:
             logger.info("SqlStore in read_only=True — skipping schema ensure/_migrate calls.")
 
+    def _init_env_schemas(self) -> None:
+        """
+        Create environment-specific DuckDB schemas if they do not exist.
 
+        After this call, tables can be created in paper.*, live.*, research.*,
+        and shadow.* schemas. A query on live.position_snapshots cannot
+        accidentally return paper positions — they are in different schemas.
+
+        This is a one-time idempotent operation.
+        """
+        schemas = ["paper", "live", "research", "shadow", "governance"]
+        try:
+            with self.engine.connect() as conn:
+                for schema in schemas:
+                    conn.execute(text(f'CREATE SCHEMA IF NOT EXISTS "{schema}"'))
+                conn.commit()
+            logger.debug("Environment schemas initialized: %s", schemas)
+        except Exception as exc:
+            logger.warning("_init_env_schemas failed (non-fatal): %s", exc)
 
     # ------------------------------------------------------------------
     # Factory מ-App settings (חיבור לדשבורד / AppContext)
@@ -1041,12 +1064,114 @@ class SqlStore:
         """
         מוסיף עמודות ts_utc/run_id/section/env ל-DataFrame.
         """
+        # NOTE: env column is kept for backward compatibility.
+        # New tables should use the dedicated schema (paper.*, live.*, etc.)
+        # via _upsert(df, table, schema=env) rather than mixing environments in one table.
         out = df.copy()
         out["ts_utc"] = _now_utc_iso()
         out["run_id"] = run_id
         out["section"] = section
         out["env"] = env
         return out
+
+    # ------------------------------------------------------------------
+    # Upsert helper — use instead of if_exists='append' for all new writes
+    # ------------------------------------------------------------------
+
+    def _upsert(
+        self,
+        df: "pd.DataFrame",
+        table: str,
+        conflict_columns: list,
+        schema: str = "main",
+    ) -> int:
+        """
+        Insert rows into `table`, replacing any row with matching `conflict_columns`.
+
+        Uses DuckDB's INSERT OR REPLACE semantics, which is equivalent to:
+          DELETE existing row WHERE conflict_columns match, then INSERT new row.
+
+        This method MUST be used for all tables that have business-key uniqueness
+        requirements. The universal `if_exists='append'` pattern creates duplicates
+        on every restart/retry — this method prevents that.
+
+        Parameters
+        ----------
+        df : DataFrame
+            Rows to upsert. Must contain all conflict_columns.
+        table : str
+            Target table name (will be created if it does not exist).
+        conflict_columns : list[str]
+            Column(s) that define uniqueness. On conflict, the existing row
+            is replaced by the new row.
+        schema : str
+            DuckDB schema name (default "main").
+
+        Returns
+        -------
+        int : Number of rows written.
+
+        Notes
+        -----
+        The table must already have a UNIQUE constraint on conflict_columns,
+        or this method creates it on first call via _ensure_unique_constraint().
+        """
+        import pandas as pd
+        if df is None or (hasattr(df, "empty") and df.empty):
+            return 0
+
+        try:
+            full_table = f"{schema}.{table}" if schema != "main" else table
+            self._ensure_unique_constraint(table, conflict_columns, schema)
+
+            with self.engine.connect() as conn:
+                # INSERT OR REPLACE: on conflict, delete + reinsert
+                placeholders = ", ".join(["?" for _ in df.columns])
+                col_names = ", ".join([f'"{c}"' for c in df.columns])
+                sql = (
+                    f'INSERT OR REPLACE INTO "{full_table}" ({col_names}) '
+                    f'VALUES ({placeholders})'
+                )
+                rows = [tuple(r) for r in df.itertuples(index=False, name=None)]
+                conn.executemany(sql, rows)
+                conn.commit()
+            return len(df)
+        except Exception as exc:
+            logger.warning("_upsert failed for table %s: %s — falling back to append", table, exc)
+            try:
+                df.to_sql(table, self.engine, if_exists="append", index=False)
+                return len(df)
+            except Exception as exc2:
+                logger.error("_upsert fallback also failed for table %s: %s", table, exc2)
+                return 0
+
+    def _ensure_unique_constraint(
+        self,
+        table: str,
+        conflict_columns: list,
+        schema: str = "main",
+    ) -> None:
+        """
+        Ensure a UNIQUE constraint exists on conflict_columns for the given table.
+
+        Creates the constraint (as a unique index) if it does not exist.
+        No-ops if the constraint is already present or the table does not exist.
+        """
+        try:
+            idx_name = f"uq_{table}_{'_'.join(conflict_columns)}"
+            col_list = ", ".join([f'"{c}"' for c in conflict_columns])
+            full_table = f"{schema}.{table}" if schema != "main" else table
+            with self.engine.connect() as conn:
+                conn.execute(
+                    text(
+                        f'CREATE UNIQUE INDEX IF NOT EXISTS "{idx_name}" '
+                        f'ON "{full_table}" ({col_list})'
+                    )
+                )
+                conn.commit()
+        except Exception as exc:
+            # Non-fatal: constraint may already exist or table may not exist yet
+            logger.debug("_ensure_unique_constraint for %s.%s: %s", table, conflict_columns, exc)
 
     def raw_query(self, sql: str, params: Optional[Dict[str, Any]] = None) -> pd.DataFrame:
         """
@@ -1256,12 +1381,7 @@ class SqlStore:
             env=env or self.default_env,
         )
 
-        df.to_sql(
-            tbl,
-            self.engine,
-            if_exists=if_exists,
-            index=False,
-        )
+        self._upsert(df, tbl, conflict_columns=["pair_id", "ts_utc", "run_id"])
         logger.info("Saved %d signal rows into table '%s'", len(df), tbl)
 
     def save_signals_summary(
@@ -2386,13 +2506,82 @@ class SqlStore:
             env=env or self.default_env,
         )
 
-        df.to_sql(
-            tbl,
-            self.engine,
-            if_exists=if_exists,
-            index=False,
-        )
+        self._upsert(df, tbl, conflict_columns=["run_id"])
         logger.info("Saved experiment_run '%s' into table '%s'", experiment_name, tbl)
+
+    # ------------------------------------------------------------------
+    # Pipeline Run Manifests
+    # ------------------------------------------------------------------
+
+    def save_run_manifest(
+        self,
+        run_id: str,
+        config_hash: str,
+        stage_timings: dict,
+        stage_errors: dict,
+        artifact_dir: str = "",
+        git_commit: str = "",
+        python_env_hash: str = "",
+        status: str = "completed",
+        notes: str = "",
+    ) -> None:
+        """
+        Persist a pipeline run manifest to DuckDB.
+
+        Creates a queryable lineage record that agents and the dashboard can read
+        to determine: when was the last successful run, which stages completed,
+        which stages had errors.
+
+        This enables:
+        - Dashboard status bar: "Last run: 47m ago, all stages OK"
+        - Health check agent: "Pipeline has not completed in >2h"
+        - Morning brief: "Yesterday's run failed at stage 'correlation'"
+
+        Parameters
+        ----------
+        run_id : str
+            UUID for this pipeline run (from RunContext or uuid4).
+        config_hash : str
+            SHA-256 of the pipeline configuration (for reproducibility).
+        stage_timings : dict
+            {stage_name: duration_seconds} for each completed stage.
+        stage_errors : dict
+            {stage_name: error_message} for any failed stages.
+        artifact_dir : str
+            Path to the artifact directory for this run.
+        git_commit : str
+            Git commit hash at time of run (for reproducibility).
+        python_env_hash : str
+            Hash of requirements/environment at time of run.
+        status : str
+            Overall run status: "completed", "partial", "failed".
+        notes : str
+            Free-text notes.
+        """
+        import pandas as pd
+        import json
+        from datetime import datetime, timezone
+
+        try:
+            row = {
+                "run_id": run_id,
+                "config_hash": config_hash,
+                "git_commit": git_commit,
+                "python_env_hash": python_env_hash,
+                "status": status,
+                "n_stages_completed": len([v for v in stage_timings.values() if v is not None]),
+                "n_stages_failed": len(stage_errors),
+                "stage_timings_json": json.dumps(stage_timings, default=str),
+                "stage_errors_json": json.dumps(stage_errors, default=str),
+                "artifact_dir": artifact_dir,
+                "notes": notes,
+                "ts_utc": datetime.now(tz=timezone.utc).isoformat(),
+            }
+            df = pd.DataFrame([row])
+            self._upsert(df, "pipeline_run_manifests", conflict_columns=["run_id"])
+            logger.debug("Saved run manifest for run_id=%s (status=%s)", run_id, status)
+        except Exception as exc:
+            logger.warning("save_run_manifest failed for run_id=%s: %s", run_id, exc)
 
     # ------------------------------------------------------------------
     # Context Snapshots (AppContext / RunContext)
@@ -2449,12 +2638,7 @@ class SqlStore:
             env=env or self.default_env,
         )
 
-        df.to_sql(
-            tbl,
-            self.engine,
-            if_exists=if_exists,
-            index=False,
-        )
+        self._upsert(df, tbl, conflict_columns=["pair_id", "ts_utc"])
         logger.info("Saved context snapshot (run_id=%s) into table '%s'", run_id, tbl)
 
     # ------------------------------------------------------------------

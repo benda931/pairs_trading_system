@@ -131,6 +131,18 @@ class RankingConfig:
     # Signal strength: entry z threshold (above this → score=1.0)
     z_score_saturation: float = 3.0
 
+    def __post_init__(self) -> None:
+        # Hard governance cap: ML can influence at most 30% of composite score.
+        # Prevents misconfiguration from giving ML outsized control.
+        MAX_ML_BLEND = 0.30
+        if self.ml_blend_fraction > MAX_ML_BLEND:
+            import logging as _logging
+            _logging.getLogger("portfolio.ranking").warning(
+                "ml_blend_fraction=%.2f exceeds cap %.2f — clamped",
+                self.ml_blend_fraction, MAX_ML_BLEND,
+            )
+            self.ml_blend_fraction = MAX_ML_BLEND
+
 
 # ── Helpers ───────────────────────────────────────────────────────
 
@@ -395,17 +407,52 @@ class OpportunityRanker:
 
         # ── ML overlay ────────────────────────────────────────────
         if cfg.ml_enabled and self._ml_hook is not None:
-            for opp in opportunities:
-                try:
-                    ml_score = float(self._ml_hook.score(opp))
-                    ml_score = max(0.0, min(1.0, ml_score))
-                    opp.ml_ranking_score = ml_score
-                    opp.ml_model_id = self._ml_hook.model_id
-                    # Blend ML score into composite
-                    blend = cfg.ml_blend_fraction
-                    opp.composite_score = (1 - blend) * opp.composite_score + blend * ml_score
-                except Exception as exc:
-                    logger.warning("ML hook failed for %s: %s", opp.pair_id.label, exc)
+            # Governance: only blend if model has champion status
+            # (hooks that don't expose model_status are treated as non-champion)
+            try:
+                from ml.contracts import ModelStatus
+                hook_status = getattr(self._ml_hook, "model_status", None)
+                ml_governed = hook_status == ModelStatus.CHAMPION
+            except Exception:
+                ml_governed = False
+
+            if not ml_governed:
+                logger.warning(
+                    "ML hook for ranking skipped: model_status is not CHAMPION "
+                    "(model_id=%s). Set model to CHAMPION in the ML registry to enable blending.",
+                    getattr(self._ml_hook, "model_id", "unknown"),
+                )
+            else:
+                # Hard cap: blend fraction must not exceed MAX_ML_BLEND
+                MAX_ML_BLEND = 0.30
+                blend = min(float(cfg.ml_blend_fraction), MAX_ML_BLEND)
+                if blend != cfg.ml_blend_fraction:
+                    logger.warning(
+                        "ml_blend_fraction=%.2f capped to %.2f (MAX_ML_BLEND)",
+                        cfg.ml_blend_fraction,
+                        MAX_ML_BLEND,
+                    )
+
+                for opp in opportunities:
+                    try:
+                        ml_score = float(self._ml_hook.score(opp))
+                        ml_score = max(0.0, min(1.0, ml_score))
+                        opp.ml_ranking_score = ml_score
+                        opp.ml_model_id = getattr(self._ml_hook, "model_id", "")
+
+                        # Skip blending if ML hook returned its neutral fallback (0.5).
+                        # Blending 0.5 into all composites compresses signal dispersion
+                        # without adding information — the correct behavior is no blend.
+                        if abs(ml_score - 0.5) < 1e-9:
+                            logger.debug(
+                                "ML score is neutral (0.5) for %s — skipping blend to preserve signal dispersion",
+                                opp.pair_id.label,
+                            )
+                            continue
+
+                        opp.composite_score = (1 - blend) * opp.composite_score + blend * ml_score
+                    except Exception as exc:
+                        logger.warning("ML hook failed for %s: %s", opp.pair_id.label, exc)
 
         # ── Sort and assign ranks ─────────────────────────────────
         # Blocked opportunities go to bottom; within each group, sort by composite desc

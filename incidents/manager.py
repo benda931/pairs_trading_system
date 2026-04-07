@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import threading
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 from incidents.contracts import (
@@ -32,6 +32,7 @@ from incidents.contracts import (
     IncidentRecord,
     IncidentSeverity,
     IncidentStatus,
+    IncidentTriggerSource,
     PostmortemArtifact,
     RemediationPlan,
     RunbookReference,
@@ -58,7 +59,7 @@ def _new_id() -> str:
     return str(uuid.uuid4())
 
 
-_AUDIT_RECORD_CAP = 50_000
+_AUDIT_RECORD_CAP = 250_000  # Increased from 50K for governed action volume
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -649,6 +650,160 @@ class IncidentManager:
         }
 
     # ──────────────────────────────────────────────────────────────
+    # GOVERNANCE INTEGRATION
+    # ──────────────────────────────────────────────────────────────
+
+    def open_from_governed_action(
+        self,
+        record,  # GovernedActionRecord — typed loosely to avoid circular import
+        trigger_source: str = IncidentTriggerSource.AGENT_ACTION.value,
+    ) -> IncidentRecord:
+        """Convenience factory: open an IncidentRecord from a GovernedActionRecord.
+
+        Extracts all relevant fields from the governance record and creates a
+        properly-structured incident. This is the canonical way for GovernanceRouter
+        to open incidents — it avoids the boilerplate of calling `create_incident()`
+        with raw kwargs at every call site.
+
+        Also sets `requires_postmortem=True` and `postmortem_deadline` for P0
+        incidents and emergency bypasses.
+
+        Parameters
+        ----------
+        record : GovernedActionRecord
+            The governance record for the executed action.
+        trigger_source : str
+            IncidentTriggerSource value string. Defaults to "agent_action".
+
+        Returns
+        -------
+        IncidentRecord
+        """
+        from incidents.contracts import IncidentSeverity
+
+        # Map governance tier / emergency bypass to severity
+        severity_str = getattr(record, "incident_severity", None)
+        if severity_str is None:
+            # Determine from override_record_id (emergency bypass → P0)
+            if getattr(record, "override_record_id", None):
+                severity_str = "P0"
+            else:
+                severity_str = "P2"
+
+        sev_map = {
+            "P0": IncidentSeverity.P0_CRITICAL,
+            "P1": IncidentSeverity.P1_HIGH,
+            "P2": IncidentSeverity.P2_MEDIUM,
+            "P3": IncidentSeverity.P3_LOW,
+            "P4": IncidentSeverity.P4_INFO,
+        }
+        severity = sev_map.get(severity_str.upper(), IncidentSeverity.P2_MEDIUM)
+
+        is_emergency_bypass = bool(getattr(record, "override_record_id", None))
+        requires_postmortem = (
+            severity == IncidentSeverity.P0_CRITICAL or is_emergency_bypass
+        )
+
+        now = _now_iso()
+        postmortem_deadline = None
+        if requires_postmortem:
+            deadline_dt = datetime.now(timezone.utc) + timedelta(hours=24)
+            postmortem_deadline = deadline_dt.isoformat()
+
+        title = "{} in {} ({})".format(
+            getattr(record, "action_type", "UNKNOWN"),
+            getattr(record, "environment", "unknown"),
+            "EMERGENCY_BYPASS" if is_emergency_bypass else "executed",
+        )
+
+        description = (
+            "Governed action '{}' executed by agent '{}' in {} environment.\n"
+            "Governance tier: {}.\n"
+            "Trigger source: {}.\n"
+            "Executed: {}. Error: {}.".format(
+                getattr(record, "action_type", "UNKNOWN"),
+                getattr(record, "source_agent", "unknown"),
+                getattr(record, "environment", "unknown"),
+                getattr(record, "governance_tier", "unknown"),
+                trigger_source,
+                getattr(record, "executed", False),
+                getattr(record, "execution_error", None) or "none",
+            )
+        )
+
+        tags = [
+            getattr(record, "action_type", ""),
+            str(getattr(record, "environment", "")),
+            str(getattr(record, "governance_tier", "")),
+            trigger_source,
+        ]
+        if is_emergency_bypass:
+            tags.append("emergency_bypass")
+        if requires_postmortem:
+            tags.append("requires_postmortem")
+
+        incident = self.create_incident(
+            title=title,
+            description=description,
+            severity=severity,
+            detected_by="governance_router",
+            affected_components=["agent_feedback", "governance_router"],
+            evidence_bundle_ids=[getattr(record, "action_id", "")],
+            tags=[t for t in tags if t],
+        )
+
+        # Populate governance-specific fields
+        incident.trigger_source = trigger_source
+        incident.governed_action_id = getattr(record, "action_id", None)
+        incident.requires_postmortem = requires_postmortem
+        incident.postmortem_deadline = postmortem_deadline
+
+        # Auto-link governance runbook
+        if "governance_response" in self._runbooks:
+            with self._lock:
+                if "governance_response" not in incident.runbook_refs:
+                    incident.runbook_refs.append("governance_response")
+
+        if is_emergency_bypass and "kill_switch_triggered" in self._runbooks:
+            with self._lock:
+                if "kill_switch_triggered" not in incident.runbook_refs:
+                    incident.runbook_refs.append("kill_switch_triggered")
+
+        return incident
+
+    def link_governed_action(
+        self,
+        incident_id: str,
+        action_id: str,
+    ) -> None:
+        """Add a bidirectional link between an incident and a GovernedActionRecord.
+
+        Sets `incident.governed_action_id` and appends a timeline event.
+        Useful when the incident is created before the action is fully executed,
+        or when multiple actions should be linked to the same incident.
+
+        Parameters
+        ----------
+        incident_id : str
+        action_id : str
+            GovernedActionRecord.action_id
+
+        Raises
+        ------
+        KeyError
+            If incident_id does not exist.
+        """
+        with self._lock:
+            incident = self._get_incident_unsafe(incident_id)
+            incident.governed_action_id = action_id
+            incident.timeline.append({
+                "ts": _now_iso(),
+                "actor": "governance_router",
+                "action": "GOVERNED_ACTION_LINKED",
+                "notes": "Linked to governed action '{}'.".format(action_id),
+            })
+
+    # ──────────────────────────────────────────────────────────────
     # INTERNAL
     # ──────────────────────────────────────────────────────────────
 
@@ -866,6 +1021,43 @@ class IncidentManager:
                 last_reviewed=today,
             ),
         ]
+
+        # Governance response runbook (Phase 1 addition)
+        runbooks.append(RunbookReference(
+            runbook_id="governance_response",
+            title="Governed Agent Action — Response Protocol",
+            description=(
+                "Response procedure for incidents triggered by the GovernanceRouter: "
+                "executed actions, emergency bypasses, SLA breaches, and precision demotions."
+            ),
+            applicable_severity=(
+                IncidentSeverity.P0_CRITICAL.value,
+                IncidentSeverity.P1_HIGH.value,
+                IncidentSeverity.P2_MEDIUM.value,
+                IncidentSeverity.P3_LOW.value,
+            ),
+            applicable_components=("agent_feedback", "governance_router", "approvals"),
+            steps=(
+                "1. Identify the GovernedActionRecord: check incident.governed_action_id "
+                "   and retrieve from GovernanceRouter audit ledger.",
+                "2. Review action_type, governance_tier, and evidence_snapshot.",
+                "3. If EMERGENCY_BYPASS: verify override_record_id is present; "
+                "   confirm circuit-breaker trigger was valid; schedule postmortem within 24h.",
+                "4. If EXECUTION_FAILURE: check execution_error; determine root cause; "
+                "   assess whether rollback is needed (check rollback_handle_id and deadline).",
+                "5. If PRECISION_DEMOTION: review ActionPrecisionMetrics for the affected "
+                "   action type; do NOT reset demotion without PM sign-off and justification.",
+                "6. If SLA_BREACH: check ApprovalEngine.get_sla_breached_tickets(); "
+                "   escalate pending tickets; review whether HUMAN_REQUIRED tier is "
+                "   correctly calibrated for the approval capacity.",
+                "7. To execute rollback: call GovernanceRouter.rollback(handle_id, rollback_fn) "
+                "   with an appropriate state-restore function.",
+                "8. Document resolution in incident timeline and close.",
+            ),
+            url=None,
+            version="1.0",
+            last_reviewed=today,
+        ))
 
         for runbook in runbooks:
             self._runbooks[runbook.runbook_id] = runbook

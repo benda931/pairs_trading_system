@@ -43,6 +43,98 @@ PriceLoaderFn = Callable[[str, date, date], pd.DataFrame]
 PairLegsLoaderFn = Callable[[Any, date, date], Tuple[pd.Series, pd.Series, str]]  # (s1, s2, label)
 
 
+# ---------------------------------------------------------------------------
+# Signal Funnel Snapshot — tracks attrition at each pipeline stage
+# ---------------------------------------------------------------------------
+
+@dataclass
+class SignalFunnelSnapshot:
+    """
+    Counts pairs surviving each filter stage in the signal pipeline.
+
+    This snapshot makes alpha leakage visible at every stage:
+    - A large drop at 'post_regime' means regime is the binding constraint
+    - A large drop at 'post_quality' means signal quality is the binding constraint
+    - A large drop at 'post_risk' means risk limits are the binding constraint
+
+    Generate this in SignalsEngine.compute() and store in DashboardSnapshot.
+    Both the dashboard (Signal Funnel waterfall chart) and agents (bottleneck
+    diagnosis) consume this snapshot.
+
+    Usage
+    -----
+        funnel = SignalFunnelSnapshot(
+            universe_count=len(all_pairs),
+            post_validation=len(validated_pairs),
+            post_regime=len(regime_filtered),
+            post_signal=len(signal_generated),
+            post_quality=len(quality_passed),
+            post_risk=len(risk_passed),
+            post_pretrade=len(pretrade_passed),
+            tradable_now=len(final_signals),
+            computed_at=datetime.utcnow().isoformat(),
+        )
+    """
+    universe_count: int = 0       # All pairs in universe
+    post_validation: int = 0      # After cointegration/spread validity check
+    post_regime: int = 0          # After regime filter (only trade in suitable regimes)
+    post_signal: int = 0          # After signal generation (z-score beyond threshold)
+    post_quality: int = 0         # After quality grade filter (grade >= minimum)
+    post_risk: int = 0            # After risk limit check (position limits, VaR budget)
+    post_pretrade: int = 0        # After pre-trade checks (margin, liquidity, spread cost)
+    tradable_now: int = 0         # Final count: can be sent to execution today
+
+    computed_at: str = field(
+        default_factory=lambda: __import__("datetime").datetime.utcnow().isoformat()
+    )
+    run_id: str = ""              # Pipeline run that produced this snapshot
+    notes: str = ""
+
+    def attrition_report(self) -> dict:
+        """
+        Return stage-by-stage attrition as a dict.
+
+        Values are (count, pct_of_universe). Useful for logging and dashboard display.
+        """
+        stages = [
+            ("universe",       self.universe_count),
+            ("post_validation", self.post_validation),
+            ("post_regime",    self.post_regime),
+            ("post_signal",    self.post_signal),
+            ("post_quality",   self.post_quality),
+            ("post_risk",      self.post_risk),
+            ("post_pretrade",  self.post_pretrade),
+            ("tradable_now",   self.tradable_now),
+        ]
+        base = max(self.universe_count, 1)
+        return {
+            stage: {
+                "count": count,
+                "pct_of_universe": round(100.0 * count / base, 1),
+            }
+            for stage, count in stages
+        }
+
+    def binding_constraint(self) -> str:
+        """
+        Return the name of the stage with the largest absolute attrition.
+
+        This is the 'binding constraint' — the filter eliminating the most pairs.
+        """
+        stages = [
+            ("validation",  self.universe_count  - self.post_validation),
+            ("regime",      self.post_validation - self.post_regime),
+            ("signal",      self.post_regime     - self.post_signal),
+            ("quality",     self.post_signal     - self.post_quality),
+            ("risk",        self.post_quality    - self.post_risk),
+            ("pretrade",    self.post_risk        - self.post_pretrade),
+            ("final",       self.post_pretrade   - self.tradable_now),
+        ]
+        if not any(v > 0 for _, v in stages):
+            return "none"
+        return max(stages, key=lambda x: x[1])[0]
+
+
 # ========= Pair-level models =========
 
 @dataclass
@@ -320,7 +412,7 @@ except Exception:  # pragma: no cover
 def _calc_zscore_series(x: pd.Series, window: int) -> pd.Series:
     x = pd.to_numeric(x, errors="coerce")
     mu = x.rolling(window).mean()
-    sd = x.rolling(window).std(ddof=0)
+    sd = x.rolling(window).std(ddof=1)
     return (x - mu) / sd
 
 
@@ -961,6 +1053,9 @@ def compute_universe_signals(
         empty_df = pd.DataFrame()
         return UniverseSignals(empty_df, empty_df)
 
+    # --- Signal Funnel Snapshot: track attrition at each pipeline stage ---
+    funnel = SignalFunnelSnapshot(universe_count=len(pairs))
+
     profile = get_signal_profile(profile_name)
     results: List[JSONDict] = []
 
@@ -993,7 +1088,11 @@ def compute_universe_signals(
     df_ok = df_diag[df_diag["status"] == "ok"].copy()
     df_not_ok = df_diag[df_diag["status"] != "ok"].copy()
 
+    # Funnel: post_validation = pairs that passed cointegration/spread validity
+    funnel.post_validation = len(df_ok)
+
     if df_ok.empty:
+        logger.info("Signal funnel: %s", funnel.attrition_report())
         return UniverseSignals(pd.DataFrame(), df_diag)
 
     # --- scoring לזוגות תקינים ---
@@ -1039,7 +1138,11 @@ def compute_universe_signals(
     if min_score > 0.0:
         df_ok = df_ok[df_ok["score"] >= min_score]
 
+    # Funnel: post_signal = pairs that generated a signal above min_score quality threshold
+    funnel.post_signal = len(df_ok)
+
     if df_ok.empty:
+        logger.info("Signal funnel: %s", funnel.attrition_report())
         return UniverseSignals(pd.DataFrame(), df_diag)
 
     # --- Normalizations & ranks ---
@@ -1109,6 +1212,10 @@ def compute_universe_signals(
         df_ok = df_ok.head(int(top_n))
 
     df_signals = df_ok.reset_index(drop=True)
+
+    # Funnel: tradable_now = final signals after scoring, normalization, and top_n cap
+    funnel.tradable_now = len(df_signals)
+    logger.info("Signal funnel: %s", funnel.attrition_report())
 
     # diagnostics – לכל הזוגות, כולל score=0 ל-not_ok
     df_not_ok["score"] = 0.0

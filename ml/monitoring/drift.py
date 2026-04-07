@@ -233,6 +233,12 @@ class ModelHealthMonitor:
                     drift_report = monitor.generate_drift_report(model_id, X_recent)
                     status.latest_drift_report_id = drift_report.report_id
                     status.drift_severity = drift_report.severity
+
+                    # Auto-block: CRITICAL drift must stop production inference immediately.
+                    # Drift detection that only observes but never acts provides no safety guarantee.
+                    if drift_report.severity == DriftSeverity.CRITICAL:
+                        self._auto_block_model(model_id, drift_report)
+
                 except Exception as exc:
                     logger.warning("Drift check failed for %s: %s", model_id, exc)
                     status.drift_severity = DriftSeverity.NONE
@@ -356,6 +362,68 @@ class ModelHealthMonitor:
     ) -> None:
         """Attach a pre-fitted FeatureDriftMonitor for a specific model."""
         self._drift_monitors[model_id] = monitor
+
+    # ------------------------------------------------------------------
+    # Auto-block on critical drift
+    # ------------------------------------------------------------------
+
+    def _auto_block_model(self, model_id: str, drift_report) -> None:
+        """
+        Automatically set model status to BLOCKED when drift is CRITICAL.
+
+        Drift detection that does not trigger automatic model blocking is purely
+        observational — it cannot prevent a critically drifted model from serving
+        production inference. This method closes that gap.
+
+        Also opens an incident if an incident manager is available.
+        Never raises — failure to block is logged at CRITICAL level but does not
+        crash the health check.
+        """
+        from ml.contracts import ModelStatus
+        try:
+            if self._registry is not None:
+                # Block the model in the registry
+                if hasattr(self._registry, "update_status"):
+                    self._registry.update_status(model_id, ModelStatus.BLOCKED)
+                    logger.error(
+                        "AUTO-BLOCKED model %s: DriftSeverity.CRITICAL detected "
+                        "(mean_psi=%.4f, features_drifted=%d). "
+                        "Model must be retrained before returning to production.",
+                        model_id,
+                        drift_report.mean_psi if hasattr(drift_report, "mean_psi") else float("nan"),
+                        len(drift_report.features_drifted) if hasattr(drift_report, "features_drifted") else 0,
+                    )
+                else:
+                    logger.critical(
+                        "Cannot auto-block model %s: registry has no update_status method. "
+                        "MANUAL INTERVENTION REQUIRED — model is critically drifted.",
+                        model_id,
+                    )
+        except Exception as exc:
+            logger.critical(
+                "Failed to auto-block critically drifted model %s: %s — "
+                "MANUAL INTERVENTION REQUIRED.",
+                model_id, exc,
+            )
+
+        # Attempt to open an incident if the incident manager is reachable
+        try:
+            from incidents.manager import IncidentManager
+            im = IncidentManager()
+            im.open_incident(
+                title=f"CRITICAL drift: model {model_id} auto-blocked",
+                severity="critical",
+                source="drift_monitor",
+                details={
+                    "model_id": model_id,
+                    "drift_report_id": getattr(drift_report, "report_id", ""),
+                    "mean_psi": getattr(drift_report, "mean_psi", float("nan")),
+                    "features_drifted": getattr(drift_report, "features_drifted", []),
+                    "action_taken": "model_status_set_to_BLOCKED",
+                },
+            )
+        except Exception:
+            pass  # Incident manager is optional; missing it does not unblock the model
 
     # ------------------------------------------------------------------
     # Health summary DataFrame
