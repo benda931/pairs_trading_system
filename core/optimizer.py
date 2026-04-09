@@ -117,6 +117,23 @@ except Exception:  # pragma: no cover - optional
     normalize_metrics = None  # type: ignore
     compute_weighted_score = None  # type: ignore
 
+# DSR + stability helpers from walk-forward engine
+try:
+    from core.walk_forward_engine import (
+        deflated_sharpe_ratio as _deflated_sharpe_ratio,
+        compute_param_stability as _compute_param_stability,
+    )
+    _WFE_AVAILABLE = True
+except Exception:  # pragma: no cover - optional
+    _deflated_sharpe_ratio = None  # type: ignore[assignment]
+    _compute_param_stability = None  # type: ignore[assignment]
+    _WFE_AVAILABLE = False
+
+# DSR gate threshold: trials below this are flagged as over-fit suspects
+_DSR_THRESHOLD: float = 0.65
+# Top-N trials used for parameter stability scoring
+_STABILITY_TOP_N: int = 10
+
 
 logger = logging.getLogger(__name__)
 
@@ -667,8 +684,138 @@ def run_optimization(
     # Run optimization
     study.optimize(objective, n_trials=n_trials, timeout=timeout_sec, show_progress_bar=False)
 
+    # ------------------------------------------------------------------
+    # POST-OPTIMIZATION: Deflated Sharpe Ratio gate + parameter stability
+    # ------------------------------------------------------------------
+    # n_trials_actual may be < n_trials if timeout hit or errors occurred
+    n_trials_actual = len(results)
+
+    # 1. Collect all finite Sharpe values from completed trials
+    all_sharpes = [
+        float(r["sharpe"]) for r in results
+        if isinstance(r.get("sharpe"), (int, float)) and np.isfinite(float(r["sharpe"]))
+    ]
+
+    # 2. Aggregate OOS Sharpe: median of top-half (less sensitive to outlier winners)
+    dsr_score: float = float("nan")
+    dsr_gate_passed: bool = False
+    if all_sharpes and _WFE_AVAILABLE and _deflated_sharpe_ratio is not None:
+        try:
+            sorted_sharpes = sorted(all_sharpes, reverse=True)
+            top_half = sorted_sharpes[: max(1, len(sorted_sharpes) // 2)]
+            agg_sharpe = float(np.median(top_half))
+            # n_obs: use length of price series as proxy for number of return observations
+            n_obs_proxy = max(int(len(price)), 1)
+            dsr_score = float(
+                _deflated_sharpe_ratio(
+                    sr_obs=agg_sharpe,
+                    n_trials=max(n_trials_actual, 1),
+                    n_obs=n_obs_proxy,
+                )
+            )
+            dsr_gate_passed = dsr_score >= _DSR_THRESHOLD
+
+            if dsr_gate_passed:
+                logger.info(
+                    "[Optimizer] DSR gate PASSED (DSR=%.4f ≥ %.2f, agg_sharpe=%.3f, "
+                    "n_trials=%d, n_obs=%d)",
+                    dsr_score, _DSR_THRESHOLD, agg_sharpe, n_trials_actual, n_obs_proxy,
+                )
+            else:
+                logger.warning(
+                    "[Optimizer] DSR gate FAILED (DSR=%.4f < %.2f, agg_sharpe=%.3f, "
+                    "n_trials=%d, n_obs=%d). "
+                    "Parameters may be over-fit. DO NOT promote to production without "
+                    "independent OOS validation.",
+                    dsr_score, _DSR_THRESHOLD, agg_sharpe, n_trials_actual, n_obs_proxy,
+                )
+        except Exception as exc:
+            logger.debug("[Optimizer] DSR computation failed: %s", exc)
+
+    # 3. Parameter stability: CV across top-N trials
+    stability_score: float = float("nan")
+    stability_cv: float = float("nan")
+    stability_warning: bool = False
+    if results and _WFE_AVAILABLE and _compute_param_stability is not None:
+        try:
+            # Sort results by sharpe, take top-N
+            sorted_results = sorted(
+                [r for r in results if np.isfinite(float(r.get("sharpe", float("nan"))))],
+                key=lambda r: float(r.get("sharpe", float("-inf"))),
+                reverse=True,
+            )
+            top_n_results = sorted_results[:_STABILITY_TOP_N]
+
+            # Build mock "folds" list that compute_param_stability expects:
+            # it needs objects with .best_params dict and .oos_sharpe float
+            class _MockFold:
+                def __init__(self, params: Dict[str, Any], oos_sharpe: float):
+                    self.best_params = params
+                    self.oos_sharpe = oos_sharpe
+
+            param_keys = list(ranges.keys())
+            mock_folds = [
+                _MockFold(
+                    params={k: float(r[k]) for k in param_keys if k in r},
+                    oos_sharpe=float(r.get("sharpe", 0.0)),
+                )
+                for r in top_n_results
+            ]
+
+            if len(mock_folds) >= 2:
+                stability_score, stability_warning = _compute_param_stability(mock_folds)
+                # Approximate mean CV from stability_score = max(0, 1 - mean_cv)
+                stability_cv = float(1.0 - stability_score)
+                if stability_warning:
+                    logger.warning(
+                        "[Optimizer] Parameter stability WARNING: CV=%.3f > 0.5 across "
+                        "top-%d trials. Parameters are unstable — robustness is low.",
+                        stability_cv, len(mock_folds),
+                    )
+                else:
+                    logger.info(
+                        "[Optimizer] Parameter stability OK: CV=%.3f, stability_score=%.3f",
+                        stability_cv, stability_score,
+                    )
+        except Exception as exc:
+            logger.debug("[Optimizer] Stability computation failed: %s", exc)
+
+    # 4. Per-trial: compute individual trial DSR and Bonferroni-adjusted p-value proxy
+    # (Each trial's Sharpe is penalised by the number of trials tested — multiple testing)
+    per_trial_dsr: Dict[int, float] = {}
+    if _WFE_AVAILABLE and _deflated_sharpe_ratio is not None and n_trials_actual > 0:
+        n_obs_proxy = max(int(len(price)), 1)
+        for r in results:
+            tn = int(r.get("trial_number", r.get("trial_id", -1)))
+            sr = float(r.get("sharpe", float("nan")))
+            if np.isfinite(sr):
+                try:
+                    per_trial_dsr[tn] = float(
+                        _deflated_sharpe_ratio(
+                            sr_obs=sr,
+                            n_trials=max(n_trials_actual, 1),
+                            n_obs=n_obs_proxy,
+                        )
+                    )
+                except Exception:
+                    per_trial_dsr[tn] = float("nan")
+
+    # Attach DSR columns to each result row
+    for r in results:
+        tn = int(r.get("trial_number", r.get("trial_id", -1)))
+        r["trial_dsr"] = per_trial_dsr.get(tn, float("nan"))
+        r["dsr_gate_passed"] = bool(r["trial_dsr"] >= _DSR_THRESHOLD) if np.isfinite(r["trial_dsr"]) else False
+
     # Build DataFrame from collected results
     df = pd.DataFrame(results)
+
+    # Attach aggregate DSR / stability as DataFrame-level attrs (accessible via df.attrs)
+    df.attrs["dsr_score"] = dsr_score
+    df.attrs["dsr_gate_passed"] = dsr_gate_passed
+    df.attrs["stability_score"] = stability_score
+    df.attrs["stability_cv"] = stability_cv
+    df.attrs["stability_warning"] = stability_warning
+    df.attrs["n_trials_run"] = n_trials_actual
 
     # Attach trial_id and order
     if not df.empty:
@@ -677,8 +824,13 @@ def run_optimization(
         else:
             df.insert(0, "trial_id", range(len(df)))
 
-        # Sort by Sharpe primarily, then final score as tiebreaker
-        if "sharpe" in df.columns:
+        # Sort by DSR-adjusted quality: dsr_gate_passed first, then Sharpe
+        if "trial_dsr" in df.columns and "sharpe" in df.columns:
+            df = df.sort_values(
+                ["dsr_gate_passed", "sharpe", "score"],
+                ascending=[False, False, False],
+            )
+        elif "sharpe" in df.columns:
             df = df.sort_values(["sharpe", "score"], ascending=[False, False])
 
     # Attach study to config for callers that want deeper Optuna use
@@ -722,6 +874,10 @@ def summarize_results(df: pd.DataFrame) -> Dict[str, float]:
             "best_sharpe": float("nan"),
             "avg_sharpe": float("nan"),
             "best_score": float("nan"),
+            "dsr_score": float("nan"),
+            "dsr_gate_passed": float("nan"),
+            "stability_score": float("nan"),
+            "stability_warning": float("nan"),
         }
 
     out: Dict[str, float] = {"rows": float(len(df))}
@@ -743,6 +899,25 @@ def summarize_results(df: pd.DataFrame) -> Dict[str, float]:
         if "runtime_sec" in df.columns:
             rt = pd.to_numeric(df["runtime_sec"], errors="coerce")
             out["avg_runtime_sec"] = float(rt.mean())
+
+        # DSR gate aggregate (stored in df.attrs by run_optimization)
+        if hasattr(df, "attrs"):
+            for attr_key in ("dsr_score", "dsr_gate_passed", "stability_score",
+                             "stability_cv", "stability_warning", "n_trials_run"):
+                val = df.attrs.get(attr_key)
+                if val is not None:
+                    try:
+                        out[attr_key] = float(val)
+                    except Exception:
+                        pass
+
+        # Per-trial DSR stats (from column, if present)
+        if "trial_dsr" in df.columns:
+            dsr_col = pd.to_numeric(df["trial_dsr"], errors="coerce")
+            out["best_trial_dsr"] = float(dsr_col.max())
+            out["pct_trials_dsr_passed"] = float(
+                (dsr_col >= _DSR_THRESHOLD).sum() / max(len(dsr_col), 1)
+            )
     except Exception as exc:  # pragma: no cover - defensive
         logger.debug("summarize_results failed: %s", exc)
 
@@ -791,6 +966,9 @@ def extract_best_params(df: pd.DataFrame, metric: str = "sharpe") -> Dict[str, A
         "classic_score",
         "hf_score",
         "runtime_sec",
+        # DSR / stability diagnostics
+        "trial_dsr",
+        "dsr_gate_passed",
         metric,
     }
     params: Dict[str, Any] = {}

@@ -6201,6 +6201,24 @@ def render_optimization_tab(
     except Exception as e:
         st.caption(f"Parameter stability section failed: {e}")
 
+    # 10.12 DSR Gate + Sensitivity Map (institutional validation)
+    try:
+        _render_optimization_dsr_sensitivity_section(TABLE_HEIGHT, df, sym1, sym2)
+    except Exception as e:
+        st.caption(f"DSR/sensitivity section failed: {e}")
+
+    # 10.13 Multiple-Testing (FDR) Correction Panel
+    try:
+        _render_optimization_fdr_panel(TABLE_HEIGHT, df, sym1, sym2)
+    except Exception as e:
+        st.caption(f"FDR panel failed: {e}")
+
+    # 10.14 Permutation Significance Test Panel
+    try:
+        _render_optimization_permutation_panel(TABLE_HEIGHT, df, sym1, sym2)
+    except Exception as e:
+        st.caption(f"Permutation test panel failed: {e}")
+
     # 10.8 Finalize (Dev tools, Error console, i18n, snapshot)
     try:
         _render_optimization_finalize(TABLE_HEIGHT, df, sym1, sym2)
@@ -11296,6 +11314,528 @@ def _render_optimization_parameter_stability_section(
 
         except Exception as e:
             st.caption(f"Parameter stability section failed: {e}")
+
+
+# =========================
+# SECTION 14.6: DSR Gate + Sensitivity Map
+# =========================
+
+def _render_optimization_dsr_sensitivity_section(
+    TABLE_HEIGHT: int,
+    df: pd.DataFrame,
+    sym1: str,
+    sym2: str,
+) -> None:
+    """DSR (Deflated Sharpe Ratio) gate and 1-D/2-D sensitivity maps.
+
+    Exposes:
+    - Aggregate DSR from df.attrs (set by run_optimization).
+    - Per-trial DSR column as a histogram.
+    - 1-D sensitivity maps for each parameter.
+    - 2-D heatmap for a user-selected parameter pair.
+    - Fragility score summary (from research.parameter_stability).
+    """
+    FOCUS = bool(st.session_state.get("opt_focus_mode", False))
+    pair_label = f"{sym1}-{sym2}"
+
+    with st.expander("🔬 DSR Gate & Sensitivity Maps (Institutional Validation)", expanded=not FOCUS):
+        try:
+            if df is None or df.empty:
+                st.caption("No optimisation results available.")
+                return
+
+            # ---- 1. DSR aggregate gate ----
+            st.markdown("#### Deflated Sharpe Ratio (DSR) Gate")
+            st.caption(
+                "DSR corrects the Sharpe ratio for selection bias across multiple trials. "
+                "DSR ≥ 0.65 is required before parameters can be considered for production promotion."
+            )
+
+            dsr_score = df.attrs.get("dsr_score", float("nan")) if hasattr(df, "attrs") else float("nan")
+            dsr_passed = df.attrs.get("dsr_gate_passed", False) if hasattr(df, "attrs") else False
+            n_trials_run = int(df.attrs.get("n_trials_run", len(df))) if hasattr(df, "attrs") else len(df)
+
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                if isinstance(dsr_score, float) and not np.isnan(dsr_score):
+                    color = "🟢" if dsr_passed else "🔴"
+                    st.metric("Aggregate DSR", f"{color} {dsr_score:.3f}")
+                else:
+                    st.metric("Aggregate DSR", "N/A (run optimizer first)")
+            with col2:
+                gate_str = "✅ PASSED" if dsr_passed else "❌ FAILED"
+                st.metric("DSR Gate (≥0.65)", gate_str)
+            with col3:
+                st.metric("Trials Run", n_trials_run)
+
+            if not dsr_passed and isinstance(dsr_score, float) and not np.isnan(dsr_score):
+                st.error(
+                    f"⛔ DSR gate FAILED (DSR={dsr_score:.3f} < 0.65). "
+                    "Parameters are likely over-fit to the IS period. "
+                    "Run independent OOS validation before any promotion decision."
+                )
+            elif dsr_passed:
+                st.success(f"✅ DSR gate passed (DSR={dsr_score:.3f}). Proceed with OOS walk-forward validation.")
+
+            # ---- 2. Per-trial DSR histogram ----
+            if "trial_dsr" in df.columns and px is not None:
+                try:
+                    dsr_col = pd.to_numeric(df["trial_dsr"], errors="coerce").dropna()
+                    if len(dsr_col) > 0:
+                        st.markdown("#### Per-Trial DSR Distribution")
+                        fig_dsr = px.histogram(
+                            dsr_col, nbins=30,
+                            title=f"Distribution of Per-Trial DSR — {pair_label}",
+                            labels={"value": "DSR", "count": "Trials"},
+                            color_discrete_sequence=["#3498DB"],
+                        )
+                        fig_dsr.add_vline(
+                            x=0.65, line_dash="dash", line_color="red",
+                            annotation_text="DSR gate (0.65)",
+                        )
+                        n_pass = int((dsr_col >= 0.65).sum())
+                        st.plotly_chart(fig_dsr, use_container_width=True)
+                        st.caption(
+                            f"{n_pass}/{len(dsr_col)} trials ({100*n_pass/max(len(dsr_col),1):.1f}%) "
+                            f"pass the DSR gate individually."
+                        )
+                except Exception as e:
+                    st.caption(f"DSR histogram failed: {e}")
+
+            # ---- 3. Sensitivity maps ----
+            st.markdown("#### 1-D Parameter Sensitivity Maps")
+            st.caption(
+                "Each chart shows how median Sharpe changes as a parameter moves from its "
+                "optimal value.  Steep cliffs → fragile.  Flat plateau → robust."
+            )
+
+            try:
+                from research.parameter_stability import ParameterStabilityAnalyzer, compute_2d_sensitivity_heatmap
+
+                exclude_cols = {
+                    "trial_id", "trial_number", "sharpe", "return", "drawdown", "win_rate",
+                    "score", "score_mode", "classic_score", "hf_score", "runtime_sec",
+                    "trial_dsr", "dsr_gate_passed", "_source",
+                }
+                sharpe_col = "sharpe" if "sharpe" in df.columns else None
+                if sharpe_col is None:
+                    st.caption("No 'sharpe' column found — cannot compute sensitivity.")
+                else:
+                    num_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+                    param_cols = [c for c in num_cols if c not in exclude_cols][:12]
+
+                    if param_cols:
+                        try:
+                            analyzer = ParameterStabilityAnalyzer(
+                                df, param_names=param_cols, sharpe_col=sharpe_col
+                            )
+
+                            # Fragility summary
+                            report = analyzer.full_report()
+                            frag_color = "🔴" if report.is_fragile else ("🟡" if report.fragility_score > 0.4 else "🟢")
+                            fc1, fc2, fc3 = st.columns(3)
+                            with fc1:
+                                st.metric("Fragility Score", f"{frag_color} {report.fragility_score:.2f}")
+                            with fc2:
+                                cv_warn = "⚠️" if report.cv_warning else "✅"
+                                st.metric("Mean Param CV", f"{cv_warn} {report.mean_cv:.2f}")
+                            with fc3:
+                                narrow = sum(1 for r in report.radii if r.is_narrow)
+                                st.metric("Narrow Radii", f"{narrow}/{len(report.radii)}")
+
+                            if report.narrative:
+                                if report.is_fragile:
+                                    st.warning(report.narrative)
+                                else:
+                                    st.info(report.narrative)
+
+                            # 1-D charts — two per row
+                            sensitivities = report.sensitivity
+                            if sensitivities and px is not None:
+                                sens_sel = st.multiselect(
+                                    "Select parameters to plot",
+                                    [s.param_name for s in sensitivities],
+                                    default=[s.param_name for s in sensitivities[:4]],
+                                    key=sk("dsr_sens_sel"),
+                                )
+                                selected_sens = [s for s in sensitivities if s.param_name in sens_sel]
+                                for i in range(0, len(selected_sens), 2):
+                                    row_cols = st.columns(2)
+                                    for j, s in enumerate(selected_sens[i: i + 2]):
+                                        with row_cols[j]:
+                                            if s.param_values and s.sharpe_values:
+                                                fig_s = px.line(
+                                                    x=s.param_values, y=s.sharpe_values,
+                                                    markers=True,
+                                                    title=f"{s.param_name} — Sensitivity",
+                                                    labels={"x": s.param_name, "y": "Median Sharpe"},
+                                                )
+                                                # Mark peak
+                                                if np.isfinite(s.peak_value):
+                                                    fig_s.add_vline(
+                                                        x=s.peak_value,
+                                                        line_dash="dot", line_color="green",
+                                                        annotation_text=f"peak={s.peak_value:.3g}",
+                                                    )
+                                                st.plotly_chart(fig_s, use_container_width=True)
+                                            else:
+                                                st.caption(f"No data for {s.param_name}")
+
+                            # 2-D heatmap
+                            if len(param_cols) >= 2 and px is not None:
+                                st.markdown("#### 2-D Parameter Sensitivity Heatmap")
+                                col_px = st.selectbox(
+                                    "X-axis parameter",
+                                    param_cols,
+                                    index=0,
+                                    key=sk("dsr_hm_x"),
+                                )
+                                col_py = st.selectbox(
+                                    "Y-axis parameter",
+                                    [c for c in param_cols if c != col_px],
+                                    index=0,
+                                    key=sk("dsr_hm_y"),
+                                )
+                                try:
+                                    import plotly.graph_objects as go_hm2  # type: ignore
+                                    x_c, y_c, grid = compute_2d_sensitivity_heatmap(
+                                        df, col_px, col_py, sharpe_col="sharpe", n_bins=8
+                                    )
+                                    if len(x_c) > 0:
+                                        fig_hm2 = go_hm2.Figure(data=go_hm2.Heatmap(
+                                            z=grid.T,
+                                            x=np.round(x_c, 4).tolist(),
+                                            y=np.round(y_c, 4).tolist(),
+                                            colorscale="RdYlGn",
+                                            colorbar=dict(title="Median Sharpe"),
+                                        ))
+                                        fig_hm2.update_layout(
+                                            title=f"Sharpe Heatmap: {col_px} × {col_py} — {pair_label}",
+                                            xaxis_title=col_px,
+                                            yaxis_title=col_py,
+                                            height=440,
+                                        )
+                                        st.plotly_chart(fig_hm2, use_container_width=True)
+                                except Exception as e2:
+                                    st.caption(f"2-D heatmap failed: {e2}")
+
+                        except Exception as exc:
+                            st.caption(f"Sensitivity analysis failed: {exc}")
+                    else:
+                        st.caption("No parameter columns found for sensitivity analysis.")
+            except ImportError:
+                st.caption("research.parameter_stability not available.")
+
+        except Exception as e:
+            st.caption(f"DSR/sensitivity section failed: {e}")
+
+
+# =========================
+# SECTION 14.7: FDR Panel
+# =========================
+
+def _render_optimization_fdr_panel(
+    TABLE_HEIGHT: int,
+    df: pd.DataFrame,
+    sym1: str,
+    sym2: str,
+) -> None:
+    """Multiple-comparison (FDR) correction panel.
+
+    Shows Bonferroni + BH-FDR + DSR-adjusted trial results.
+    Highlights spurious discoveries.
+    """
+    FOCUS = bool(st.session_state.get("opt_focus_mode", False))
+    pair_label = f"{sym1}-{sym2}"
+
+    with st.expander("📊 Multiple-Testing (FDR) Correction Panel", expanded=False):
+        try:
+            if df is None or df.empty:
+                st.caption("No optimisation results available.")
+                return
+
+            st.markdown("#### Bonferroni / Benjamini-Hochberg FDR Correction")
+            st.caption(
+                "When testing many parameter combinations, the probability of finding a "
+                "spuriously high Sharpe increases.  Corrected p-values control for this.  "
+                "**Only trials that pass Bonferroni or BH-FDR should be considered real.**"
+            )
+
+            sharpe_col = "sharpe" if "sharpe" in df.columns else None
+            if sharpe_col is None:
+                st.caption("No 'sharpe' column found.")
+                return
+
+            n_obs = st.number_input(
+                "Number of OOS observations (trading days in test window)",
+                min_value=20, max_value=5000,
+                value=252, step=10,
+                key=sk("fdr_n_obs"),
+                help="Set this to the length of the OOS window, not the IS period.",
+            )
+            fdr_level = float(st.slider("FDR level (q)", 0.01, 0.20, 0.05, 0.01, key=sk("fdr_q")))
+
+            try:
+                from core.false_discovery import fdr_check_optimizer_results
+
+                report = fdr_check_optimizer_results(
+                    df, n_obs=int(n_obs), sharpe_col=sharpe_col, fdr_level=fdr_level
+                )
+
+                # Summary KPIs
+                k1, k2, k3, k4 = st.columns(4)
+                with k1:
+                    st.metric("Bonferroni Pass", report.n_bonferroni)
+                with k2:
+                    st.metric(f"BH-FDR Pass (q={fdr_level})", report.n_bh_fdr)
+                with k3:
+                    st.metric("DSR Gate Pass", report.n_dsr_gate)
+                with k4:
+                    total = len(report.details)
+                    st.metric("Total Trials", total)
+
+                if report.has_spurious_discoveries:
+                    st.error(
+                        "⚠️ Spurious discoveries detected: some trials pass the raw p-value "
+                        "but fail all adjusted tests.  These results are likely noise."
+                    )
+                    st.caption(report.narrative)
+                else:
+                    st.info(report.narrative)
+
+                # Detailed table
+                if not report.details.empty:
+                    display_cols = [
+                        c for c in [
+                            "pair_id", "sharpe", "n_obs", "raw_pvalue",
+                            "bonferroni_pvalue", "bh_pvalue", "dsr",
+                            "reject_bonferroni", "reject_bh", "pass_dsr",
+                            "min_trl", "has_sufficient_history",
+                        ] if c in report.details.columns
+                    ]
+                    st.dataframe(
+                        report.details[display_cols].round(4),
+                        use_container_width=True,
+                        height=min(TABLE_HEIGHT, 400),
+                    )
+
+                    try:
+                        st.download_button(
+                            "Download FDR results.csv",
+                            data=report.details.to_csv(index=False).encode("utf-8"),
+                            file_name=f"fdr_results_{pair_label}.csv",
+                            mime="text/csv",
+                            key=sk("fdr_dl"),
+                        )
+                    except Exception:
+                        pass
+
+            except ImportError:
+                st.caption("core.false_discovery not available.")
+            except Exception as exc:
+                st.caption(f"FDR computation failed: {exc}")
+
+        except Exception as e:
+            st.caption(f"FDR panel failed: {e}")
+
+
+# =========================
+# SECTION 14.8: Permutation Significance Test Panel
+# =========================
+
+def _render_optimization_permutation_panel(
+    TABLE_HEIGHT: int,
+    df: pd.DataFrame,
+    sym1: str,
+    sym2: str,
+) -> None:
+    """Permutation (label-shuffle) significance test panel.
+
+    Tests whether the best strategy's Sharpe exceeds what random chance
+    would produce on the same price series.
+    """
+    FOCUS = bool(st.session_state.get("opt_focus_mode", False))
+    pair_label = f"{sym1}-{sym2}"
+
+    with st.expander("🎲 Permutation Significance Test (Anti-Luck Gate)", expanded=False):
+        try:
+            if df is None or df.empty:
+                st.caption("No optimisation results available.")
+                return
+
+            st.markdown("#### Permutation Test: Is the Sharpe Real or Noise?")
+            st.caption(
+                "Shuffles the return sequence N times and checks whether the observed "
+                "Sharpe exceeds the null distribution.  p < 0.05 → genuine edge.  "
+                "This test runs on the RETURN SERIES of the best trial — provide it below."
+            )
+
+            # User must supply a return series (not available inside the optimizer output by default)
+            st.info(
+                "To run a permutation test, paste the best strategy's DAILY RETURN SERIES "
+                "as comma-separated values, or upload a CSV with a 'returns' column."
+            )
+
+            returns_input_method = st.radio(
+                "Return series input",
+                ["Manual (paste CSV values)", "Upload CSV"],
+                key=sk("perm_input_method"),
+                horizontal=True,
+            )
+
+            returns_series: Optional[pd.Series] = None
+
+            if returns_input_method == "Manual (paste CSV values)":
+                raw_text = st.text_area(
+                    "Paste daily returns (comma-separated, e.g. 0.01,-0.005,0.008,…)",
+                    height=80,
+                    key=sk("perm_manual_rets"),
+                )
+                if raw_text.strip():
+                    try:
+                        vals = [float(x.strip()) for x in raw_text.replace("\n", ",").split(",") if x.strip()]
+                        if len(vals) >= 20:
+                            returns_series = pd.Series(vals)
+                            st.caption(f"Loaded {len(vals)} return observations.")
+                        else:
+                            st.warning("Need at least 20 return observations.")
+                    except Exception as parse_exc:
+                        st.warning(f"Could not parse returns: {parse_exc}")
+            else:
+                uploaded = st.file_uploader(
+                    "Upload returns CSV (must have a 'returns' column)",
+                    type=["csv"],
+                    key=sk("perm_upload"),
+                )
+                if uploaded is not None:
+                    try:
+                        rets_df = pd.read_csv(uploaded)
+                        if "returns" in rets_df.columns:
+                            returns_series = rets_df["returns"].dropna()
+                            st.caption(f"Loaded {len(returns_series)} return observations.")
+                        else:
+                            st.warning("CSV must have a 'returns' column.")
+                    except Exception as up_exc:
+                        st.warning(f"Failed to load CSV: {up_exc}")
+
+            if returns_series is None:
+                # If no user input, use top-trial Sharpe as a synthetic demo
+                sharpe_col = "sharpe" if "sharpe" in df.columns else None
+                if sharpe_col:
+                    best_sharpe = float(pd.to_numeric(df[sharpe_col], errors="coerce").max())
+                    if np.isfinite(best_sharpe):
+                        st.caption(
+                            f"No return series provided — showing theoretical p-value for "
+                            f"best observed Sharpe ({best_sharpe:.3f}) given trial count."
+                        )
+                        n_obs_perm = st.number_input(
+                            "N OOS observations (for theoretical p-value)",
+                            min_value=20, max_value=5000, value=252,
+                            key=sk("perm_nobs_theory"),
+                        )
+                        try:
+                            from core.false_discovery import sharpe_pvalue, min_track_record_length
+                            p_raw = sharpe_pvalue(best_sharpe, int(n_obs_perm))
+                            p_bonf = min(p_raw * len(df), 1.0)
+                            min_trl = min_track_record_length(best_sharpe, n_trials=len(df))
+                            kk1, kk2, kk3 = st.columns(3)
+                            with kk1:
+                                st.metric("Raw p-value", f"{p_raw:.4f}")
+                            with kk2:
+                                st.metric("Bonferroni p-value", f"{p_bonf:.4f}")
+                            with kk3:
+                                st.metric("Min Track-Record Length", f"{min_trl:.0f} days")
+                            if int(n_obs_perm) < min_trl:
+                                st.error(
+                                    f"⚠️ Only {int(n_obs_perm)} OOS observations but MinTRL requires "
+                                    f"{min_trl:.0f}. Strategy is NOT yet validated."
+                                )
+                        except ImportError:
+                            st.caption("core.false_discovery not available.")
+                return
+
+            # ---- Run permutation test ----
+            n_perm = int(st.slider(
+                "Number of permutations", 100, 2000, 500, 100, key=sk("perm_n")
+            ))
+            mode = st.selectbox(
+                "Shuffle mode",
+                ["block_returns", "returns"],
+                key=sk("perm_mode"),
+                help=(
+                    "block_returns: preserves short-range autocorrelation (recommended). "
+                    "returns: full independent shuffle."
+                ),
+            )
+            block_size = int(st.number_input(
+                "Block size (days) for block shuffle",
+                min_value=5, max_value=252, value=21, step=5,
+                key=sk("perm_block"),
+            ))
+            alpha = float(st.slider(
+                "Significance level α", 0.01, 0.10, 0.05, 0.01, key=sk("perm_alpha")
+            ))
+
+            if st.button("Run Permutation Test", key=sk("perm_run")):
+                try:
+                    from research.permutation_test import permutation_test_returns
+
+                    with st.spinner(f"Running {n_perm} permutations…"):
+                        result = permutation_test_returns(
+                            observed_returns=returns_series,
+                            n_permutations=n_perm,
+                            alpha=alpha,
+                            mode=mode,
+                            block_size=block_size,
+                        )
+
+                    sig_str = "✅ SIGNIFICANT" if result.is_significant else "❌ NOT SIGNIFICANT"
+                    p1, p2, p3, p4 = st.columns(4)
+                    with p1:
+                        st.metric("Observed Sharpe", f"{result.observed_sharpe:.3f}")
+                    with p2:
+                        st.metric("Null 95th pct", f"{result.null_sharpe_95th_pct:.3f}")
+                    with p3:
+                        st.metric(f"p-value (α={alpha})", f"{sig_str}\n{result.p_value:.4f}")
+                    with p4:
+                        st.metric("Z-score", f"{result.z_score:.2f}")
+
+                    if result.is_significant:
+                        st.success(result.narrative)
+                    else:
+                        st.error(result.narrative)
+
+                    # Histogram of null distribution
+                    if result.null_distribution and px is not None:
+                        try:
+                            fig_perm = px.histogram(
+                                result.null_distribution,
+                                nbins=40,
+                                title=f"Null Distribution of Sharpe ({n_perm} permutations) — {pair_label}",
+                                labels={"value": "Sharpe", "count": "Permutations"},
+                                color_discrete_sequence=["#95A5A6"],
+                            )
+                            fig_perm.add_vline(
+                                x=result.observed_sharpe,
+                                line_dash="solid", line_color="#E74C3C",
+                                annotation_text=f"Observed SR={result.observed_sharpe:.3f}",
+                            )
+                            fig_perm.add_vline(
+                                x=result.null_sharpe_95th_pct,
+                                line_dash="dash", line_color="orange",
+                                annotation_text="95th pct",
+                            )
+                            st.plotly_chart(fig_perm, use_container_width=True)
+                        except Exception as fig_exc:
+                            st.caption(f"Histogram failed: {fig_exc}")
+
+                except ImportError:
+                    st.caption("research.permutation_test not available.")
+                except Exception as perm_exc:
+                    st.caption(f"Permutation test failed: {perm_exc}")
+
+        except Exception as e:
+            st.caption(f"Permutation panel failed: {e}")
 
 
 """

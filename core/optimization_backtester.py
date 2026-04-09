@@ -183,10 +183,17 @@ class BacktestConfig:
     target_gross_leverage: float = 1.0
     risk_free_rate: float = 0.02  # 2% RF as default
 
-    # ---- costs ----
+    # ---- costs (ADR-008: use TransactionCostModel per trade, not flat bps) ----
+    # These are kept for backward compatibility and as FLOOR values.
+    # The actual per-trade cost is computed by TransactionCostModel when
+    # adv_x / adv_y are supplied — otherwise falls back to commission_bps + slippage_bps.
     commission_bps: float = 1.0
     slippage_bps: float = 2.0
     lot_size: float = 1.0
+    # Optional: supply ADV for realistic Almgren-Chriss impact scaling
+    adv_x: Optional[float] = None   # average daily dollar volume of leg X
+    adv_y: Optional[float] = None   # average daily dollar volume of leg Y
+    use_almgren_chriss: bool = True  # wire TC model per trade (overrides flat bps)
 
     # ---- structure ----
     dollar_neutral: bool = True
@@ -407,11 +414,24 @@ class BacktestResult:
 
 def build_window_metrics_from_returns(
     returns: Optional[pd.Series],
-    n_windows: int = 4,
+    n_windows: int = 6,
 ) -> List[Dict[str, Any]]:
     """
     Slice a returns series into n_windows chronological chunks and compute
-    per-window performance metrics for WF / stability analysis.
+    per-window performance metrics for IN-SAMPLE STABILITY analysis.
+
+    !! CRITICAL DESIGN NOTE (ADR-008) !!
+    ======================================
+    This function slices the *same* backtest returns series that was
+    produced from parameters already fit on the FULL period. It is
+    therefore IN-SAMPLE STABILITY ANALYSIS, NOT TRUE WALK-FORWARD OOS.
+
+    Correct interpretation:
+      - HIGH wf_stability_score → parameters are stable across IS windows.
+        This is a necessary but NOT sufficient condition for OOS performance.
+      - DO NOT interpret this as "OOS Sharpe across folds".
+
+    For true walk-forward OOS, use core/walk_forward_engine.run_walk_forward().
 
     Each window metric dict contains:
         - start_date, end_date
@@ -419,6 +439,7 @@ def build_window_metrics_from_returns(
         - n_obs
 
     Assumes daily returns; Sharpe is annualized with sqrt(252).
+    n_windows increased to 6 (was 4) for finer stability resolution.
     """
     if returns is None:
         return []
@@ -853,6 +874,43 @@ class OptimizationBacktester:
         try:
             from scripts.run_backtest import backtest_pair
 
+            # ── ADR-008: Compute realistic per-trade TC via TransactionCostModel ──
+            # When ADV is available, use Almgren-Chriss impact instead of flat bps.
+            # Fallback: flat commission + slippage if ADV unknown or model disabled.
+            effective_commission_bps = self.config.commission_bps + self.config.slippage_bps
+            if self.config.use_almgren_chriss:
+                try:
+                    from core.transaction_costs import TransactionCostModel, TCConfig
+                    tc_model = TransactionCostModel(TCConfig(
+                        commission_bps=self.config.commission_bps,
+                    ))
+                    notional = self.config.initial_capital * 0.5   # half per leg
+                    tc_est = tc_model.estimate(
+                        notional_x=notional,
+                        notional_y=notional,
+                        price_x=100.0,
+                        price_y=100.0,
+                        adv_x=self.config.adv_x,
+                        adv_y=self.config.adv_y,
+                        holding_days=int(self.params.get("max_holding_days", 20)),
+                    )
+                    effective_commission_bps = tc_est.total_bps
+                    logger.debug(
+                        "OptimizationBacktester: TC model → %.2f bps "
+                        "(spread=%.2f, impact=%.2f, commission=%.2f, borrow=%.2f)",
+                        tc_est.total_bps,
+                        tc_est.spread_cost_bps,
+                        tc_est.impact_cost_bps,
+                        tc_est.commission_bps,
+                        tc_est.borrow_cost_bps,
+                    )
+                except Exception as tc_err:
+                    logger.debug(
+                        "OptimizationBacktester: TC model failed (%s) — "
+                        "falling back to flat %.1f bps",
+                        tc_err, effective_commission_bps,
+                    )
+
             result = backtest_pair(
                 self.config.symbol_a,
                 self.config.symbol_b,
@@ -862,8 +920,8 @@ class OptimizationBacktester:
                 lookback=int(self.params.get("lookback", 60)),
                 max_holding=int(self.params.get("max_holding_days", 60)),
                 capital=self.config.initial_capital,
-                commission_bps=self.config.commission_bps + self.config.slippage_bps,
-                bar_lag=int(self.params.get("bar_lag", 1)),
+                commission_bps=effective_commission_bps,
+                bar_lag=int(self.params.get("bar_lag", 1)),   # 1-bar delay enforced
                 start_date=self.config.start,
                 end_date=self.config.end,
             )
