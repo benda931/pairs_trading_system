@@ -197,7 +197,12 @@ class PermutationTest:
     def _compute_observed(self) -> Tuple[float, Optional[np.ndarray]]:
         """Compute observed Sharpe and return the return array."""
         if self._returns_series is not None:
-            rets = self._returns_series.dropna().values.astype(float)
+            rs = self._returns_series
+            if hasattr(rs, "dropna"):
+                rets = rs.dropna().values.astype(float)
+            else:
+                rets = np.asarray(rs, dtype=float)
+                rets = rets[~np.isnan(rets)]
             sharpe = _compute_sharpe_from_returns(rets)
             return sharpe, rets
 

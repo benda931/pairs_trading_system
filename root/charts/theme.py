@@ -98,8 +98,8 @@ _BASE_AXIS = dict(
 )
 
 CHART_THEME: dict[str, Any] = dict(
-    plot_bgcolor="transparent",
-    paper_bgcolor="transparent",
+    plot_bgcolor="rgba(0,0,0,0)",
+    paper_bgcolor="rgba(0,0,0,0)",
     font=dict(
         family="Inter, -apple-system, BlinkMacSystemFont, sans-serif",
         color="#8FA3B1",

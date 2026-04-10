@@ -38,6 +38,13 @@ from root.charts.theme import (
 )
 
 
+def _hex_to_rgba(hex_color: str, alpha: float = 0.2) -> str:
+    """Convert #RRGGBB hex to rgba() string.  Plotly rejects 8-char hex."""
+    h = hex_color.lstrip("#")
+    r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+    return f"rgba({r},{g},{b},{alpha})"
+
+
 # ---------------------------------------------------------------------------
 # 1. Equity Curve
 # ---------------------------------------------------------------------------
@@ -249,7 +256,7 @@ def regime_bar_fig(
                 color = REGIME_COLORS.get(str(prev_regime), "#546E7A")
                 fig.add_vrect(
                     x0=start_date, x1=date,
-                    fillcolor=color + "33",  # 20% opacity
+                    fillcolor=_hex_to_rgba(color, 0.20),
                     line_width=0,
                 )
             start_date = date
@@ -260,7 +267,7 @@ def regime_bar_fig(
         color = REGIME_COLORS.get(str(prev_regime), "#546E7A")
         fig.add_vrect(
             x0=start_date, x1=regime_series.index[-1],
-            fillcolor=color + "33",
+            fillcolor=_hex_to_rgba(color, 0.20),
             line_width=0,
         )
 
