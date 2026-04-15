@@ -8,7 +8,7 @@ The MISSING LINK: connects agent outputs to real system decisions.
 Before this module, agents ran in "info-only" mode — results were logged
 but never acted upon. This module creates a closed feedback loop:
 
-    Agent Output → Feedback Engine → System Action → Verification
+    Agent Output → Governance Router → Approval/Veto → Execution → Audit
 
 Feedback channels:
 1. **Signal Feedback**: regime/quality agents → block/approve entries
@@ -16,10 +16,22 @@ Feedback channels:
 3. **Improvement Feedback**: GPT/optimizer agents → retrain/reconfigure
 4. **Health Feedback**: system/data agents → pause/resume pipeline
 
+Governance integration (Phase 1):
+    Every action is routed through GovernanceRouter before execution.
+    The router enforces the institutional governance matrix:
+    - Evidence validation (required fields per action type)
+    - Tier routing (ADVISORY / AUTO / POLICY_GATED / HUMAN / EMERGENCY)
+    - Duplicate suppression and staleness detection
+    - Conflict resolution between concurrent agent actions
+    - Approval engine integration (ApprovalEngine)
+    - Incident creation on execution (IncidentManager)
+    - Precision tracking and tier demotion (PrecisionDemotionEngine)
+
 Usage:
     from core.agent_feedback import AgentFeedbackLoop
+    from core.action_governance import TradingEnvironment
 
-    loop = AgentFeedbackLoop()
+    loop = AgentFeedbackLoop(environment=TradingEnvironment.PAPER)
     actions = loop.process_agent_results(pipeline_results)
     loop.execute_actions(actions)
 """
@@ -30,6 +42,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Sequence
 
+from core.action_governance import GovernedActionRecord, TradingEnvironment
+
 logger = logging.getLogger(__name__)
 
 
@@ -39,7 +53,16 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class FeedbackAction:
-    """A concrete action derived from agent output."""
+    """A concrete action derived from agent output.
+
+    The `parameters` dict is the evidence bundle passed to GovernanceRouter.
+    It must contain the fields required by the governance profile for this
+    action_type × environment combination (see core/action_governance.py).
+
+    The `environment` field determines which governance profile is applied.
+    It defaults to PAPER so that existing callers that do not set it will
+    not accidentally operate in LIVE governance mode.
+    """
     action_id: str
     source_agent: str
     action_type: str        # BLOCK_ENTRY / FORCE_EXIT / DELEVERAGE / KILL_SWITCH /
@@ -49,9 +72,12 @@ class FeedbackAction:
     target: str             # What to act on (pair_id, "portfolio", "system")
     parameters: Dict[str, Any] = field(default_factory=dict)
     reason: str = ""
-    auto_execute: bool = True    # False = needs human approval
+    auto_execute: bool = True    # Retained for backward compat; GovernanceRouter decides
     executed: bool = False
     execution_result: str = ""
+    environment: TradingEnvironment = TradingEnvironment.PAPER
+    confirming_agent: Optional[str] = None  # For dual-confirmation (EMERGENCY_ONLY)
+    governed_record: Optional[GovernedActionRecord] = None  # Populated after routing
 
 
 @dataclass
@@ -62,7 +88,10 @@ class FeedbackSummary:
     n_actions_generated: int
     n_actions_executed: int
     n_actions_blocked: int
+    n_actions_advisory: int = 0
+    n_actions_pending_approval: int = 0
     actions: List[FeedbackAction] = field(default_factory=list)
+    governed_records: List[GovernedActionRecord] = field(default_factory=list)
     system_state_changes: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -330,17 +359,22 @@ class ImprovementFeedbackRules:
 
 class ActionThrottler:
     """
-    Rate limiter for feedback actions.
+    Legacy rate limiter — DEPRECATED.
 
-    Prevents cascading actions in volatile markets by enforcing:
-    - Cool-down period per action type
-    - Maximum actions per pipeline cycle
-    - Maximum emergency actions per day
+    Retained for backward compatibility only. In the governed pipeline,
+    duplicate suppression and cooldown enforcement is handled by
+    `DuplicateActionSuppressor` inside `GovernanceRouter`. This class is
+    no longer in the hot path when `AgentFeedbackLoop.use_governance=True`.
+
+    For new code, use `GovernanceRouter` directly or via `AgentFeedbackLoop`.
     """
 
     def __init__(self):
-        from core.contracts import ActionThrottleConfig
-        self._config = ActionThrottleConfig()
+        try:
+            from core.contracts import ActionThrottleConfig
+            self._config = ActionThrottleConfig()
+        except Exception:
+            self._config = None
         self._last_action_time: Dict[str, float] = {}
         self._actions_this_cycle: int = 0
         self._emergency_actions_today: int = 0
@@ -349,52 +383,76 @@ class ActionThrottler:
     def can_execute(self, action: FeedbackAction) -> tuple:
         """Check if action is allowed. Returns (allowed, reason)."""
         import time
+        if self._config is None:
+            return True, "OK (throttler config unavailable)"
 
         today = datetime.now(timezone.utc).strftime("%Y%m%d")
         if today != self._today:
             self._today = today
             self._emergency_actions_today = 0
 
-        # Max actions per cycle
         if self._actions_this_cycle >= self._config.max_actions_per_cycle:
-            return False, f"Max actions per cycle ({self._config.max_actions_per_cycle}) reached"
+            return False, "Max actions per cycle ({}) reached".format(
+                self._config.max_actions_per_cycle)
 
-        # Max emergency per day
         if action.severity == "EMERGENCY":
             if self._emergency_actions_today >= self._config.max_emergency_actions_per_day:
-                return False, f"Max emergency actions per day ({self._config.max_emergency_actions_per_day}) reached"
+                return False, "Max emergency actions per day ({}) reached".format(
+                    self._config.max_emergency_actions_per_day)
 
-        # Cool-down per action type
         cool_down = self._config.cool_down_seconds.get(action.action_type, 300)
-        key = f"{action.action_type}:{action.target}"
+        key = "{}:{}".format(action.action_type, action.target)
         last_time = self._last_action_time.get(key, 0)
         elapsed = time.time() - last_time
         if elapsed < cool_down:
             remaining = cool_down - elapsed
-            return False, f"Cool-down: {action.action_type} for {action.target} ({remaining:.0f}s remaining)"
+            return False, "Cool-down: {} for {} ({:.0f}s remaining)".format(
+                action.action_type, action.target, remaining)
 
         return True, "OK"
 
     def record_execution(self, action: FeedbackAction) -> None:
-        """Record that an action was executed."""
         import time
-        key = f"{action.action_type}:{action.target}"
+        key = "{}:{}".format(action.action_type, action.target)
         self._last_action_time[key] = time.time()
         self._actions_this_cycle += 1
         if action.severity == "EMERGENCY":
             self._emergency_actions_today += 1
 
     def reset_cycle(self) -> None:
-        """Reset per-cycle counter (call at start of each pipeline run)."""
         self._actions_this_cycle = 0
 
 
 class AgentFeedbackLoop:
     """
-    Central engine that converts agent outputs into system actions.
+    Central engine that converts agent outputs into governed system actions.
 
-    Processes all agent results from a pipeline run, applies rules
-    to generate actions, then executes approved actions.
+    Processes all agent results from a pipeline run, applies rules to generate
+    `FeedbackAction` objects, then routes each action through `GovernanceRouter`
+    before execution.
+
+    When `use_governance=True` (default), every action passes through the full
+    11-step governance pipeline:
+        evidence validation → staleness → dedup → conflict → tier routing →
+        approval/human review → pre-execution snapshot → execution →
+        incident creation → audit write → outcome observation registration.
+
+    When `use_governance=False`, the legacy `ActionThrottler` + direct
+    `_execute_single()` path is used. This mode exists for backward compatibility
+    in test/research environments and should NOT be used in live trading.
+
+    Parameters
+    ----------
+    dry_run : bool
+        If True, no actions are executed and no approvals are submitted.
+    environment : TradingEnvironment
+        Deployment context. Controls which governance profiles apply.
+    use_governance : bool
+        If True, route all actions through GovernanceRouter. Default True.
+    executor_registry : dict, optional
+        Maps action_type → executor callable for GovernanceRouter.
+        If None, the router is initialised without executor validation
+        (useful in test environments).
     """
 
     # Map agent names to rule sets
@@ -403,10 +461,23 @@ class AgentFeedbackLoop:
     IMPROVEMENT_AGENTS = {"gpt_signal_advisor", "gpt_model_tuner", "gpt_strategy_researcher",
                           "auto_parameter_optimizer", "auto_model_retrainer"}
 
-    def __init__(self, dry_run: bool = False):
+    def __init__(
+        self,
+        dry_run: bool = False,
+        environment: TradingEnvironment = TradingEnvironment.PAPER,
+        use_governance: bool = True,
+        executor_registry: Optional[Dict[str, Any]] = None,
+    ):
         self.dry_run = dry_run
+        self.environment = environment
+        self.use_governance = use_governance
         self._action_history: List[FeedbackAction] = []
-        self._throttle = ActionThrottler()
+        self._governed_records: List[GovernedActionRecord] = []
+        self._throttle = ActionThrottler()  # Legacy fallback
+
+        # Lazy-initialise GovernanceRouter on first use to avoid circular imports
+        self._router = None
+        self._executor_registry = executor_registry or self._build_default_executor_registry()
 
     def process_agent_results(
         self,
@@ -463,65 +534,135 @@ class AgentFeedbackLoop:
 
         return all_actions
 
+    def _get_router(self):
+        """Lazy-initialise and return the GovernanceRouter singleton."""
+        if self._router is None:
+            try:
+                from core.governance_router import get_governance_router
+                self._router = get_governance_router(
+                    environment=self.environment,
+                    executor_registry=self._executor_registry,
+                    validate_on_init=False,  # Executors may be partial in test env
+                )
+            except Exception as exc:
+                logger.warning(
+                    "AgentFeedbackLoop: GovernanceRouter init failed (%s); "
+                    "falling back to legacy throttler.", exc
+                )
+        return self._router
+
     def execute_actions(
         self,
         actions: List[FeedbackAction],
     ) -> FeedbackSummary:
         """
-        Execute feedback actions and return summary.
+        Execute feedback actions through the governance pipeline and return summary.
 
-        EMERGENCY/CRITICAL actions auto-execute.
-        INFO actions execute if auto_execute=True.
-        dry_run mode logs but doesn't execute.
+        When use_governance=True (default), every action is routed through
+        GovernanceRouter which enforces the institutional governance matrix.
+
+        When use_governance=False or GovernanceRouter is unavailable, the
+        legacy ActionThrottler + direct executor path is used.
+
+        dry_run mode logs intent without executing or submitting approvals.
         """
         n_executed = 0
         n_blocked = 0
+        n_advisory = 0
+        n_pending = 0
         state_changes: Dict[str, Any] = {}
-        self._throttle.reset_cycle()
+        governed_records: List[GovernedActionRecord] = []
+
+        router = self._get_router() if self.use_governance else None
 
         for action in actions:
+            # Inject environment + target into parameters for governance evidence
+            params = dict(action.parameters)
+            params.setdefault("target", action.target)
+            params.setdefault("reason", action.reason)
+
             if self.dry_run:
-                logger.info("[DRY RUN] Would execute: %s → %s (%s)",
-                            action.action_type, action.target, action.reason)
+                logger.info("[DRY RUN] Would route: %s → %s (%s) [env=%s]",
+                            action.action_type, action.target,
+                            action.reason, self.environment.value)
                 n_blocked += 1
+                self._action_history.append(action)
                 continue
 
-            if not action.auto_execute and action.severity not in ("EMERGENCY", "CRITICAL"):
-                logger.info("[BLOCKED] Needs approval: %s → %s", action.action_type, action.reason)
-                n_blocked += 1
-                continue
+            if router is not None:
+                # ── Governed path ──────────────────────────────────────
+                try:
+                    record = router.route(
+                        action_type=action.action_type,
+                        action_id=action.action_id,
+                        source_agent=action.source_agent,
+                        target=action.target,
+                        parameters=params,
+                        severity=action.severity,
+                        created_at=None,
+                        confirming_agent=action.confirming_agent,
+                    )
+                    action.governed_record = record
+                    governed_records.append(record)
 
-            # ── Throttle check ────────────────────────────────
-            allowed, throttle_reason = self._throttle.can_execute(action)
-            if not allowed:
-                logger.info("[THROTTLED] %s → %s: %s", action.action_type, action.target, throttle_reason)
-                n_blocked += 1
-                continue
+                    if record.suppressed:
+                        logger.info(
+                            "[GOVERNED SUPPRESSED] %s: %s",
+                            action.action_type, record.suppression_reason,
+                        )
+                        n_blocked += 1
+                    elif record.executed:
+                        action.executed = True
+                        action.execution_result = record.execution_result
+                        n_executed += 1
+                        logger.info(
+                            "[GOVERNED EXECUTED] %s → %s",
+                            action.action_type, record.execution_result,
+                        )
+                        if action.action_type in ("KILL_SWITCH", "BLOCK_ENTRY", "DELEVERAGE"):
+                            state_changes[action.action_type] = {
+                                "target": action.target,
+                                "parameters": action.parameters,
+                                "timestamp": _ts(),
+                                "governed": True,
+                            }
+                    elif record.approval_status in ("PENDING", "ESCALATED"):
+                        n_pending += 1
+                        logger.info(
+                            "[GOVERNED PENDING APPROVAL] %s: approval_request_id=%s",
+                            action.action_type, record.approval_request_id,
+                        )
+                    else:
+                        # ADVISORY_ONLY or similar
+                        n_advisory += 1
+                        logger.info(
+                            "[GOVERNED ADVISORY] %s → tier=%s",
+                            action.action_type, record.governance_tier.value,
+                        )
 
-            # Execute the action
-            try:
-                result = self._execute_single(action)
-                action.executed = True
-                action.execution_result = result
-                n_executed += 1
-                self._throttle.record_execution(action)
+                except Exception as exc:
+                    logger.error(
+                        "GovernanceRouter raised for %s: %s — falling back to legacy.",
+                        action.action_type, exc,
+                    )
+                    # Fail-safe: fall through to legacy path
+                    self._execute_legacy(action, state_changes)
+                    if action.executed:
+                        n_executed += 1
+                    else:
+                        n_blocked += 1
 
-                # Track state changes
-                if action.action_type in ("KILL_SWITCH", "BLOCK_ENTRY", "DELEVERAGE"):
-                    state_changes[action.action_type] = {
-                        "target": action.target,
-                        "parameters": action.parameters,
-                        "timestamp": _ts(),
-                    }
-
-                logger.info("Executed: %s → %s: %s",
-                            action.action_type, action.target, result)
-
-            except Exception as exc:
-                action.execution_result = f"ERROR: {exc}"
-                logger.error("Failed to execute %s: %s", action.action_type, exc)
+            else:
+                # ── Legacy fallback path ───────────────────────────────
+                self._execute_legacy(action, state_changes)
+                if action.executed:
+                    n_executed += 1
+                else:
+                    n_blocked += 1
 
             self._action_history.append(action)
+
+        self._governed_records.extend(governed_records)
 
         # Send alerts for executed actions
         self._send_feedback_alerts(actions)
@@ -532,9 +673,49 @@ class AgentFeedbackLoop:
             n_actions_generated=len(actions),
             n_actions_executed=n_executed,
             n_actions_blocked=n_blocked,
+            n_actions_advisory=n_advisory,
+            n_actions_pending_approval=n_pending,
             actions=actions,
+            governed_records=governed_records,
             system_state_changes=state_changes,
         )
+
+    def _execute_legacy(
+        self,
+        action: FeedbackAction,
+        state_changes: Dict[str, Any],
+    ) -> None:
+        """Legacy throttler + direct executor path (research/test environments)."""
+        self._throttle.reset_cycle()
+
+        if not action.auto_execute and action.severity not in ("EMERGENCY", "CRITICAL"):
+            logger.info("[LEGACY BLOCKED] Needs approval: %s → %s",
+                        action.action_type, action.reason)
+            return
+
+        allowed, throttle_reason = self._throttle.can_execute(action)
+        if not allowed:
+            logger.info("[LEGACY THROTTLED] %s → %s: %s",
+                        action.action_type, action.target, throttle_reason)
+            return
+
+        try:
+            result = self._execute_single(action)
+            action.executed = True
+            action.execution_result = result
+            self._throttle.record_execution(action)
+            if action.action_type in ("KILL_SWITCH", "BLOCK_ENTRY", "DELEVERAGE"):
+                state_changes[action.action_type] = {
+                    "target": action.target,
+                    "parameters": action.parameters,
+                    "timestamp": _ts(),
+                    "governed": False,
+                }
+            logger.info("[LEGACY EXECUTED] %s → %s: %s",
+                        action.action_type, action.target, result)
+        except Exception as exc:
+            action.execution_result = "ERROR: {}".format(exc)
+            logger.error("Legacy execution failed for %s: %s", action.action_type, exc)
 
     def _execute_single(self, action: FeedbackAction) -> str:
         """Execute a single feedback action."""
@@ -572,9 +753,9 @@ class AgentFeedbackLoop:
         except Exception as exc:
             # Fallback: write state to bus
             try:
-                from core.orchestrator import PairsOrchestrator
-                orch = PairsOrchestrator()
-                orch.bus.publish("kill_switch", {"active": True, "mode": action.parameters.get("mode"), "reason": action.reason})
+                from core.agent_bus import AgentBus
+                _bus = AgentBus()
+                _bus.publish("kill_switch", {"active": True, "mode": action.parameters.get("mode"), "reason": action.reason})
             except Exception:
                 pass
             return f"Kill-switch published to bus (direct activation failed: {exc})"
@@ -737,9 +918,81 @@ class AgentFeedbackLoop:
         except Exception:
             pass
 
+    def _build_default_executor_registry(self) -> Dict[str, Any]:
+        """Build the default executor registry mapping action_type → method.
+
+        Each executor receives the action parameters dict and returns a str result.
+        These are thin wrappers around the existing _exec_* methods, adapted to
+        accept a parameters dict rather than a FeedbackAction object.
+        """
+        def _make_executor(exec_method_name: str):
+            def executor(params: dict) -> str:
+                # Reconstruct a minimal FeedbackAction for legacy executor compatibility
+                action = FeedbackAction(
+                    action_id=params.get("action_id", _ts()),
+                    source_agent=params.get("source_agent", "governance_router"),
+                    action_type=params.get("action_type", ""),
+                    severity=params.get("severity", "INFO"),
+                    target=params.get("target", "portfolio"),
+                    parameters=params,
+                    reason=params.get("reason", ""),
+                )
+                method = getattr(self, exec_method_name)
+                return method(action)
+            return executor
+
+        return {
+            "KILL_SWITCH":      _make_executor("_exec_kill_switch"),
+            "BLOCK_ENTRY":      _make_executor("_exec_block_entry"),
+            "FORCE_EXIT":       _make_executor("_exec_force_exit"),
+            "DELEVERAGE":       _make_executor("_exec_deleverage"),
+            "ADJUST_THRESHOLD": _make_executor("_exec_adjust_threshold"),
+            "RETRAIN_MODEL":    _make_executor("_exec_retrain"),
+            "OPTIMIZE_PARAMS":  _make_executor("_exec_optimize"),
+            "UPDATE_CONFIG":    _make_executor("_exec_update_config"),
+            "PAUSE_PIPELINE":   _make_executor("_exec_pause"),
+        }
+
+    def run_due_observations(self) -> None:
+        """Evaluate pending outcome observations and update precision metrics.
+
+        Call this from a periodic health-check task (e.g., every hour in live
+        trading) to keep the PrecisionDemotionEngine current.
+        """
+        router = self._get_router()
+        if router is not None:
+            try:
+                router.evaluate_due_observations()
+            except Exception as exc:
+                logger.warning("run_due_observations: %s", exc)
+
+    def get_governance_metrics(self) -> Dict[str, Any]:
+        """Return current precision and demotion metrics from the GovernanceRouter."""
+        router = self._get_router()
+        if router is None:
+            return {"error": "GovernanceRouter not available"}
+        metrics = router.get_precision_metrics()
+        return {
+            m.action_type: {
+                "environment": m.environment.value,
+                "current_tier": m.current_tier.value,
+                "30d_precision": round(m.rolling_precision_30d, 3),
+                "90d_precision": round(m.rolling_precision_90d, 3),
+                "total_executed": m.total_executed,
+                "false_positive_rate": round(m.false_positive_rate, 3),
+                "tier_demoted": m.tier_demoted_at is not None,
+                "demotion_reason": m.tier_demotion_reason,
+            }
+            for m in metrics
+        }
+
     @property
     def action_history(self) -> List[FeedbackAction]:
         return list(self._action_history)
+
+    @property
+    def governed_records(self) -> List[GovernedActionRecord]:
+        return list(self._governed_records)
 
 
 def _ts() -> str:
