@@ -66,7 +66,7 @@ import pandas as pd
 
 from core.app_context import AppContext
 from core.sql_store import SqlStore
-from root.ibkr_connection import get_ib_instance, ib_connection_status
+from datafeed.ibkr_connection import get_ib_instance, ib_connection_status
 
 if TYPE_CHECKING:  # רק לטייפ-הינטס; בזמן ריצה נשתמש ב-import דינמי
     from ib_insync import IB  # pragma: no cover

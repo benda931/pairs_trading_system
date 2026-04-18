@@ -108,12 +108,9 @@ class TestNoStreamlitInCore:
 class TestNoRootImportsInCore:
     """Core modules must NEVER import from root/."""
 
-    KNOWN_VIOLATIONS = {
-        "full_parameter_optimization.py",  # AP-2: imports root.trade_logic, root.analysis
-        "ib_data_ingestor.py",             # AP-2: imports root.ibkr_connection
-        "ib_order_router.py",              # AP-2: imports root.ibkr_connection
-        "system_health.py",                # AP-2: imports root modules for health checks
-    }
+    # NOTE: Phase 1.2 + 1.3 FIXED all core/→root/ violations.
+    # Empty set = zero tolerance going forward.
+    KNOWN_VIOLATIONS: set[str] = set()
 
     def test_no_new_root_imports_in_core(self):
         """No NEW core/ modules should import from root/."""
@@ -284,3 +281,86 @@ class TestDataFreshnessGuard:
         from common.data_loader import load_price_data_guarded, DataFreshnessError
         assert callable(load_price_data_guarded)
         assert issubclass(DataFreshnessError, RuntimeError)
+
+
+# ─── Test: Run-level idempotency (AP-7) ────────────────────────
+
+class TestRunIdempotency:
+    """Pipeline must generate unique run_id per invocation."""
+
+    def test_orchestrator_generates_run_id(self):
+        """After run_daily_pipeline, _current_run_id should be set."""
+        from core.orchestrator import PairsOrchestrator
+        orch = PairsOrchestrator()
+        orch.run_daily_pipeline()
+        assert hasattr(orch, "_current_run_id")
+        assert orch._current_run_id
+        assert isinstance(orch._current_run_id, str)
+        assert len(orch._current_run_id) >= 8
+
+
+# ─── Test: Error telemetry (AP-5) ──────────────────────────────
+
+class TestErrorTelemetry:
+    """Structured error telemetry must replace silent except: pass."""
+
+    def test_telemetry_importable(self):
+        from common.error_telemetry import get_telemetry, log_exception, ErrorTelemetry
+        assert callable(get_telemetry)
+        assert callable(log_exception)
+
+    def test_telemetry_records_error(self):
+        from common.error_telemetry import ErrorTelemetry
+        t = ErrorTelemetry()
+        t.record("test_module", ValueError("test"), severity="WARNING")
+        stats = t.get_stats("test_module")
+        assert "test_module" in stats
+        assert stats["test_module"].count == 1
+
+    def test_log_exception_decorator(self):
+        from common.error_telemetry import log_exception, get_telemetry
+
+        @log_exception(module="test_decorator", default=-1)
+        def failing_func():
+            raise RuntimeError("boom")
+
+        result = failing_func()
+        assert result == -1
+        stats = get_telemetry().get_stats("test_decorator")
+        assert stats["test_decorator"].count >= 1
+
+
+# ─── Test: Tier-2 common utilities exist (Phase 1.3) ──────────
+
+class TestCommonUtilities:
+    """Common utilities extracted to break core/→root/ imports."""
+
+    def test_trade_costs_module(self):
+        from common.trade_costs import apply_transaction_costs
+        import pandas as pd
+        ret = pd.Series([0.01, -0.01, 0.02], index=pd.date_range("2024-01-01", periods=3))
+        pos = pd.Series([0.0, 1.0, 0.0], index=ret.index)
+        net = apply_transaction_costs(ret, pos, params={"commission_per_trade": 1.0})
+        assert isinstance(net, pd.Series)
+        assert len(net) == 3
+
+    def test_walk_forward_splits_module(self):
+        from common.walk_forward_splits import get_walk_forward_splits, WalkForwardSplit
+        import pandas as pd
+        idx = pd.date_range("2020-01-01", periods=2000, freq="B")
+        splits = get_walk_forward_splits(idx, n_splits=3, test_days=200, min_train_days=500)
+        assert len(splits) >= 1
+        for s in splits:
+            assert isinstance(s, WalkForwardSplit)
+            assert s.train_start <= s.train_end < s.test_start <= s.test_end
+
+
+# ─── Test: Phase 1.2 datafeed/ibkr_connection ──────────────────
+
+class TestDatafeedIbkrConnection:
+    """ibkr_connection must be importable from datafeed/ (not root/)."""
+
+    def test_datafeed_ibkr_connection_importable(self):
+        import datafeed.ibkr_connection
+        assert hasattr(datafeed.ibkr_connection, "get_ib_instance")
+        assert hasattr(datafeed.ibkr_connection, "ib_connection_status")

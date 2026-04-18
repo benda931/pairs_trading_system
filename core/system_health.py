@@ -205,7 +205,7 @@ class SystemHealthContract:
 
     def _check_ib_connection(self) -> Tuple[bool, str]:
         try:
-            from root.ibkr_connection import ib_connection_status, get_ib_instance
+            from datafeed.ibkr_connection import ib_connection_status, get_ib_instance
             ib = get_ib_instance(readonly=True)
             if ib is None:
                 return False, "IB instance unavailable"

@@ -49,7 +49,7 @@ from typing import Any, Dict, List, Optional, Sequence, TYPE_CHECKING, Mapping, 
 
 import logging
 
-from root.ibkr_connection import (
+from datafeed.ibkr_connection import (
     get_ib_instance,
     ib_connection_status,
     IBConnectionManager,

@@ -359,8 +359,16 @@ class PairsOrchestrator:
             with runtime safety check and control-plane kill-switch (P1-PORTINT,
             P1-SAFE, P0-KS — all COMPLETE via this call path).
         """
+        # AP-7: Generate unique run_id for idempotency + traceability
+        import uuid as _uuid
+        run_id = str(_uuid.uuid4())[:12]
+        self._current_run_id = run_id
+
         logger.info("=" * 60)
-        logger.info("Starting daily pipeline at %s", datetime.now(timezone.utc).isoformat())
+        logger.info(
+            "Starting daily pipeline run_id=%s at %s",
+            run_id, datetime.now(timezone.utc).isoformat(),
+        )
         logger.info("=" * 60)
 
         order = ["health_check", "data_refresh", "compute_signals", "risk_check"]
@@ -465,6 +473,7 @@ class PairsOrchestrator:
 
         # Publish pipeline summary
         self.bus.publish("daily_pipeline", {
+            "run_id": run_id,
             "tasks_ok": ok,
             "tasks_total": len(results),
             "results": [asdict(r) for r in results],
@@ -1932,7 +1941,13 @@ class PairsOrchestrator:
             return None
 
         # ── Idempotency guard ────────────────────────────────
-        batch_id = f"alloc_{datetime.now(timezone.utc).strftime('%Y%m%d')}"
+        # AP-7: use run_id if available; fall back to date for direct calls
+        run_id = getattr(self, '_current_run_id', None)
+        batch_id = (
+            f"alloc_{run_id}_{datetime.now(timezone.utc).strftime('%Y%m%d')}"
+            if run_id
+            else f"alloc_{datetime.now(timezone.utc).strftime('%Y%m%d')}"
+        )
         if getattr(self, '_last_allocation_batch', None) == batch_id:
             logger.warning(
                 "Allocation already ran for batch %s — skipping duplicate",

@@ -46,8 +46,8 @@ from common.advanced_metrics import (
 )
 
 from common.signal_generator import RSIConfig, rsi_signals, BollingerConfig, bollinger_signals
-from root.trade_logic import apply_transaction_costs
-from root.analysis import get_walk_forward_splits
+from common.trade_costs import apply_transaction_costs
+from common.walk_forward_splits import get_walk_forward_splits
 from meta_optimizer import meta_optimize
 
 # ---------------------------------------------------------------------------
