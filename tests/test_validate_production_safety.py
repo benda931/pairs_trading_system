@@ -179,3 +179,37 @@ def test_validate_execution_mode_rejects_effective_live_mode():
     assert any("effective dry_run must remain true" in err for err in errors)
     assert any("effective allow_live_orders must remain false" in err for err in errors)
     assert any("effective allow_agent_actions must remain false" in err for err in errors)
+
+
+def test_validate_feedback_throttling_accepts_current_wiring():
+    errors = validator._validate_feedback_throttling()
+
+    assert errors == []
+
+
+def test_validate_feedback_throttling_rejects_missing_persistent_guard(monkeypatch, tmp_path):
+    feedback_path = tmp_path / "agent_feedback.py"
+    throttler_path = tmp_path / "action_throttler.py"
+    feedback_path.write_text(
+        "\n".join(
+            [
+                "from core.action_throttler import ActionThrottler",
+                "class LegacyInMemoryActionThrottler: pass",
+                "self._throttle = throttler",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    throttler_path.write_text(
+        "DEFAULT_COOLDOWNS = {'FORCE_EXIT': 300}",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(validator, "AGENT_FEEDBACK_PATH", feedback_path)
+    monkeypatch.setattr(validator, "ACTION_THROTTLER_PATH", throttler_path)
+
+    errors = validator._validate_feedback_throttling()
+
+    assert any("missing persistent throttler import" in err for err in errors)
+    assert any("missing persistent throttler default" in err for err in errors)
+    assert any("missing cooldowns" in err for err in errors)

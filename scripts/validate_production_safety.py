@@ -8,6 +8,8 @@ from typing import Iterable
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CONFIG_PATH = REPO_ROOT / "config.json"
 WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "python-package-conda.yml"
+AGENT_FEEDBACK_PATH = REPO_ROOT / "core" / "agent_feedback.py"
+ACTION_THROTTLER_PATH = REPO_ROOT / "core" / "action_throttler.py"
 NEEDLE = "datetime.now(timezone.utc)" + "()"
 EXCLUDED_DIRS = {".git", "__pycache__", ".venv", "venv", "logs"}
 BLOCKED_CRYPTO_SYMBOLS = {
@@ -27,6 +29,15 @@ BLOCKED_CRYPTO_SYMBOLS = {
     "ETH",
     "BTC-USD",
     "ETH-USD",
+}
+REQUIRED_THROTTLED_ACTIONS = {
+    "KILL_SWITCH",
+    "DELEVERAGE",
+    "FORCE_EXIT",
+    "BLOCK_ENTRY",
+    "RETRAIN_MODEL",
+    "OPTIMIZE_PARAMS",
+    "UPDATE_CONFIG",
 }
 
 if str(REPO_ROOT) not in sys.path:
@@ -212,6 +223,49 @@ def _validate_execution_mode(cfg: dict) -> list[str]:
     return errors
 
 
+def _validate_feedback_throttling() -> list[str]:
+    errors: list[str] = []
+
+    try:
+        feedback_text = AGENT_FEEDBACK_PATH.read_text(encoding="utf-8")
+    except OSError as exc:
+        return [f"feedback throttling: unable to read {AGENT_FEEDBACK_PATH}: {exc}"]
+
+    try:
+        throttler_text = ACTION_THROTTLER_PATH.read_text(encoding="utf-8")
+    except OSError as exc:
+        return [f"feedback throttling: unable to read {ACTION_THROTTLER_PATH}: {exc}"]
+
+    required_feedback_snippets = {
+        "persistent throttler import": "from core.action_throttler import ActionThrottler as PersistentActionThrottler",
+        "legacy throttler renamed": "class LegacyInMemoryActionThrottler",
+        "persistent throttler default": "self._throttle = throttler or PersistentActionThrottler()",
+        "summary throttled count": "n_actions_throttled",
+        "summary throttled actions": "throttled_actions",
+    }
+    for label, snippet in required_feedback_snippets.items():
+        if snippet not in feedback_text:
+            errors.append(f"feedback throttling: missing {label} ({snippet})")
+
+    if "class ActionThrottler" in feedback_text:
+        errors.append(
+            "feedback throttling: legacy local ActionThrottler class must not exist in core/agent_feedback.py"
+        )
+
+    missing_action_types = [
+        action_type
+        for action_type in sorted(REQUIRED_THROTTLED_ACTIONS)
+        if f'"{action_type}":' not in throttler_text and f"'{action_type}':" not in throttler_text
+    ]
+    if missing_action_types:
+        errors.append(
+            "feedback throttling: core/action_throttler.py missing cooldowns for "
+            + ", ".join(missing_action_types)
+        )
+
+    return errors
+
+
 def _validate_ci_workflow(workflow_path: Path) -> list[str]:
     errors: list[str] = []
     try:
@@ -253,6 +307,7 @@ def main() -> int:
     failures.extend(_validate_orchestrator_contract())
     failures.extend(_validate_production_pair_runtime(cfg))
     failures.extend(_validate_execution_mode(cfg))
+    failures.extend(_validate_feedback_throttling())
     failures.extend(_validate_ci_workflow(WORKFLOW_PATH))
 
     if failures:
@@ -269,6 +324,7 @@ def main() -> int:
     print("- orchestrator pipeline contract validated")
     print("- production pair runtime resolution validated")
     print("- effective execution mode validated")
+    print("- feedback throttling wiring validated")
     print("- CI workflow production-safety gates validated")
     return 0
 
