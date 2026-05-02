@@ -3,6 +3,8 @@ from __future__ import annotations
 import importlib
 from pathlib import Path
 
+import pandas as pd
+
 from core.state_provider import InMemoryStateProvider
 
 
@@ -80,3 +82,40 @@ def test_ml_analysis_summary_uses_injected_provider() -> None:
     ml_analysis.publish_ml_summary_to_session(summary, key="ml_summary_test")
 
     assert provider.get("ml_summary_test") == summary
+
+
+def test_macro_adjustments_uses_injected_provider_for_regime_memory() -> None:
+    macro_adjustments = importlib.import_module("common.macro_adjustments")
+    provider = InMemoryStateProvider()
+    macro_adjustments.set_state_provider(provider)
+
+    cfg = macro_adjustments.MacroConfig()
+    cfg.min_regime_duration = 2
+    current = pd.Series({"risk_on": 0.3, "growth": 0.2, "inflation": 0.1})
+
+    first = macro_adjustments._gate_regime_change(current, "risk_on", cfg)
+    second = macro_adjustments._gate_regime_change(current, "risk_on", cfg)
+
+    assert first.equals(current)
+    assert second.equals(current)
+    stored = provider.get("macro_prev_regime_state")
+    assert stored["bucket"] == "risk_on"
+    assert stored["since"] == 1
+
+
+def test_macro_adjustments_uses_injected_provider_for_hysteresis() -> None:
+    macro_adjustments = importlib.import_module("common.macro_adjustments")
+    provider = InMemoryStateProvider()
+    macro_adjustments.set_state_provider(provider)
+
+    cfg = macro_adjustments.MacroConfig()
+    cfg.hysteresis_days = 2
+    regime = pd.Series({"risk_on": -0.4, "growth": -0.2, "inflation": 0.3})
+
+    first = macro_adjustments._apply_hysteresis_filters({"SPY/QQQ": True}, regime, cfg)
+    second = macro_adjustments._apply_hysteresis_filters({"SPY/QQQ": False}, regime, cfg)
+
+    assert first["SPY/QQQ"] is True
+    assert second["SPY/QQQ"] is True
+    stored = provider.get("macro_pair_hysteresis")
+    assert stored["SPY/QQQ"]["include"] is True

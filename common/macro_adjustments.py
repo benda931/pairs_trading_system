@@ -30,11 +30,35 @@ except Exception:  # noqa: BLE001
     ConfigDict = dict  # type: ignore
     _HAS_PYDANTIC = False
 
-try:  # Streamlit ל-UI בלבד
-    import streamlit as st  # type: ignore
-    _HAS_STREAMLIT = True
-except Exception:  # noqa: BLE001
-    _HAS_STREAMLIT = False
+_STATE_PROVIDER: Optional[StateProvider] = None
+
+
+def set_state_provider(provider: StateProvider) -> None:
+    global _STATE_PROVIDER
+    _STATE_PROVIDER = provider
+
+
+def _get_state_provider() -> StateProvider:
+    global _STATE_PROVIDER
+    if _STATE_PROVIDER is None:
+        _STATE_PROVIDER = get_default_state_provider()
+    return _STATE_PROVIDER
+
+
+def _get_streamlit():
+    try:
+        import streamlit as st  # type: ignore
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError('Streamlit runtime is required for this UI function') from exc
+    return st
+
+
+class _StreamlitProxy:
+    def __getattr__(self, name: str):
+        return getattr(_get_streamlit(), name)
+
+
+st = _StreamlitProxy()
 
 # ===== Logging =====
 logger = logging.getLogger("common.macro_adjustments")
@@ -739,21 +763,19 @@ def _gate_regime_change(current: pd.Series, bucket: str, cfg: MacroConfig) -> pd
     """אוכף min_regime_duration באמצעות session_state (אם קיים Streamlit).
     אם השינוי מוקדם מדי — נשיב את ה-snapshot הקודם; אחרת נעדכן ונקבל את הנוכחי.
     """
-    if not _HAS_STREAMLIT:
-        return current
-    ss = st.session_state
+    ss = _get_state_provider()
     prev = ss.get("macro_prev_regime_state")
     if not prev:
-        ss["macro_prev_regime_state"] = {"bucket": bucket, "since": 0, "snapshot": current}
+        ss.set("macro_prev_regime_state", {"bucket": bucket, "since": 0, "snapshot": current})
         return current
     if prev["bucket"] == bucket:
         prev["since"] = int(prev.get("since", 0)) + 1
         prev["snapshot"] = current
-        ss["macro_prev_regime_state"] = prev
+        ss.set("macro_prev_regime_state", prev)
         return current
     if int(prev.get("since", 0)) < int(getattr(cfg, "min_regime_duration", 0)):
         return prev.get("snapshot", current)
-    ss["macro_prev_regime_state"] = {"bucket": bucket, "since": 0, "snapshot": current}
+    ss.set("macro_prev_regime_state", {"bucket": bucket, "since": 0, "snapshot": current})
     return current
 
 
@@ -764,9 +786,7 @@ def _apply_hysteresis_filters(
     אם אין Streamlit — מחזיר את המפה כפי שהיא.
     שינוי include מאושר רק אם חלפו לפחות `cfg.hysteresis_days` טיקים מאז ההיפוך הקודם.
     """
-    if not _HAS_STREAMLIT:
-        return pair_filt
-    ss = st.session_state
+    ss = _get_state_provider()
     hist: Dict[str, Dict[str, int | bool]] = ss.get("macro_pair_hysteresis", {})
     out: Dict[str, bool] = {}
     min_ticks = int(getattr(cfg, "hysteresis_days", 0))
@@ -788,7 +808,7 @@ def _apply_hysteresis_filters(
                 out[pid] = bool(state.get("include"))
                 state["since"] = int(state.get("since", 0)) + 1
         hist[pid] = state
-    ss["macro_pair_hysteresis"] = hist
+    ss.set("macro_pair_hysteresis", hist)
     return out
 @dataclass
 class AdjustmentResult:
@@ -973,10 +993,7 @@ def render_streamlit_ui(
 
     הערה: השימוש ב-Streamlit אופציונלי; אם לא מותקן, ייזרק RuntimeError.
     """
-    if not _HAS_STREAMLIT:
-        raise RuntimeError("Streamlit אינו מותקן בסביבה זו")
-
-    st = __import__("streamlit")  # import מקומי למניעת עומס כאשר לא בשימוש
+    st = _get_streamlit()
     st.header("⚙️ התאמות מאקרו לתיק / לזוגות")
 
     if cfg is None:

@@ -1,15 +1,15 @@
 # -*- coding: utf-8 -*-
 """
-core/alert_bus.py — Dashboard Alert Bus (Streamlit-decoupled)
-===============================================================
+core/alert_bus.py - Dashboard Alert Bus (Streamlit-decoupled)
+==============================================================
 
 Event Bus for dashboard-level alerts and notifications.
 Extracted from root/dashboard.py (Part 32/35).
 
 ARCHITECTURE (Phase 2.2 refactor):
 - Core logic uses StateProvider protocol (no direct streamlit dependency)
-- If Streamlit is available AND running, uses StreamlitStateProvider
-- Otherwise falls back to InMemoryStateProvider
+- Default provider resolution picks Streamlit session only when runtime exists
+- Otherwise falls back to in-memory state for CLI, tests, and API contexts
 - UI render functions moved to root/dashboard_alerts_bus.py
 
 Public API (stable):
@@ -22,72 +22,34 @@ from __future__ import annotations
 
 import logging
 import uuid
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import (
-    Any,
-    Callable,
-    Dict,
-    List,
-    Literal,
-    Optional,
-)
+from typing import Any, Callable, Dict, List, Literal, Optional
 
-from collections.abc import Mapping, Sequence
+from core.state_provider import StateProvider, get_default_state_provider
 
-# Core contracts for Streamlit decoupling
-from core.state_provider import InMemoryStateProvider, StateProvider, StreamlitStateProvider, get_default_state_provider
-
-# Fallback for json_safe
 try:  # pragma: no cover
     from common.json_safe import make_json_safe as _make_json_safe  # type: ignore[import]
 except Exception:  # pragma: no cover
     def _make_json_safe(obj: Any) -> Any:
         return obj
 
+
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------------
 
 SESSION_KEY_ALERTS: str = "dashboard_alerts"
 
-# ---------------------------------------------------------------------------
-# State provider (decouples core from Streamlit)
-# ---------------------------------------------------------------------------
-
-# Lazy singleton — prefer Streamlit session if available, else in-memory.
 _state_provider: Optional[StateProvider] = None
 _alert_center_renderer: Optional[Callable[[int, Optional[Sequence[str]]], None]] = None
 
 
 def _get_state_provider() -> StateProvider:
-    """
-    Get the active state provider.
-
-    Priority:
-    1. Explicitly injected provider (via set_state_provider())
-    2. Streamlit session (if streamlit imported AND in runtime context)
-    3. In-memory fallback (for CLI, tests, API)
-
-    Never raises — always returns a usable provider.
-    """
+    """Return the active state provider without importing Streamlit here."""
     global _state_provider
-    if _state_provider is not None:
-        return _state_provider
-
-    # Try Streamlit — but only if it's both available AND has runtime
-    try:
-        import streamlit as st  # noqa: PLC0415
-        _ = st.session_state  # Access check — raises outside Streamlit runtime
-        _state_provider = _StreamlitStateProvider()
-        return _state_provider
-    except Exception:
-        pass
-
-    # Fallback: in-memory (works in CLI, tests, API)
-    _state_provider = InMemoryStateProvider()
+    if _state_provider is None:
+        _state_provider = get_default_state_provider()
     return _state_provider
 
 
@@ -105,66 +67,15 @@ def set_dashboard_alert_renderer(
     _alert_center_renderer = renderer
 
 
-class _StreamlitStateProvider:
-    """Adapter that routes get/set/has to st.session_state."""
-    def get(self, key: str, default: Any = None) -> Any:
-        try:
-            import streamlit as st  # noqa: PLC0415
-            return st.session_state.get(key, default)
-        except Exception:
-            return default
-
-    def set(self, key: str, value: Any) -> None:
-        try:
-            import streamlit as st  # noqa: PLC0415
-            st.session_state[key] = value
-        except Exception:
-            pass
-
-    def has(self, key: str) -> bool:
-        try:
-            import streamlit as st  # noqa: PLC0415
-            return key in st.session_state
-        except Exception:
-            return False
-
-
-class _StreamlitStateProvider(StreamlitStateProvider):
-    """Canonical Streamlit-backed provider used by the alert bus."""
-
-
-def _shared_state_provider() -> StateProvider:
-    global _state_provider
-    if _state_provider is None:
-        _state_provider = get_default_state_provider()
-    return _state_provider
-
-
-_get_state_provider = _shared_state_provider
-
-
-# ---------------------------------------------------------------------------
-# DashboardAlert dataclass
-# ---------------------------------------------------------------------------
-
-
 @dataclass
 class DashboardAlert:
     """
-    Dashboard-level alert/notification — internal Event Bus.
+    Dashboard-level alert/notification - internal Event Bus.
 
     Use cases:
     - Risk Engine: "Exposure limit breached", "Kill-switch armed"
     - Macro Engine: regime shifts, macro events
     - Agents: action taken, rejected, or failed
-
-    Fields:
-    - id: unique identifier (UUID4 hex)
-    - ts_utc: UTC timestamp (isoformat, seconds)
-    - level: severity: "info" / "success" / "warning" / "error"
-    - source: e.g. "risk_engine", "macro_engine", "agent", "backtest_tab"
-    - message: short human-readable description
-    - details: optional dict with extra fields (pair, portfolio_id, regime, etc.)
     """
 
     id: str
@@ -175,20 +86,10 @@ class DashboardAlert:
     details: Dict[str, Any] = field(default_factory=dict)
 
 
-# ---------------------------------------------------------------------------
-# Storage helpers (use StateProvider instead of direct st.session_state)
-# ---------------------------------------------------------------------------
-
-
 def _ensure_alerts_list() -> List[Dict[str, Any]]:
-    """
-    Ensure alerts list is present in state provider.
-
-    Returns list of DashboardAlert dicts (JSON-friendly).
-    """
+    """Ensure alerts list is present in the active state provider."""
     provider = _get_state_provider()
     obj = provider.get(SESSION_KEY_ALERTS, [])
-
     if not isinstance(obj, list):
         obj = []
         provider.set(SESSION_KEY_ALERTS, obj)
@@ -196,7 +97,6 @@ def _ensure_alerts_list() -> List[Dict[str, Any]]:
 
 
 def _alert_to_dict(alert: DashboardAlert) -> Dict[str, Any]:
-    """Serialize to JSON-friendly dict."""
     return {
         "id": alert.id,
         "ts_utc": alert.ts_utc,
@@ -223,36 +123,13 @@ def _alert_from_mapping(data: Mapping[str, Any]) -> Optional[DashboardAlert]:
         return None
 
 
-# ---------------------------------------------------------------------------
-# Public API
-# ---------------------------------------------------------------------------
-
-
 def emit_dashboard_alert(
     level: Literal["info", "success", "warning", "error"],
     source: str,
     message: str,
     details: Optional[Mapping[str, Any]] = None,
 ) -> DashboardAlert:
-    """
-    Emit a new dashboard alert.
-
-    Parameters
-    ----------
-    level : str
-        "info" | "success" | "warning" | "error"
-    source : str
-        Origin (e.g. "risk_engine", "agent:kill_switch")
-    message : str
-        Human-readable description.
-    details : Mapping, optional
-        Extra context (JSON-serializable).
-
-    Returns
-    -------
-    DashboardAlert
-        The created alert.
-    """
+    """Emit a new dashboard alert and persist it via the active state provider."""
     details_dict: Dict[str, Any] = dict(details) if isinstance(details, Mapping) else {}
     alert = DashboardAlert(
         id=uuid.uuid4().hex,
@@ -265,7 +142,6 @@ def emit_dashboard_alert(
 
     alerts_list = _ensure_alerts_list()
     alerts_list.append(_alert_to_dict(alert))
-
     _get_state_provider().set(SESSION_KEY_ALERTS, alerts_list)
 
     logger.info(
@@ -274,27 +150,22 @@ def emit_dashboard_alert(
         alert.source,
         alert.message,
     )
-
     return alert
 
 
 def get_dashboard_alerts(limit: Optional[int] = None) -> List[DashboardAlert]:
-    """
-    Return alerts (newest first). If limit provided, only return top N.
-    """
+    """Return alerts (newest first). If limit provided, only return top N."""
     alerts_raw = _ensure_alerts_list()
     alerts: List[DashboardAlert] = []
     for item in alerts_raw:
         if isinstance(item, Mapping):
-            a = _alert_from_mapping(item)
-            if a is not None:
-                alerts.append(a)
+            alert = _alert_from_mapping(item)
+            if alert is not None:
+                alerts.append(alert)
 
-    alerts.sort(key=lambda a: a.ts_utc, reverse=True)
-
+    alerts.sort(key=lambda alert: alert.ts_utc, reverse=True)
     if limit is not None and limit > 0:
         alerts = alerts[:limit]
-
     return alerts
 
 
@@ -305,9 +176,9 @@ def clear_dashboard_alerts(
     """
     Clear alerts from the bus.
 
-    - If level=None and source=None → clear all
-    - If level != None → clear only that level
-    - If source != None → clear only from that source
+    - If level=None and source=None -> clear all
+    - If level != None -> clear only that level
+    - If source != None -> clear only from that source
     - Can be combined (level="info", source="system")
     """
     alerts_raw = _ensure_alerts_list()
@@ -315,26 +186,16 @@ def clear_dashboard_alerts(
         return
 
     filtered: List[Dict[str, Any]] = []
-
     for item in alerts_raw:
         if not isinstance(item, Mapping):
             continue
-        if level is not None:
-            lvl = str(item.get("level") or "").lower()
-            if lvl == level.lower():
-                continue
-        if source is not None:
-            src = str(item.get("source") or "")
-            if src == source:
-                continue
+        if level is not None and str(item.get("level") or "").lower() == level.lower():
+            continue
+        if source is not None and str(item.get("source") or "") == source:
+            continue
         filtered.append(item)
 
     _get_state_provider().set(SESSION_KEY_ALERTS, filtered)
-
-
-# ---------------------------------------------------------------------------
-# UI shim — delegates to root/ (Phase 2.2: no Streamlit in core)
-# ---------------------------------------------------------------------------
 
 
 def render_dashboard_alert_center(
@@ -342,7 +203,7 @@ def render_dashboard_alert_center(
     filter_levels: Optional[Sequence[str]] = None,
 ) -> None:
     """
-    Render alert center (shim — delegates to root/dashboard_alerts_bus).
+    Render alert center (shim - delegates to root/dashboard_alerts_bus).
 
     Kept for backward compatibility. The actual Streamlit rendering lives
     in root/dashboard_alerts_bus.py (Tier 5).
