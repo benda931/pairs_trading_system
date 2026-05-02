@@ -102,6 +102,10 @@ def _validate_config(cfg: dict) -> list[str]:
         errors.append("config.json: asset_policy.allow_crypto must be false")
     if cfg.get("use_production_pairs") is not True:
         errors.append("config.json: use_production_pairs must be true")
+    if cfg.get("use_production_pairs") is True and asset_policy.get("enforce_etf_like_in_production") is not True:
+        errors.append(
+            "config.json: asset_policy.enforce_etf_like_in_production must be true when use_production_pairs is enabled"
+        )
     if not isinstance(production_pairs, list) or not production_pairs:
         errors.append("config.json: production_pairs must exist and be non-empty")
     else:

@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 from common.pair_utils import (
     extract_symbols_from_pairs,
+    load_asset_policy,
     normalize_pairs,
     pair_allowed_by_policy,
     parse_pair_record,
@@ -70,6 +74,17 @@ def test_pair_allowed_by_policy_allows_non_etf_symbol_when_not_enforced():
         "etf_like_symbols": ["SPY", "QQQ"],
     }
     assert pair_allowed_by_policy("SPY", "AAPL", policy=policy) is True
+
+
+def test_configured_production_pairs_are_allowed_under_enforced_etf_like_policy():
+    repo_root = Path(__file__).resolve().parent.parent
+    cfg = json.loads((repo_root / "config.json").read_text(encoding="utf-8"))
+    policy = load_asset_policy(cfg)
+
+    assert policy["enforce_etf_like_in_production"] is True
+    for pair in cfg["production_pairs"]:
+        sym_x, sym_y = parse_pair_record(pair)
+        assert pair_allowed_by_policy(sym_x, sym_y, policy=policy) is True
 
 
 def test_extract_symbols_from_config_style_string_pairs():

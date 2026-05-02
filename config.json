@@ -101,7 +101,7 @@
   "asset_policy": {
     "enabled": true,
     "prefer_etf_like": true,
-    "enforce_etf_like_in_production": false,
+    "enforce_etf_like_in_production": true,
     "etf_like_symbols": [
       "IBB",
       "XBI",
