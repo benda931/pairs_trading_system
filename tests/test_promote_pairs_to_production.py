@@ -62,6 +62,19 @@ def _write_ranked_csv(path: Path) -> None:
                 "is_clone_like": False,
                 "seed_category": "etf",
             },
+            {
+                "sym_x": "SPY",
+                "sym_y": "AAPL",
+                "pair_score": 0.86,
+                "pair_label": "B+",
+                "corr": 0.82,
+                "p_value": 0.02,
+                "half_life": 40,
+                "n_obs": 510,
+                "is_viable": True,
+                "is_clone_like": False,
+                "seed_category": "mixed",
+            },
         ]
     )
     df.to_csv(path, index=False)
@@ -78,6 +91,8 @@ def _write_config(path: Path) -> None:
                     "enabled": True,
                     "allow_crypto": False,
                     "require_is_viable_for_production": True,
+                    "enforce_etf_like_in_production": False,
+                    "etf_like_symbols": ["SPY", "QQQ", "IBB", "XBI"],
                     "min_n_obs": 252,
                     "max_half_life": 200,
                     "max_corr_clone": 0.995,
@@ -214,3 +229,49 @@ def test_promote_pairs_to_production_with_wf_gate_and_config_backup(tmp_path, mo
         "wf_dsr_gate_failed;wf_dsr_below_threshold;wf_oos_sharpe_below_threshold;wf_prob_overfit_above_threshold",
         "wf_dsr_gate_failed;wf_dsr_below_threshold;wf_oos_sharpe_below_threshold;wf_prob_overfit_above_threshold",
     }
+
+
+def test_promote_pairs_to_production_enforces_etf_like_allowlist(tmp_path):
+    from scripts.promote_pairs_to_production import main
+
+    ranked_csv = tmp_path / "pairs_universe_ranked.csv"
+    config_path = tmp_path / "config.json"
+    output_json = tmp_path / "production_pairs_approved.json"
+    output_csv = tmp_path / "production_pairs_approved.csv"
+    _write_ranked_csv(ranked_csv)
+    _write_config(config_path)
+
+    rc = main(
+        [
+            "--ranked-csv",
+            str(ranked_csv),
+            "--config",
+            str(config_path),
+            "--top",
+            "30",
+            "--output-json",
+            str(output_json),
+            "--output-csv",
+            str(output_csv),
+            "--min-score",
+            "0.3",
+            "--min-label",
+            "B-",
+            "--min-n-obs",
+            "252",
+            "--max-half-life",
+            "200",
+            "--no-crypto",
+            "--enforce-etf-like",
+            "--require-viable",
+        ]
+    )
+
+    assert rc == 0
+    approved = json.loads(output_json.read_text(encoding="utf-8"))
+    assert "SPY/QQQ" in approved
+    assert "IBB/XBI" in approved
+    assert "SPY/AAPL" not in approved
+    report = pd.read_csv(output_csv)
+    blocked = report.set_index(["sym_x", "sym_y"])["rejection_reason"].to_dict()
+    assert blocked[("SPY", "AAPL")] == "not_etf_like"

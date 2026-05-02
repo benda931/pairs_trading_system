@@ -71,6 +71,8 @@ def _default_asset_policy() -> dict[str, Any]:
     return {
         "enabled": True,
         "prefer_etf_like": True,
+        "enforce_etf_like_in_production": False,
+        "etf_like_symbols": [],
         "allow_crypto": False,
         "blocked_symbols": list(DEFAULT_BLOCKED_SYMBOLS),
         "blocked_categories": list(DEFAULT_BLOCKED_CATEGORIES),
@@ -186,6 +188,19 @@ def is_crypto_related_pair(
     )
 
 
+def _is_etf_like_symbol(symbol: Any, policy: Mapping[str, Any] | None = None) -> bool:
+    sym = canonical_symbol(symbol)
+    if not sym:
+        return False
+    policy_map = dict(policy or {})
+    allowlist = {
+        canonical_symbol(item)
+        for item in list(policy_map.get("etf_like_symbols", []) or [])
+        if canonical_symbol(item)
+    }
+    return sym in allowlist
+
+
 def load_asset_policy(config: Mapping[str, Any] | None = None) -> dict:
     policy = _default_asset_policy()
     overrides = {}
@@ -203,6 +218,11 @@ def load_asset_policy(config: Mapping[str, Any] | None = None) -> dict:
         str(item).strip().lower()
         for item in list(policy.get("blocked_categories", []) or [])
         if not _is_missing(item)
+    ]
+    policy["etf_like_symbols"] = [
+        sym
+        for sym in (canonical_symbol(item) for item in list(policy.get("etf_like_symbols", []) or []))
+        if sym
     ]
     return policy
 
@@ -229,6 +249,13 @@ def pair_allowed_by_policy(
 
     if not bool(effective_policy.get("allow_crypto", False)):
         if is_crypto_related_pair(sym_x, sym_y, seed_category=category, policy=effective_policy):
+            return False
+
+    if bool(effective_policy.get("enforce_etf_like_in_production", False)):
+        if not (
+            _is_etf_like_symbol(sym_x, policy=effective_policy)
+            and _is_etf_like_symbol(sym_y, policy=effective_policy)
+        ):
             return False
 
     if bool(effective_policy.get("require_is_viable_for_production", True)):

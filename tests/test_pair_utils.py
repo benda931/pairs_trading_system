@@ -45,6 +45,33 @@ def test_pair_allowed_by_policy_allows_spy_qqq():
     assert pair_allowed_by_policy("SPY", "QQQ", policy={"allow_crypto": False}) is True
 
 
+def test_pair_allowed_by_policy_enforces_etf_like_allowlist():
+    policy = {
+        "allow_crypto": False,
+        "enforce_etf_like_in_production": True,
+        "etf_like_symbols": ["SPY", "QQQ"],
+    }
+    assert pair_allowed_by_policy("SPY", "QQQ", policy=policy) is True
+
+
+def test_pair_allowed_by_policy_blocks_non_allowlisted_symbol_when_enforced():
+    policy = {
+        "allow_crypto": False,
+        "enforce_etf_like_in_production": True,
+        "etf_like_symbols": ["SPY", "QQQ"],
+    }
+    assert pair_allowed_by_policy("SPY", "AAPL", policy=policy) is False
+
+
+def test_pair_allowed_by_policy_allows_non_etf_symbol_when_not_enforced():
+    policy = {
+        "allow_crypto": False,
+        "enforce_etf_like_in_production": False,
+        "etf_like_symbols": ["SPY", "QQQ"],
+    }
+    assert pair_allowed_by_policy("SPY", "AAPL", policy=policy) is True
+
+
 def test_extract_symbols_from_config_style_string_pairs():
     symbols = extract_symbols_from_pairs(["SPY/QQQ", "IWM/SPY"])
     assert symbols == ["IWM", "QQQ", "SPY"]

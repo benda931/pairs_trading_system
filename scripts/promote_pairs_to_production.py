@@ -26,6 +26,7 @@ class PromotionArgs:
     min_n_obs: int
     max_half_life: float
     no_crypto: bool
+    enforce_etf_like: bool
     require_viable: bool
     run_walk_forward: bool
     min_dsr: float
@@ -63,7 +64,14 @@ def _normalize_ranked_df(path: Path) -> pd.DataFrame:
     return df
 
 
-def _policy_rejection_reason(row: pd.Series, policy: dict, *, no_crypto: bool, require_viable: bool) -> str | None:
+def _policy_rejection_reason(
+    row: pd.Series,
+    policy: dict,
+    *,
+    no_crypto: bool,
+    enforce_etf_like: bool,
+    require_viable: bool,
+) -> str | None:
     row_map = row.to_dict()
     sym_x = row_map.get("sym_x")
     sym_y = row_map.get("sym_y")
@@ -71,6 +79,8 @@ def _policy_rejection_reason(row: pd.Series, policy: dict, *, no_crypto: bool, r
     effective_policy = dict(policy or {})
     if no_crypto:
         effective_policy["allow_crypto"] = False
+    if enforce_etf_like:
+        effective_policy["enforce_etf_like_in_production"] = True
     if require_viable:
         effective_policy["require_is_viable_for_production"] = True
 
@@ -81,6 +91,14 @@ def _policy_rejection_reason(row: pd.Series, policy: dict, *, no_crypto: bool, r
         policy=effective_policy,
     ):
         return "crypto_blocked"
+    if bool(effective_policy.get("enforce_etf_like_in_production", False)):
+        etf_like_symbols = {
+            str(item).strip().upper()
+            for item in list(effective_policy.get("etf_like_symbols", []) or [])
+            if str(item).strip()
+        }
+        if str(sym_x or "").strip().upper() not in etf_like_symbols or str(sym_y or "").strip().upper() not in etf_like_symbols:
+            return "not_etf_like"
     if require_viable and row_map.get("is_viable") is False:
         return "not_viable_for_production"
     n_obs = _coerce_float(row_map.get("n_obs"))
@@ -106,6 +124,7 @@ def _base_filter_reason(row: pd.Series, args: PromotionArgs, policy: dict) -> st
         row,
         policy,
         no_crypto=args.no_crypto,
+        enforce_etf_like=args.enforce_etf_like,
         require_viable=args.require_viable,
     )
     if policy_reason:
@@ -277,6 +296,8 @@ def run_promotion(args: PromotionArgs) -> pd.DataFrame:
     policy = load_asset_policy(cfg)
     if args.no_crypto:
         policy["allow_crypto"] = False
+    if args.enforce_etf_like:
+        policy["enforce_etf_like_in_production"] = True
     if args.require_viable:
         policy["require_is_viable_for_production"] = True
 
@@ -299,6 +320,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--min-n-obs", type=int, default=252)
     parser.add_argument("--max-half-life", type=float, default=200.0)
     parser.add_argument("--no-crypto", action="store_true")
+    parser.add_argument("--enforce-etf-like", action="store_true")
     parser.add_argument("--require-viable", action="store_true")
     parser.add_argument("--run-walk-forward", action="store_true")
     parser.add_argument("--min-dsr", type=float, default=0.65)
@@ -324,6 +346,7 @@ def main(argv: list[str] | None = None) -> int:
         min_n_obs=int(ns.min_n_obs),
         max_half_life=float(ns.max_half_life),
         no_crypto=bool(ns.no_crypto),
+        enforce_etf_like=bool(ns.enforce_etf_like),
         require_viable=bool(ns.require_viable),
         run_walk_forward=bool(ns.run_walk_forward),
         min_dsr=float(ns.min_dsr),

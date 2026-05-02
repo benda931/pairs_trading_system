@@ -130,6 +130,7 @@ class SelectionConfig:
     duckdb_table: str = "dq_pairs"
     production_mode: bool = False
     no_crypto: bool = False
+    enforce_etf_like: bool = False
     require_viable: bool = False
     asset_policy_config: Path = Path("config.json")
     asset_policy: Optional[dict] = None
@@ -285,6 +286,8 @@ def _apply_asset_policy_filters(df: pd.DataFrame, cfg: SelectionConfig) -> pd.Da
         policy["require_is_viable_for_production"] = True
     if cfg.no_crypto:
         policy["allow_crypto"] = False
+    if cfg.enforce_etf_like:
+        policy["enforce_etf_like_in_production"] = True
     if cfg.require_viable:
         policy["require_is_viable_for_production"] = True
 
@@ -496,6 +499,11 @@ def main() -> int:
         help="Reject crypto and crypto-related pairs.",
     )
     parser.add_argument(
+        "--enforce-etf-like",
+        action="store_true",
+        help="Require both pair legs to be in the asset_policy etf_like_symbols allowlist.",
+    )
+    parser.add_argument(
         "--asset-policy-config",
         type=str,
         default="config.json",
@@ -521,6 +529,8 @@ def main() -> int:
         asset_policy["require_is_viable_for_production"] = True
     if args.no_crypto:
         asset_policy["allow_crypto"] = False
+    if args.enforce_etf_like:
+        asset_policy["enforce_etf_like_in_production"] = True
     if args.require_viable:
         asset_policy["require_is_viable_for_production"] = True
 
@@ -538,6 +548,7 @@ def main() -> int:
         duckdb_table=args.duckdb_table,
         production_mode=args.production_mode,
         no_crypto=args.no_crypto,
+        enforce_etf_like=args.enforce_etf_like,
         require_viable=args.require_viable,
         asset_policy_config=asset_policy_config,
         asset_policy=asset_policy,
@@ -552,7 +563,8 @@ def main() -> int:
           f"allow_clones={cfg.allow_clones}")
     print(
         f"[Info] production_mode={cfg.production_mode}, no_crypto={cfg.no_crypto}, "
-        f"require_viable={cfg.require_viable}, asset_policy_config={cfg.asset_policy_config}"
+        f"enforce_etf_like={cfg.enforce_etf_like}, require_viable={cfg.require_viable}, "
+        f"asset_policy_config={cfg.asset_policy_config}"
     )
     print(f"[Info] DuckDB path: {cfg.duckdb_path or _default_duckdb_path()}")
 
