@@ -62,4 +62,5 @@ jobs:
           tests/test_promote_pairs_to_production.py
           tests/test_state_provider.py
           tests/test_agent_feedback.py
+          tests/test_validate_production_safety.py
           -q
