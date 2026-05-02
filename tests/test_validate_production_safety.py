@@ -213,3 +213,118 @@ def test_validate_feedback_throttling_rejects_missing_persistent_guard(monkeypat
     assert any("missing persistent throttler import" in err for err in errors)
     assert any("missing persistent throttler default" in err for err in errors)
     assert any("missing cooldowns" in err for err in errors)
+
+
+def test_validate_allocation_wiring_accepts_current_setup():
+    errors = validator._validate_allocation_wiring()
+
+    assert errors == []
+
+
+def test_validate_allocation_wiring_rejects_missing_guard(monkeypatch, tmp_path):
+    orchestrator_path = tmp_path / "orchestrator.py"
+    guard_path = tmp_path / "allocation_guard.py"
+    orchestrator_path.write_text(
+        "\n".join(
+            [
+                "def run_daily_pipeline():",
+                "    pass",
+                "def run_portfolio_allocation_cycle():",
+                "    return None",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    guard_path.write_text(
+        'def make_batch_id():\n    return "daily:20260502"\n',
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(validator, "ORCHESTRATOR_PATH", orchestrator_path)
+    monkeypatch.setattr(validator, "ALLOCATION_GUARD_PATH", guard_path)
+
+    errors = validator._validate_allocation_wiring()
+
+    assert any("missing allocation guard import" in err for err in errors)
+    assert any("missing guard check" in err for err in errors)
+
+
+def test_validate_promotion_workflow_accepts_current_setup():
+    errors = validator._validate_promotion_workflow()
+
+    assert errors == []
+
+
+def test_validate_promotion_workflow_rejects_missing_wf_gate(monkeypatch, tmp_path):
+    promotion_path = tmp_path / "promote_pairs_to_production.py"
+    selection_path = tmp_path / "select_top_pairs_from_ranked_csv.py"
+    promotion_path.write_text(
+        "\n".join(
+            [
+                "def run():",
+                "    return []",
+                'FLAG = "--no-crypto"',
+            ]
+        ),
+        encoding="utf-8",
+    )
+    selection_path.write_text(
+        "\n".join(
+            [
+                "def main():",
+                "    return 0",
+                'FLAG = "--production-mode"',
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(validator, "PROMOTION_SCRIPT_PATH", promotion_path)
+    monkeypatch.setattr(validator, "SELECTION_SCRIPT_PATH", selection_path)
+
+    errors = validator._validate_promotion_workflow()
+
+    assert any("missing walk forward gate" in err for err in errors)
+    assert any("selection script missing asset policy gating" in err for err in errors)
+
+
+def test_validate_state_provider_wiring_accepts_current_setup():
+    errors = validator._validate_state_provider_wiring()
+
+    assert errors == []
+
+
+def test_validate_state_provider_wiring_rejects_direct_streamlit(monkeypatch, tmp_path):
+    provider_path = tmp_path / "state_provider.py"
+    app_context_path = tmp_path / "app_context.py"
+    provider_path.write_text(
+        "\n".join(
+            [
+                "class StateProvider: pass",
+                "class InMemoryStateProvider: pass",
+                "class StreamlitStateProvider: pass",
+                "def get_default_state_provider(): return InMemoryStateProvider()",
+                "import streamlit as st",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    app_context_path.write_text(
+        "\n".join(
+            [
+                "import streamlit as st",
+                "def get_state_provider():",
+                "    return None",
+                "x = st.session_state",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(validator, "STATE_PROVIDER_PATH", provider_path)
+    monkeypatch.setattr(validator, "APP_CONTEXT_PATH", app_context_path)
+
+    errors = validator._validate_state_provider_wiring()
+
+    assert any("must not access st.session_state directly" in err for err in errors)
+    assert any("must not import streamlit directly" in err for err in errors)

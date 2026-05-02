@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import json
 import sys
 from pathlib import Path
@@ -10,6 +11,12 @@ CONFIG_PATH = REPO_ROOT / "config.json"
 WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "python-package-conda.yml"
 AGENT_FEEDBACK_PATH = REPO_ROOT / "core" / "agent_feedback.py"
 ACTION_THROTTLER_PATH = REPO_ROOT / "core" / "action_throttler.py"
+ORCHESTRATOR_PATH = REPO_ROOT / "core" / "orchestrator.py"
+ALLOCATION_GUARD_PATH = REPO_ROOT / "core" / "allocation_guard.py"
+PROMOTION_SCRIPT_PATH = REPO_ROOT / "scripts" / "promote_pairs_to_production.py"
+SELECTION_SCRIPT_PATH = REPO_ROOT / "scripts" / "select_top_pairs_from_ranked_csv.py"
+STATE_PROVIDER_PATH = REPO_ROOT / "core" / "state_provider.py"
+APP_CONTEXT_PATH = REPO_ROOT / "core" / "app_context.py"
 NEEDLE = "datetime.now(timezone.utc)" + "()"
 EXCLUDED_DIRS = {".git", "__pycache__", ".venv", "venv", "logs"}
 BLOCKED_CRYPTO_SYMBOLS = {
@@ -266,6 +273,155 @@ def _validate_feedback_throttling() -> list[str]:
     return errors
 
 
+def _validate_allocation_wiring() -> list[str]:
+    errors: list[str] = []
+
+    try:
+        orchestrator_text = ORCHESTRATOR_PATH.read_text(encoding="utf-8")
+    except OSError as exc:
+        return [f"allocation wiring: unable to read {ORCHESTRATOR_PATH}: {exc}"]
+
+    try:
+        guard_text = ALLOCATION_GUARD_PATH.read_text(encoding="utf-8")
+    except OSError as exc:
+        return [f"allocation wiring: unable to read {ALLOCATION_GUARD_PATH}: {exc}"]
+
+    required_orchestrator_snippets = {
+        "batch id passed from daily pipeline": 'allocation_batch_id=f"daily:{date.today():%Y%m%d}"',
+        "allocation guard import": "from core.allocation_guard import AllocationBatchGuard",
+        "guard constructed": "guard = AllocationBatchGuard()",
+        "guard check": "guard.check_and_start(",
+        "already processed skip": 'message="allocation_batch_already_processed"',
+        "mark completed": "guard.mark_completed(",
+        "mark failed": "guard.mark_failed(",
+    }
+    for label, snippet in required_orchestrator_snippets.items():
+        if snippet not in orchestrator_text:
+            errors.append(f"allocation wiring: missing {label} ({snippet})")
+
+    required_guard_snippets = {
+        "batch id factory": 'return f"{strategy}:{trading_day:%Y%m%d}"',
+        "failed status recorded": 'batch["status"] = "failed"',
+        "completed status recorded": 'batch["status"] = "completed"',
+        "started status recorded": '"status": "started"',
+    }
+    for label, snippet in required_guard_snippets.items():
+        if snippet not in guard_text:
+            errors.append(f"allocation wiring: missing {label} in core/allocation_guard.py ({snippet})")
+
+    return errors
+
+
+def _validate_promotion_workflow() -> list[str]:
+    errors: list[str] = []
+
+    try:
+        promotion_text = PROMOTION_SCRIPT_PATH.read_text(encoding="utf-8")
+    except OSError as exc:
+        return [f"promotion workflow: unable to read {PROMOTION_SCRIPT_PATH}: {exc}"]
+
+    try:
+        selection_text = SELECTION_SCRIPT_PATH.read_text(encoding="utf-8")
+    except OSError as exc:
+        return [f"promotion workflow: unable to read {SELECTION_SCRIPT_PATH}: {exc}"]
+
+    required_promotion_snippets = {
+        "asset policy load": "load_asset_policy",
+        "asset policy gating": "pair_allowed_by_policy",
+        "walk forward gate": "run_walk_forward",
+        "enforce etf flag": '--enforce-etf-like',
+        "no crypto flag": '--no-crypto',
+        "require viable flag": '--require-viable',
+        "config mutation": "mutate_config(",
+        "config backup": "backup=True",
+        "unordered dedupe": 'canonical_pair_id(*sorted(',
+        "wf dsr rejection": "wf_dsr_gate_failed",
+        "wf overfit rejection": "wf_prob_overfit_above_threshold",
+    }
+    for label, snippet in required_promotion_snippets.items():
+        if snippet not in promotion_text:
+            errors.append(f"promotion workflow: missing {label} ({snippet})")
+
+    required_selection_snippets = {
+        "production mode flag": '--production-mode',
+        "no crypto flag": '--no-crypto',
+        "enforce etf flag": '--enforce-etf-like',
+        "require viable flag": '--require-viable',
+        "asset policy gating": "pair_allowed_by_policy",
+    }
+    for label, snippet in required_selection_snippets.items():
+        if snippet not in selection_text:
+            errors.append(f"promotion workflow: selection script missing {label} ({snippet})")
+
+    return errors
+
+
+def _validate_state_provider_wiring() -> list[str]:
+    errors: list[str] = []
+
+    try:
+        provider_text = STATE_PROVIDER_PATH.read_text(encoding="utf-8")
+    except OSError as exc:
+        return [f"state provider wiring: unable to read {STATE_PROVIDER_PATH}: {exc}"]
+
+    try:
+        app_context_text = APP_CONTEXT_PATH.read_text(encoding="utf-8")
+    except OSError as exc:
+        return [f"state provider wiring: unable to read {APP_CONTEXT_PATH}: {exc}"]
+
+    required_provider_snippets = {
+        "state provider protocol": "class StateProvider(Protocol):",
+        "in-memory provider": "class InMemoryStateProvider:",
+        "streamlit provider": "class StreamlitStateProvider:",
+        "lazy streamlit import": "import streamlit as st",
+        "default provider resolver": "def get_default_state_provider() -> StateProvider:",
+    }
+    for label, snippet in required_provider_snippets.items():
+        if snippet not in provider_text:
+            errors.append(f"state provider wiring: missing {label} ({snippet})")
+
+    required_app_context_snippets = {
+        "provider import": "from core.state_provider import StateProvider, get_default_state_provider",
+        "provider getter": "def get_state_provider() -> StateProvider:",
+        "state getter": "def _state_get(",
+        "state setter": "def _state_set(",
+    }
+    for label, snippet in required_app_context_snippets.items():
+        if snippet not in app_context_text:
+            errors.append(f"state provider wiring: missing {label} in core/app_context.py ({snippet})")
+
+    try:
+        app_context_ast = ast.parse(app_context_text, filename=str(APP_CONTEXT_PATH))
+    except SyntaxError as exc:
+        errors.append(f"state provider wiring: unable to parse core/app_context.py: {exc}")
+        return errors
+
+    direct_session_state_lines: list[str] = []
+    direct_streamlit_import_lines: list[str] = []
+    for node in ast.walk(app_context_ast):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == "streamlit":
+                    direct_streamlit_import_lines.append("import streamlit")
+        elif isinstance(node, ast.ImportFrom):
+            if node.module == "streamlit":
+                direct_streamlit_import_lines.append(f"from {node.module} import ...")
+        elif (
+            isinstance(node, ast.Attribute)
+            and node.attr == "session_state"
+            and isinstance(node.value, ast.Name)
+            and node.value.id == "st"
+        ):
+            direct_session_state_lines.append(f"line {getattr(node, 'lineno', '?')}")
+
+    if direct_session_state_lines:
+        errors.append("state provider wiring: core/app_context.py must not access st.session_state directly")
+    if direct_streamlit_import_lines:
+        errors.append("state provider wiring: core/app_context.py must not import streamlit directly")
+
+    return errors
+
+
 def _validate_ci_workflow(workflow_path: Path) -> list[str]:
     errors: list[str] = []
     try:
@@ -308,6 +464,9 @@ def main() -> int:
     failures.extend(_validate_production_pair_runtime(cfg))
     failures.extend(_validate_execution_mode(cfg))
     failures.extend(_validate_feedback_throttling())
+    failures.extend(_validate_allocation_wiring())
+    failures.extend(_validate_promotion_workflow())
+    failures.extend(_validate_state_provider_wiring())
     failures.extend(_validate_ci_workflow(WORKFLOW_PATH))
 
     if failures:
@@ -325,6 +484,9 @@ def main() -> int:
     print("- production pair runtime resolution validated")
     print("- effective execution mode validated")
     print("- feedback throttling wiring validated")
+    print("- allocation idempotency wiring validated")
+    print("- promotion workflow gates validated")
+    print("- state-provider decoupling wiring validated")
     print("- CI workflow production-safety gates validated")
     return 0
 
