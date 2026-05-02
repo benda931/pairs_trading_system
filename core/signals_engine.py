@@ -2867,7 +2867,7 @@ def export_signals_to_json(
         records.append(rec)
 
     payload = {
-        "ts": datetime.now(timezone.utc)().isoformat() + "Z",
+        "ts": datetime.now(timezone.utc).isoformat() + "Z",
         "count": len(records),
         "signals": records,
     }

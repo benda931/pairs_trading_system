@@ -35,7 +35,7 @@ from typing import Any, Dict, List, Optional
 
 import streamlit as st
 
-from common.config_manager import load_config, save_config, list_configs
+from common.config_manager import load_config, save_config, save_config_profile, list_configs, resolve_config_path
 from common.json_safe import make_json_safe
 from core.app_context import AppContext
 from core.sql_store import SqlStore
@@ -121,7 +121,7 @@ def render_db_health_panel(app_ctx: AppContext) -> None:
 
         st.dataframe(
             coverage_df,
-            use_container_width=True,
+            width="stretch",
         )
 
     st.markdown("---")
@@ -173,7 +173,7 @@ def render_db_health_panel(app_ctx: AppContext) -> None:
 
         st.dataframe(
             dq_df[cols].head(100),
-            use_container_width=True,
+            width="stretch",
         )
 
     st.markdown("---")
@@ -247,7 +247,7 @@ def render_db_health_panel(app_ctx: AppContext) -> None:
 
         st.dataframe(
             sig_df[sig_cols].head(100),
-            use_container_width=True,
+            width="stretch",
         )
 
     st.markdown("---")
@@ -417,7 +417,7 @@ def _render_config_editor(app_ctx: Optional[AppContext]) -> None:
             st.success(f"עובד על פרופיל: {selected_config}")
 
     # --- טעינת הקונפיג מה־config_manager ---
-    cfg: Dict[str, Any] = load_config(selected_config)
+    cfg: Dict[str, Any] = load_config(None if selected_config == "config.json" else CONFIGS_DIR / selected_config)
 
     # --- סיכום מהיר ---
     with st.expander("📊 סיכום מהיר של הקונפיג הנוכחי", expanded=False):
@@ -460,11 +460,11 @@ def _render_config_editor(app_ctx: Optional[AppContext]) -> None:
             parsed = _parse_json(json_text)
             if parsed is not None:
                 # אם מדובר ב־config.json – file_name=None → שמירה לנתיב הראשי
-                file_name: Optional[str] = (
-                    None if selected_config == "config.json" else selected_config
+                target_path: Optional[Path] = (
+                    None if selected_config == "config.json" else CONFIGS_DIR / selected_config
                 )
-                saved_path = save_config(parsed, file_name)
-                st.success(f"הקונפיג נשמר בהצלחה כ־{saved_path}")
+                saved_path = save_config(parsed, target_path)
+                st.success(f"הקונפיג נשמר בהצלחה כ־{saved_path.name}")
                 logger.info("Config saved: %s", saved_path)
 
     with col_save2:
@@ -477,8 +477,8 @@ def _render_config_editor(app_ctx: Optional[AppContext]) -> None:
             parsed = _parse_json(json_text)
             if parsed is not None:
                 target_name = _normalize_profile_name(new_profile_name)
-                saved_path = save_config(parsed, target_name)
-                st.success(f"פרופיל חדש נשמר כ־{saved_path}")
+                saved_path = save_config_profile(parsed, target_name)
+                st.success(f"פרופיל חדש נשמר כ־{saved_path.name}")
                 logger.info("Config profile saved: %s", saved_path)
 
     # --- פעולות תחזוקה: מחיקה / רענון / רשימת פרופילים --- 
@@ -492,7 +492,7 @@ def _render_config_editor(app_ctx: Optional[AppContext]) -> None:
     with col_maint2:
         if selected_config != "config.json":
             if st.button("🗑 מחיקת הפרופיל הנוכחי", key="btn_delete_profile"):
-                cfg_path = CONFIGS_DIR / selected_config
+                cfg_path = resolve_config_path(CONFIGS_DIR / selected_config)
                 if cfg_path.exists():
                     try:
                         cfg_path.unlink()

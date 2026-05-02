@@ -20,7 +20,7 @@ root/ingest_universe_from_ib.py — HF-grade Ingestion from IBKR into SqlStore.p
 
 שימוש:
 ------
-    cd C:\Users\omrib\OneDrive\Desktop\pairs_trading_system
+    cd C:/Users/omrib/OneDrive/Desktop/pairs_trading_system
 
     # אינג'סטיון מלא לכל ה-universe מ-dq_pairs:
     python -m root.ingest_universe_from_ib --env dev --full-refresh

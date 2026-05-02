@@ -40,6 +40,9 @@ from typing import Dict, List, Optional
 import numpy as np
 import pandas as pd
 
+from common.config_manager import load_config
+from common.pair_utils import load_asset_policy, pair_allowed_by_policy
+
 try:
     import duckdb  # optional
 except Exception:  # noqa: BLE001
@@ -125,6 +128,12 @@ class SelectionConfig:
     # DuckDB integration
     duckdb_path: Optional[Path] = None
     duckdb_table: str = "dq_pairs"
+    production_mode: bool = False
+    no_crypto: bool = False
+    enforce_etf_like: bool = False
+    require_viable: bool = False
+    asset_policy_config: Path = Path("config.json")
+    asset_policy: Optional[dict] = None
 
     # Outputs
     universe_csv: Path = Path("pairs_universe_selected.csv")
@@ -256,6 +265,43 @@ def _apply_filters(df: pd.DataFrame, cfg: SelectionConfig) -> pd.DataFrame:
     df = df[df["sym_x"] != df["sym_y"]]
 
     return df
+
+
+def _row_seed_category(row: pd.Series):
+    for key in ("seed_category", "category", "asset_category", "universe_category", "theme"):
+        if key in row.index:
+            return row.get(key)
+    return None
+
+
+def _apply_asset_policy_filters(df: pd.DataFrame, cfg: SelectionConfig) -> pd.DataFrame:
+    if df.empty:
+        return df
+    if not (cfg.production_mode or cfg.no_crypto or cfg.require_viable):
+        return df
+
+    policy = dict(cfg.asset_policy or load_asset_policy())
+    if cfg.production_mode:
+        policy["allow_crypto"] = False
+        policy["require_is_viable_for_production"] = True
+    if cfg.no_crypto:
+        policy["allow_crypto"] = False
+    if cfg.enforce_etf_like:
+        policy["enforce_etf_like_in_production"] = True
+    if cfg.require_viable:
+        policy["require_is_viable_for_production"] = True
+
+    keep_mask = df.apply(
+        lambda row: pair_allowed_by_policy(
+            row.get("sym_x"),
+            row.get("sym_y"),
+            seed_category=_row_seed_category(row),
+            row=row.to_dict(),
+            policy=policy,
+        ),
+        axis=1,
+    )
+    return df[keep_mask].copy()
 
 
 def _dedupe_unordered(df: pd.DataFrame) -> pd.DataFrame:
@@ -442,12 +488,51 @@ def main() -> int:
         help="Allow clone-like pairs (default: False → filter them out).",
     )
 
+    parser.add_argument(
+        "--production-mode",
+        action="store_true",
+        help="Apply strict production asset policy with no crypto and viable-only filters.",
+    )
+    parser.add_argument(
+        "--no-crypto",
+        action="store_true",
+        help="Reject crypto and crypto-related pairs.",
+    )
+    parser.add_argument(
+        "--enforce-etf-like",
+        action="store_true",
+        help="Require both pair legs to be in the asset_policy etf_like_symbols allowlist.",
+    )
+    parser.add_argument(
+        "--asset-policy-config",
+        type=str,
+        default="config.json",
+        help="Config file path used to load asset_policy (default: config.json).",
+    )
+    parser.add_argument(
+        "--require-viable",
+        action="store_true",
+        help="Require production viability checks when metadata is available.",
+    )
+
     args = parser.parse_args()
 
     ranked_csv = Path(args.ranked_csv).expanduser().resolve()
     universe_csv = Path(args.universe_csv).expanduser()
     report_csv = Path(args.report_csv).expanduser()
     duckdb_path = Path(args.duckdb_path).expanduser().resolve() if args.duckdb_path else None
+    asset_policy_config = Path(args.asset_policy_config).expanduser().resolve()
+    policy_cfg = load_config(asset_policy_config) if asset_policy_config.exists() else {}
+    asset_policy = load_asset_policy(policy_cfg)
+    if args.production_mode:
+        asset_policy["allow_crypto"] = False
+        asset_policy["require_is_viable_for_production"] = True
+    if args.no_crypto:
+        asset_policy["allow_crypto"] = False
+    if args.enforce_etf_like:
+        asset_policy["enforce_etf_like_in_production"] = True
+    if args.require_viable:
+        asset_policy["require_is_viable_for_production"] = True
 
     cfg = SelectionConfig(
         ranked_csv=ranked_csv,
@@ -461,6 +546,12 @@ def main() -> int:
         allow_clones=args.allow_clones,
         duckdb_path=duckdb_path,
         duckdb_table=args.duckdb_table,
+        production_mode=args.production_mode,
+        no_crypto=args.no_crypto,
+        enforce_etf_like=args.enforce_etf_like,
+        require_viable=args.require_viable,
+        asset_policy_config=asset_policy_config,
+        asset_policy=asset_policy,
         universe_csv=universe_csv,
         report_csv=report_csv,
     )
@@ -470,10 +561,16 @@ def main() -> int:
           f"min_n_obs={cfg.min_n_obs}, max_corr={cfg.max_corr}, "
           f"max_half_life={cfg.max_half_life}, min_spread_vol={cfg.min_spread_vol}, "
           f"allow_clones={cfg.allow_clones}")
+    print(
+        f"[Info] production_mode={cfg.production_mode}, no_crypto={cfg.no_crypto}, "
+        f"enforce_etf_like={cfg.enforce_etf_like}, require_viable={cfg.require_viable}, "
+        f"asset_policy_config={cfg.asset_policy_config}"
+    )
     print(f"[Info] DuckDB path: {cfg.duckdb_path or _default_duckdb_path()}")
 
     df = _load_ranked_df(cfg.ranked_csv)
     df = _apply_filters(df, cfg)
+    df = _apply_asset_policy_filters(df, cfg)
     df = _dedupe_unordered(df)
     df = _select_top(df, cfg)
 

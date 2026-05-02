@@ -4991,7 +4991,7 @@ class EngineCommandResult:
     success: bool
     message: str
     details: Optional[str] = None
-    timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc)())
+    timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 # ------------------------------------------------------------

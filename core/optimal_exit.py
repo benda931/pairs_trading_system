@@ -59,6 +59,8 @@ class ExitSignal:
     time_decay_factor: float             # How much time decay penalizes holding
     regime_factor: float                 # Regime adjustment
     pnl_at_exit: Optional[float] = None
+    diagnostic_pressure: float = 0.0    # [0, 1], higher = exit faster
+    recommended_action: str = "HOLD"
     components: Dict[str, float] = field(default_factory=dict)
 
 
@@ -180,6 +182,12 @@ class OptimalExitEngine:
         regime: str = "NORMAL",
         spread_vol: float = 1.0,
         entry_pnl_pct: float = 0.0,
+        mr_score: Optional[float] = None,
+        correlation: Optional[float] = None,
+        variance_ratio: Optional[float] = None,
+        data_readiness_score: Optional[float] = None,
+        z_velocity: float = 0.0,
+        threshold_no_trade_band: Optional[float] = None,
     ) -> ExitSignal:
         """
         Compute composite exit signal.
@@ -217,10 +225,49 @@ class OptimalExitEngine:
         }
         regime_factor = regime_factors.get(regime.upper(), 1.0)
 
-        # 4. Adjusted exit threshold
-        adjusted_exit = dynamic_exit * regime_factor
+        # 4. Diagnostics pressure ג€” tighter exits when relationship quality deteriorates
+        mr_pressure = 0.0
+        if mr_score is not None and np.isfinite(mr_score):
+            mr_pressure = float(np.clip((0.55 - mr_score) / 0.55, 0.0, 1.0))
 
-        # 5. Exit scoring components
+        corr_pressure = 0.0
+        if correlation is not None and np.isfinite(correlation):
+            corr_pressure = float(np.clip((0.45 - abs(correlation)) / 0.45, 0.0, 1.0))
+
+        vr_pressure = 0.0
+        if variance_ratio is not None and np.isfinite(variance_ratio):
+            vr_pressure = float(np.clip((variance_ratio - 0.9) / 0.5, 0.0, 1.0))
+
+        readiness_pressure = 0.0
+        if data_readiness_score is not None and np.isfinite(data_readiness_score):
+            readiness_pressure = float(np.clip((0.65 - data_readiness_score) / 0.65, 0.0, 1.0))
+
+        drift_pressure = 0.0
+        if np.isfinite(z_velocity):
+            same_direction_drift = max(0.0, np.sign(current_z) * z_velocity)
+            drift_pressure = float(np.clip(same_direction_drift / 0.30, 0.0, 1.0))
+
+        diagnostic_pressure = float(np.clip(
+            0.30 * mr_pressure
+            + 0.25 * corr_pressure
+            + 0.15 * vr_pressure
+            + 0.20 * readiness_pressure
+            + 0.10 * drift_pressure,
+            0.0,
+            1.0,
+        ))
+
+        # 5. Adjusted exit threshold
+        diagnostic_exit_multiplier = 1.0 + 0.60 * diagnostic_pressure
+        if threshold_no_trade_band is not None and np.isfinite(threshold_no_trade_band):
+            diagnostic_exit_multiplier = max(
+                diagnostic_exit_multiplier,
+                1.0 + 0.35 * float(np.clip(threshold_no_trade_band, 0.0, 2.0)),
+            )
+        adjusted_exit = dynamic_exit * regime_factor * diagnostic_exit_multiplier
+        adjusted_exit = float(np.clip(adjusted_exit, 0.1, max(abs(self.entry_z) * 0.98, 0.2)))
+
+        # 6. Exit scoring components
         components = {}
 
         # Z-score proximity to exit
@@ -248,6 +295,12 @@ class OptimalExitEngine:
         # Regime stress
         regime_signal = max(0, (regime_factor - 1.0) / 1.5)
         components["regime_stress"] = round(regime_signal, 4)
+        components["mr_pressure"] = round(mr_pressure, 4)
+        components["correlation_pressure"] = round(corr_pressure, 4)
+        components["variance_ratio_pressure"] = round(vr_pressure, 4)
+        components["data_pressure"] = round(readiness_pressure, 4)
+        components["drift_pressure"] = round(drift_pressure, 4)
+        components["diagnostic_pressure"] = round(diagnostic_pressure, 4)
 
         # Composite exit score
         exit_score = (
@@ -257,6 +310,17 @@ class OptimalExitEngine:
             + max_hold_signal * 0.10
             + profit_signal * 0.10
             + regime_signal * 0.10
+            + diagnostic_pressure * 0.30
+        )
+        exit_score = float(np.clip(exit_score, 0.0, 1.0))
+
+        diagnostic_breakdown = bool(
+            diagnostic_pressure > 0.65
+            and (
+                corr_pressure > 0.55
+                or readiness_pressure > 0.65
+                or drift_pressure > 0.75
+            )
         )
 
         # Determine if we should exit
@@ -265,11 +329,19 @@ class OptimalExitEngine:
             or stop_signal > 0               # Stop loss hit
             or max_hold_signal > 0           # Max holding exceeded
             or (exit_score > 0.70 and regime_factor > 1.5)  # High stress + high score
+            or diagnostic_pressure > 0.80
+            or diagnostic_breakdown
         )
 
         # Reason
         if stop_signal > 0:
             reason = f"STOP_LOSS (z={current_z:.2f} > {self.stop_z:.1f})"
+        elif (diagnostic_pressure > 0.80 or diagnostic_breakdown) and corr_pressure > 0.55:
+            reason = "CORRELATION_BREAKDOWN"
+        elif (diagnostic_pressure > 0.80 or diagnostic_breakdown) and readiness_pressure > 0.65:
+            reason = "DATA_QUALITY_EXIT"
+        elif diagnostic_pressure > 0.80 or diagnostic_breakdown:
+            reason = "DIAGNOSTIC_EXIT"
         elif max_hold_signal > 0:
             reason = f"MAX_HOLDING ({holding_days}d > {self.max_holding}d)"
         elif abs(current_z) <= adjusted_exit:
@@ -291,6 +363,8 @@ class OptimalExitEngine:
             time_decay_factor=round(time_decay, 4),
             regime_factor=round(regime_factor, 4),
             pnl_at_exit=round(entry_pnl_pct, 6) if entry_pnl_pct else None,
+            diagnostic_pressure=round(diagnostic_pressure, 4),
+            recommended_action="EXIT" if should_exit else ("TRIM" if exit_score >= 0.55 else "HOLD"),
             components=components,
         )
 

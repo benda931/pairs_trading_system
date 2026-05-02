@@ -353,7 +353,7 @@ def run(argv: Optional[Sequence[str]] = None) -> int:
         root_desktop_dir=ROOT_DESKTOP_DIR,
         logs_dir=LOGS_DIR,
         assets_dir=ASSETS_DIR,
-        started_at=datetime.now(timezone.utc)(),
+        started_at=datetime.now(timezone.utc),
         config=app_config,
         config_data=config_data,
     )

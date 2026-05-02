@@ -10,6 +10,7 @@ optuna>=3
 # Database
 sqlalchemy>=2
 duckdb
+duckdb-engine
 
 # Data sources
 yfinance

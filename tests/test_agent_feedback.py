@@ -2,6 +2,7 @@
 """Tests for core.agent_feedback — Agent Feedback Loop."""
 from __future__ import annotations
 from types import SimpleNamespace
+from core.action_governance import ActionGovernanceTier, TradingEnvironment
 
 
 class TestFeedbackActionGeneration:
@@ -89,6 +90,29 @@ class TestFeedbackActionGeneration:
             actions = RiskFeedbackRules.process(agent, {"status": "success", "output": {}})
             assert isinstance(actions, list)
 
+    def test_portfolio_monitor_generates_force_exit_actions(self):
+        from core.agent_feedback import RiskFeedbackRules
+        result = {
+            "status": "success",
+            "output": {
+                "exit_signals": [
+                    {
+                        "pair_id": "AAPL/MSFT",
+                        "reason": "CORRELATION_BREAKDOWN",
+                        "severity": "CRITICAL",
+                        "quality_grade": "D",
+                        "z_score": 1.1,
+                        "stop_loss_trigger": "SIGNAL_DECAY",
+                    }
+                ]
+            },
+        }
+        actions = RiskFeedbackRules.process("portfolio_monitor", result)
+        assert len(actions) == 1
+        assert actions[0].action_type == "FORCE_EXIT"
+        assert actions[0].severity == "CRITICAL"
+        assert actions[0].target == "AAPL/MSFT"
+
 
 class TestFeedbackLoopEngine:
     """Test the AgentFeedbackLoop orchestrator."""
@@ -144,6 +168,163 @@ class TestFeedbackLoopEngine:
         assert summary.n_actions_generated == 0
         assert summary.n_actions_executed == 0
 
+    def test_repeated_force_exit_same_pair_is_throttled(self, monkeypatch, tmp_path):
+        from core.action_throttler import ActionThrottler
+        from core.agent_feedback import AgentFeedbackLoop, FeedbackAction
+
+        throttler = ActionThrottler(state_path=tmp_path / "force_exit_throttle.json")
+        loop = AgentFeedbackLoop(dry_run=False, use_governance=False, throttler=throttler)
+        monkeypatch.setattr(loop, "_execute_single", lambda action: f"executed:{action.target}")
+
+        actions = [
+            FeedbackAction(
+                action_id="exit_1",
+                source_agent="test",
+                action_type="FORCE_EXIT",
+                severity="WARNING",
+                target="SPY/QQQ",
+            ),
+            FeedbackAction(
+                action_id="exit_2",
+                source_agent="test",
+                action_type="FORCE_EXIT",
+                severity="WARNING",
+                target="SPY/QQQ",
+            ),
+        ]
+
+        summary = loop.execute_actions(actions)
+        assert summary.n_actions_executed == 1
+        assert summary.n_actions_throttled == 1
+        assert summary.n_actions_blocked == 0
+        assert len(summary.throttled_actions) == 1
+        assert summary.throttled_actions[0].action_type == "FORCE_EXIT"
+        assert actions[1].execution_result.startswith("THROTTLED:")
+
+    def test_kill_switch_cooldown_is_respected(self, monkeypatch, tmp_path):
+        from core.action_throttler import ActionThrottler
+        from core.agent_feedback import AgentFeedbackLoop, FeedbackAction
+
+        throttler = ActionThrottler(state_path=tmp_path / "kill_switch_throttle.json")
+        loop = AgentFeedbackLoop(dry_run=False, use_governance=False, throttler=throttler)
+        monkeypatch.setattr(loop, "_execute_single", lambda action: f"executed:{action.action_type}")
+
+        first = FeedbackAction(
+            action_id="kill_1",
+            source_agent="test",
+            action_type="KILL_SWITCH",
+            severity="EMERGENCY",
+            target="system",
+        )
+        second = FeedbackAction(
+            action_id="kill_2",
+            source_agent="test",
+            action_type="KILL_SWITCH",
+            severity="EMERGENCY",
+            target="system",
+        )
+
+        first_summary = loop.execute_actions([first])
+        second_summary = loop.execute_actions([second])
+        assert first_summary.n_actions_executed == 1
+        assert second_summary.n_actions_executed == 0
+        assert second_summary.n_actions_throttled == 1
+        assert second.execution_result.startswith("THROTTLED:")
+
+    def test_max_actions_per_cycle_is_respected(self, monkeypatch, tmp_path):
+        from core.action_throttler import ActionThrottler
+        from core.agent_feedback import AgentFeedbackLoop, FeedbackAction
+
+        throttler = ActionThrottler(
+            state_path=tmp_path / "cycle_limit_throttle.json",
+            max_actions_per_cycle=1,
+        )
+        loop = AgentFeedbackLoop(dry_run=False, use_governance=False, throttler=throttler)
+        monkeypatch.setattr(loop, "_execute_single", lambda action: f"executed:{action.target}")
+
+        actions = [
+            FeedbackAction(
+                action_id="block_1",
+                source_agent="test",
+                action_type="BLOCK_ENTRY",
+                severity="CRITICAL",
+                target="SPY/QQQ",
+            ),
+            FeedbackAction(
+                action_id="block_2",
+                source_agent="test",
+                action_type="BLOCK_ENTRY",
+                severity="CRITICAL",
+                target="IWM/SPY",
+            ),
+        ]
+
+        summary = loop.execute_actions(actions)
+        assert summary.n_actions_executed == 1
+        assert summary.n_actions_throttled == 1
+        assert summary.throttled_actions[0].target == "IWM/SPY"
+
+    def test_feedback_summary_counts_throttled_and_blocked_actions(self, monkeypatch, tmp_path):
+        from core.action_throttler import ActionThrottler
+        from core.agent_feedback import AgentFeedbackLoop, FeedbackAction
+
+        throttler = ActionThrottler(state_path=tmp_path / "summary_counts_throttle.json")
+        loop = AgentFeedbackLoop(dry_run=False, use_governance=False, throttler=throttler)
+        monkeypatch.setattr(loop, "_execute_single", lambda action: f"executed:{action.target}")
+
+        actions = [
+            FeedbackAction(
+                action_id="manual_block",
+                source_agent="test",
+                action_type="BLOCK_ENTRY",
+                severity="WARNING",
+                target="portfolio",
+                auto_execute=False,
+            ),
+            FeedbackAction(
+                action_id="exit_1",
+                source_agent="test",
+                action_type="FORCE_EXIT",
+                severity="WARNING",
+                target="SPY/QQQ",
+            ),
+            FeedbackAction(
+                action_id="exit_2",
+                source_agent="test",
+                action_type="FORCE_EXIT",
+                severity="WARNING",
+                target="SPY/QQQ",
+            ),
+        ]
+
+        summary = loop.execute_actions(actions)
+        assert summary.n_actions_generated == 3
+        assert summary.n_actions_executed == 1
+        assert summary.n_actions_blocked == 1
+        assert summary.n_actions_throttled == 1
+        assert len(summary.throttled_actions) == 1
+
+    def test_governance_router_factory_returns_adapter(self):
+        import core.governance_router as governance_router
+
+        governance_router._FEEDBACK_ROUTER_SINGLETONS.clear()
+
+        router = governance_router.get_governance_router(environment="paper", executor_registry={})
+        record = router.route(
+            action_type="BLOCK_ENTRY",
+            action_id="a1",
+            source_agent="agent_x",
+            target="XLY/XLC",
+            parameters={"reason": "test"},
+            severity="WARNING",
+        )
+
+        assert record.environment == TradingEnvironment.PAPER
+        assert record.governance_tier == ActionGovernanceTier.ADVISORY_ONLY
+        assert record.executed is False
+        metrics = router.get_precision_metrics()
+        assert any(metric.action_type == "BLOCK_ENTRY" for metric in metrics)
+
 
 class TestCycleDetector:
     """Test cycle_detector integration."""
@@ -195,3 +376,32 @@ class TestOptimalExit:
         crisis = engine.compute_exit_signal(current_z=1.0, holding_days=5, regime="CRISIS")
         assert crisis.exit_score >= normal.exit_score
         assert crisis.regime_factor > normal.regime_factor
+
+    def test_diagnostics_breakdown_accelerates_exit(self):
+        from core.optimal_exit import OptimalExitEngine
+        engine = OptimalExitEngine(half_life=15, entry_z=2.0)
+        engine.compute_optimal_boundary()
+        healthy = engine.compute_exit_signal(
+            current_z=1.1,
+            holding_days=6,
+            regime="NORMAL",
+            mr_score=0.82,
+            correlation=0.84,
+            variance_ratio=0.72,
+            data_readiness_score=0.93,
+            z_velocity=-0.08,
+        )
+        broken = engine.compute_exit_signal(
+            current_z=1.1,
+            holding_days=6,
+            regime="NORMAL",
+            mr_score=0.18,
+            correlation=0.18,
+            variance_ratio=1.24,
+            data_readiness_score=0.28,
+            z_velocity=0.42,
+        )
+        assert broken.exit_score > healthy.exit_score
+        assert broken.diagnostic_pressure > healthy.diagnostic_pressure
+        assert broken.should_exit or broken.exit_threshold >= healthy.exit_threshold
+        assert broken.reason != "HOLD"
