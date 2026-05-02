@@ -32,7 +32,7 @@ BLOCKED_CRYPTO_SYMBOLS = {
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from common.pair_utils import load_asset_policy, pair_allowed_by_policy, parse_pair_record
+from common.pair_utils import load_asset_policy, normalize_pairs, pair_allowed_by_policy, parse_pair_record
 
 
 def _iter_repo_files(root: Path) -> Iterable[Path]:
@@ -170,6 +170,32 @@ def _validate_orchestrator_contract() -> list[str]:
     return errors
 
 
+def _validate_production_pair_runtime(cfg: dict) -> list[str]:
+    errors: list[str] = []
+    production_pairs = list(cfg.get("production_pairs", []) or [])
+    if not production_pairs:
+        return errors
+
+    normalized_pairs = normalize_pairs(production_pairs, dedupe=True)
+    if len(normalized_pairs) != len(production_pairs):
+        errors.append("config.json: production_pairs contains invalid or duplicate unordered pairs")
+
+    try:
+        from core.orchestrator import _get_configured_pairs
+
+        resolved_pairs = _get_configured_pairs(cfg)
+    except Exception as exc:
+        return [f"production pair runtime: unable to resolve configured pairs: {exc}"]
+
+    if resolved_pairs != normalized_pairs:
+        errors.append(
+            "production pair runtime: _get_configured_pairs(config) does not match normalized production_pairs"
+        )
+    if cfg.get("use_production_pairs") is True and not resolved_pairs:
+        errors.append("production pair runtime: use_production_pairs is enabled but no active production pairs resolved")
+    return errors
+
+
 def _validate_ci_workflow(workflow_path: Path) -> list[str]:
     errors: list[str] = []
     try:
@@ -209,6 +235,7 @@ def main() -> int:
     failures.extend(_validate_config(cfg))
     failures.extend(_validate_pair_policy(cfg))
     failures.extend(_validate_orchestrator_contract())
+    failures.extend(_validate_production_pair_runtime(cfg))
     failures.extend(_validate_ci_workflow(WORKFLOW_PATH))
 
     if failures:
@@ -223,6 +250,7 @@ def main() -> int:
     print("- config.json safety defaults validated")
     print("- pair parser and policy sanity checks validated")
     print("- orchestrator pipeline contract validated")
+    print("- production pair runtime resolution validated")
     print("- CI workflow production-safety gates validated")
     return 0
 

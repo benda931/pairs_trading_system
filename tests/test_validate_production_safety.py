@@ -128,3 +128,31 @@ def test_validate_ci_workflow_rejects_missing_validator_gate(tmp_path):
     errors = validator._validate_ci_workflow(workflow)
 
     assert any("missing validator command" in err for err in errors)
+
+
+def test_validate_production_pair_runtime_accepts_consistent_config(monkeypatch):
+    cfg = _base_config()
+    cfg["production_pairs"] = ["SPY/QQQ", "QQQ/XLK"]
+
+    monkeypatch.setattr(
+        "core.orchestrator._get_configured_pairs",
+        lambda supplied_cfg=None: [("SPY", "QQQ"), ("QQQ", "XLK")],
+    )
+
+    errors = validator._validate_production_pair_runtime(cfg)
+
+    assert errors == []
+
+
+def test_validate_production_pair_runtime_rejects_duplicate_unordered_pairs(monkeypatch):
+    cfg = _base_config()
+    cfg["production_pairs"] = ["SPY/QQQ", "QQQ/SPY"]
+
+    monkeypatch.setattr(
+        "core.orchestrator._get_configured_pairs",
+        lambda supplied_cfg=None: [("SPY", "QQQ")],
+    )
+
+    errors = validator._validate_production_pair_runtime(cfg)
+
+    assert any("invalid or duplicate unordered pairs" in err for err in errors)
