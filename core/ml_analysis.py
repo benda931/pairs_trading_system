@@ -63,6 +63,7 @@ import importlib
 import numpy as np
 import pandas as pd
 from matplotlib import pyplot as plt  # noqa: WPS433
+from core.state_provider import StateProvider, get_default_state_provider
 
 from sklearn.compose import ColumnTransformer
 from sklearn.ensemble import (
@@ -165,6 +166,28 @@ class _StreamlitProxy:
 
 
 st = _StreamlitProxy()
+
+_STATE_PROVIDER: Optional[StateProvider] = None
+
+
+def get_state_provider() -> StateProvider:
+    global _STATE_PROVIDER
+    if _STATE_PROVIDER is None:
+        _STATE_PROVIDER = get_default_state_provider()
+    return _STATE_PROVIDER
+
+
+def set_state_provider(provider: StateProvider) -> None:
+    global _STATE_PROVIDER
+    _STATE_PROVIDER = provider
+
+
+def _state_get(key: str, default: Any = None) -> Any:
+    return get_state_provider().get(key, default)
+
+
+def _state_set(key: str, value: Any) -> None:
+    get_state_provider().set(key, value)
 
 
 ###############################################################################
@@ -2547,9 +2570,9 @@ def publish_ml_summary_to_session(
         publish_ml_summary_to_session(summary)
     """
     try:
-        if not isinstance(st.session_state.get(key, None), dict):
-            st.session_state[key] = {}
-        st.session_state[key] = summary
+        if not isinstance(_state_get(key, None), dict):
+            _state_set(key, {})
+        _state_set(key, summary)
     except Exception as e:
         logger.debug("publish_ml_summary_to_session failed: %s", e)
 
@@ -2567,7 +2590,7 @@ def render_ml_bridge_panel(key: str = "ml_analysis_summary") -> None:
         render_ml_bridge_panel()
     """
     with st.expander("🔗 ML Analysis Bridge (System Summary)", expanded=False):
-        val = st.session_state.get(key)
+        val = _state_get(key)
         if not isinstance(val, dict):
             st.info("No ML summary found in session — run ML analysis first.")
             return
@@ -2781,7 +2804,7 @@ def render_ml_for_optuna_session(
         # ביטחון: אם מישהו קרא לזה מחוץ ל-Streamlit.
         raise RuntimeError("render_ml_for_optuna_session must be used inside Streamlit.")
 
-    df_results = st.session_state.get(opt_df_key)
+    df_results = _state_get(opt_df_key)
     if df_results is None or not isinstance(df_results, pd.DataFrame) or df_results.empty:
         st.warning(f"No DataFrame found in st.session_state['{opt_df_key}'] — run optimisation first.")
         return

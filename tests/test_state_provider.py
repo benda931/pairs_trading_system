@@ -69,3 +69,14 @@ def test_core_has_no_top_level_streamlit_imports() -> None:
             if stripped in {"import streamlit as st", "from streamlit import"} or stripped.startswith("from streamlit import "):
                 offenders.append(f"{path}:{idx}:{stripped}")
     assert offenders == []
+
+
+def test_ml_analysis_summary_uses_injected_provider() -> None:
+    ml_analysis = importlib.import_module("core.ml_analysis")
+    provider = InMemoryStateProvider()
+    ml_analysis.set_state_provider(provider)
+
+    summary = {"config": {"model": "xgb"}, "metrics": {"rmse": 1.23}}
+    ml_analysis.publish_ml_summary_to_session(summary, key="ml_summary_test")
+
+    assert provider.get("ml_summary_test") == summary
