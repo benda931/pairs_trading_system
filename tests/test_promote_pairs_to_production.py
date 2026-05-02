@@ -275,3 +275,73 @@ def test_promote_pairs_to_production_enforces_etf_like_allowlist(tmp_path):
     report = pd.read_csv(output_csv)
     blocked = report.set_index(["sym_x", "sym_y"])["rejection_reason"].to_dict()
     assert blocked[("SPY", "AAPL")] == "not_etf_like"
+
+
+def test_promote_pairs_to_production_dedupes_reversed_pairs(tmp_path):
+    from scripts.promote_pairs_to_production import main
+
+    ranked_csv = tmp_path / "pairs_universe_ranked.csv"
+    config_path = tmp_path / "config.json"
+    output_json = tmp_path / "production_pairs_approved.json"
+    output_csv = tmp_path / "production_pairs_approved.csv"
+    _write_ranked_csv(ranked_csv)
+    _write_config(config_path)
+
+    df = pd.read_csv(ranked_csv)
+    df = pd.concat(
+        [
+            df,
+            pd.DataFrame(
+                [
+                    {
+                        "sym_x": "QQQ",
+                        "sym_y": "SPY",
+                        "pair_score": 0.91,
+                        "pair_label": "A",
+                        "corr": 0.88,
+                        "p_value": 0.01,
+                        "half_life": 30,
+                        "n_obs": 500,
+                        "is_viable": True,
+                        "is_clone_like": False,
+                        "seed_category": "etf",
+                    }
+                ]
+            ),
+        ],
+        ignore_index=True,
+    )
+    df.to_csv(ranked_csv, index=False)
+
+    rc = main(
+        [
+            "--ranked-csv",
+            str(ranked_csv),
+            "--config",
+            str(config_path),
+            "--top",
+            "30",
+            "--output-json",
+            str(output_json),
+            "--output-csv",
+            str(output_csv),
+            "--min-score",
+            "0.3",
+            "--min-label",
+            "B-",
+            "--min-n-obs",
+            "252",
+            "--max-half-life",
+            "200",
+            "--no-crypto",
+            "--require-viable",
+        ]
+    )
+
+    assert rc == 0
+    approved = json.loads(output_json.read_text(encoding="utf-8"))
+    assert "SPY/QQQ" in approved
+    assert "QQQ/SPY" not in approved
+    report = pd.read_csv(output_csv)
+    blocked = report.set_index(["sym_x", "sym_y"])["rejection_reason"].to_dict()
+    assert blocked[("QQQ", "SPY")] == "duplicate_unordered_pair"

@@ -1581,7 +1581,9 @@ class PairsOrchestrator:
                     summary = loop.execute_actions([])
                     summary.n_actions_generated = len(actions)
                     summary.n_actions_blocked = len(actions)
+                    summary.n_actions_throttled = len(throttled_actions)
                     summary.actions = actions
+                    summary.throttled_actions = list(throttled_actions)
                 else:
                     summary = loop.execute_actions(allowed_actions)
                     for action in summary.actions:
@@ -1590,6 +1592,8 @@ class PairsOrchestrator:
                     if throttled_actions:
                         summary.n_actions_generated += len(throttled_actions)
                         summary.n_actions_blocked += len(throttled_actions)
+                        summary.n_actions_throttled += len(throttled_actions)
+                        summary.throttled_actions.extend(throttled_actions)
                         summary.actions.extend(throttled_actions)
 
                 self.bus.publish("feedback_loop", {

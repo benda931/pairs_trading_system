@@ -159,7 +159,9 @@ def _prepare_report(df: pd.DataFrame, args: PromotionArgs, policy: dict) -> pd.D
     work["wf_param_stability_warning"] = None
     work["wf_oos_trades"] = None
     work["rejection_reason"] = work.apply(lambda row: _base_filter_reason(row, args, policy), axis=1)
-    work["_pair_key"] = work.apply(lambda row: canonical_pair_id(row["sym_x"], row["sym_y"]), axis=1)
+    work["_pair_key"] = work.apply(
+        lambda row: canonical_pair_id(*sorted((str(row["sym_x"]), str(row["sym_y"])))), axis=1
+    )
     work = work.sort_values(["pair_score", "sym_x", "sym_y"], ascending=[False, True, True]).reset_index(drop=True)
     return work
 

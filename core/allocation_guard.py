@@ -98,11 +98,14 @@ class AllocationBatchGuard:
     def check_and_start(self, batch_id: str, meta: dict | None = None) -> bool:
         data = self._load()
         batches = dict(data.get("batches") or {})
+        existing_batch = dict(batches.get(batch_id) or {})
+        existing_status = str(existing_batch.get("status") or "").strip().lower()
         if self.config.one_batch_per_trading_day and batch_id in batches:
-            return False
+            if existing_status in {"started", "completed"}:
+                return False
 
         last_ts_txt = data.get("last_started_ts") or data.get("last_completed_ts")
-        if last_ts_txt:
+        if last_ts_txt and existing_status not in {"failed"}:
             try:
                 last_ts = datetime.fromisoformat(str(last_ts_txt))
                 if last_ts.tzinfo is None:

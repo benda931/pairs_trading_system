@@ -28,8 +28,10 @@ def test_feedback_loop_defaults_to_dry_run_and_skips_action_execution(monkeypatc
                 n_actions_generated=len(actions),
                 n_actions_executed=0,
                 n_actions_blocked=0,
+                n_actions_throttled=0,
                 system_state_changes={},
                 actions=list(actions),
+                throttled_actions=[],
             )
 
     monkeypatch.setattr(PairsOrchestrator, "_run_startup_reconciliation", lambda self: None)
@@ -85,8 +87,10 @@ def test_feedback_loop_throttles_actions_before_execution(monkeypatch, tmp_path)
                 n_actions_generated=len(actions),
                 n_actions_executed=0,
                 n_actions_blocked=0,
+                n_actions_throttled=0,
                 system_state_changes={},
                 actions=list(actions),
+                throttled_actions=[],
             )
 
     class _StubThrottler:
@@ -115,10 +119,13 @@ def test_feedback_loop_throttles_actions_before_execution(monkeypatch, tmp_path)
 
     orch = PairsOrchestrator()
     orch.bus.path = tmp_path / "bus.json"
-    orch._run_feedback_loop([SimpleNamespace(task_name="agent_x", status="success", output={})])
+    summary = orch._run_feedback_loop([SimpleNamespace(task_name="agent_x", status="success", output={})])
 
     assert created["dry_run"] is False
     assert created["execute_args"] == []
+    assert summary is not None
+    assert summary.n_actions_throttled == 1
+    assert len(summary.throttled_actions) == 1
     latest = orch.bus.latest("feedback_loop")
     assert latest is not None
     assert len(latest["payload"]["throttled_actions"]) == 1
