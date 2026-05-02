@@ -19,6 +19,9 @@ API ציבורי
 * load_raw_config()          – טוען את ה־JSON כמו שהוא, ללא ולידציה.
 * save_config()              – שומר קונפיג ראשי (עם ולידציה ברירת מחדל).
 * save_config_profile()      – שומר snapshot בתיקיית `configs/` עם timestamp.
+* resolve_config_path()      – פותר שם/נתיב לקובץ קונפיג בפועל.
+* backup_config()            – יוצר גיבוי timestamped לקובץ קונפיג.
+* mutate_config()            – מעדכן קונפיג דרך callback מרכזי עם גיבוי אופציונלי.
 * list_configs()             – מחזיר רשימת קובצי פרופילים בתיקיית `configs/`.
 * ensure_config_dir()        – יוצר את תיקיית `configs/` אם חסרה.
 * upgrade_config_dict()      – מריץ ולידציה + שדרוג dict של קונפיג (ללא I/O דיסק).
@@ -39,7 +42,7 @@ import os
 from datetime import datetime, timezone
 from json import JSONDecodeError
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Callable, Dict, List
 
 from common.json_safe import make_json_safe, json_default as _json_default
 
@@ -89,6 +92,38 @@ CONFIG_DIR = PROJECT_ROOT / "configs"        # versioned profiles (snapshots)
 def _resolve_default_config_path() -> Path:
     """Return the repo-root config path only."""
     return CONFIG_PATH
+
+
+def resolve_config_path(path: str | Path | None = None) -> Path:
+    """
+    Resolve user-facing config identifiers to concrete filesystem paths.
+
+    Rules:
+    - None / "config.json" -> repo-root CONFIG_PATH
+    - absolute paths stay absolute
+    - bare filenames prefer `configs/<name>` when that file exists
+    - relative paths under `configs/` are rooted at PROJECT_ROOT
+    - other relative paths are rooted at PROJECT_ROOT
+    """
+    if path is None:
+        return _resolve_default_config_path()
+
+    raw = Path(path)
+    if raw.is_absolute():
+        return raw
+
+    if raw == Path("config.json"):
+        return _resolve_default_config_path()
+
+    if len(raw.parts) == 1:
+        profile_candidate = CONFIG_DIR / raw.name
+        if profile_candidate.exists():
+            return profile_candidate
+
+    if raw.parts and raw.parts[0] == CONFIG_DIR.name:
+        return PROJECT_ROOT / raw
+
+    return PROJECT_ROOT / raw
 
 
 # -------------------------------------------------------------
@@ -362,6 +397,7 @@ def _json_dumps(data: Dict[str, Any]) -> str:
 
 
 def _write_json(data: Dict[str, Any], path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(_json_dumps(data), encoding="utf-8")
     try:
         rel = path.relative_to(PROJECT_ROOT)
@@ -379,6 +415,25 @@ def list_configs() -> List[str]:
     """Return list of JSON profile filenames under `configs/`."""
     ensure_config_dir()
     return sorted(p.name for p in CONFIG_DIR.glob("*.json"))
+
+
+def backup_config(
+    path: str | Path | None = None,
+    *,
+    label: str = "backup",
+) -> Path:
+    """Create a timestamped backup copy under `configs/` and return its path."""
+    cfg_path = resolve_config_path(path)
+    backup_dir = cfg_path.parent if cfg_path.parent.name == "configs" else cfg_path.parent / "configs"
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    backup_name = f"{cfg_path.stem}.{label}.{ts}{cfg_path.suffix or '.json'}"
+    backup_path = backup_dir / backup_name
+    if cfg_path.exists():
+        backup_path.write_text(cfg_path.read_text(encoding="utf-8"), encoding="utf-8")
+    else:
+        backup_path.write_text("{}", encoding="utf-8")
+    return backup_path
 
 
 # -------------------------------------------------------------
@@ -414,7 +469,7 @@ def load_raw_config(path: str | Path | None = None) -> Dict[str, Any]:
 
     שימושי לדיבאגר/מיגרציות, אבל לרוב עדיף להשתמש ב־load_config().
     """
-    cfg_path = Path(path) if path else _resolve_default_config_path()
+    cfg_path = resolve_config_path(path)
     if not cfg_path.exists():
         return {}
     try:
@@ -432,7 +487,7 @@ def load_config(path: str | Path | None = None) -> Dict[str, Any]:
     - אם JSON שבור או ולידציה נכשלת → נכתב קובץ ברירת מחדל.
     - אם הכול תקין → dict משודרג (כולל שדות חדשים) נשמר ומוחזר.
     """
-    cfg_path = Path(path) if path else _resolve_default_config_path()
+    cfg_path = resolve_config_path(path)
 
     if not cfg_path.exists():
         logger.info("Main config missing – creating default at %s", cfg_path)
@@ -492,7 +547,7 @@ def save_config(
     data: Dict[str, Any],
     path: str | Path | None = None,
     validate: bool = True,
-) -> None:
+) -> Path:
     """
     Overwrite main config (or custom path) with *data*.
 
@@ -505,7 +560,7 @@ def save_config(
     validate : bool
         אם True, מריץ upgrade_config_dict כדי לוודא שהקונפיג תקין לפני השמירה.
     """
-    cfg_path = Path(path) if path else _resolve_default_config_path()
+    cfg_path = resolve_config_path(path)
 
     if validate:
         try:
@@ -515,6 +570,7 @@ def save_config(
             raise
 
     _write_json(data, cfg_path)
+    return cfg_path
 
 
 # -------------------------------------------------------------
@@ -524,14 +580,14 @@ def save_config_profile(
     data: Dict[str, Any],
     profile: str | None = None,
     validate: bool = True,
-) -> str:
+) -> Path:
     """
     Save *data* under `configs/` with timestamp-based filename.
 
     Returns
     -------
     str
-        The filename created (relative, not full path).
+        The concrete path created under `configs/`.
     """
     ensure_config_dir()
 
@@ -548,9 +604,32 @@ def save_config_profile(
     if profile is None:
         profile = f"config_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
 
-    path = CONFIG_DIR / profile
+    path = resolve_config_path(Path(CONFIG_DIR.name) / profile)
     _write_json(data, path)
-    return profile
+    return path
+
+
+def mutate_config(
+    mutator: Callable[[Dict[str, Any]], Dict[str, Any] | None],
+    *,
+    path: str | Path | None = None,
+    validate: bool = True,
+    backup: bool = False,
+    backup_label: str = "backup",
+) -> Path:
+    """
+    Apply a config mutation through one centralized flow.
+
+    The mutator may modify the dict in-place or return a replacement dict.
+    """
+    cfg_path = resolve_config_path(path)
+    current = load_config(cfg_path)
+    working = dict(current)
+    updated = mutator(working)
+    payload = working if updated is None else updated
+    if backup:
+        backup_config(cfg_path, label=backup_label)
+    return save_config(payload, path=cfg_path, validate=validate)
 
 
 def load_default_config() -> Dict[str, Any]:
@@ -594,6 +673,9 @@ __all__ = [
     "load_config",
     "load_config_model",
     "load_raw_config",
+    "resolve_config_path",
+    "backup_config",
+    "mutate_config",
     "save_config",
     "save_config_profile",
     "list_configs",

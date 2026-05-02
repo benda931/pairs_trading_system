@@ -3,13 +3,12 @@ from __future__ import annotations
 import argparse
 import json
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 import pandas as pd
 
-from common.config_manager import load_config, save_config
+from common.config_manager import load_config, mutate_config
 from common.pair_utils import canonical_pair_id, is_crypto_related_pair, load_asset_policy, pair_allowed_by_policy
 from core.walk_forward_engine import run_walk_forward
 from scripts.select_top_pairs_from_ranked_csv import _detect_clone_like, _label_rank, _load_ranked_df, SelectionConfig
@@ -257,16 +256,19 @@ def _write_csv(path: Path, report: pd.DataFrame) -> None:
 
 def _update_config(config_path: Path, approved_pairs: list[str]) -> None:
     config_path = config_path.expanduser().resolve()
-    cfg = load_config(config_path)
-    backup_dir = config_path.parent / "configs"
-    backup_dir.mkdir(parents=True, exist_ok=True)
-    ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-    backup_path = backup_dir / f"config.pre_production_update.{ts}.json"
-    backup_path.write_text(config_path.read_text(encoding="utf-8"), encoding="utf-8")
 
-    cfg["production_pairs"] = approved_pairs
-    cfg["use_production_pairs"] = True
-    save_config(cfg, path=config_path, validate=False)
+    def _mutate(cfg: dict[str, Any]) -> dict[str, Any]:
+        cfg["production_pairs"] = approved_pairs
+        cfg["use_production_pairs"] = True
+        return cfg
+
+    mutate_config(
+        _mutate,
+        path=config_path,
+        validate=False,
+        backup=True,
+        backup_label="pre_production_update",
+    )
 
 
 def run_promotion(args: PromotionArgs) -> pd.DataFrame:
