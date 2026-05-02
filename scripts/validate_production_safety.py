@@ -33,6 +33,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from common.pair_utils import load_asset_policy, normalize_pairs, pair_allowed_by_policy, parse_pair_record
+from core.execution_safety import get_execution_mode
 
 
 def _iter_repo_files(root: Path) -> Iterable[Path]:
@@ -196,6 +197,21 @@ def _validate_production_pair_runtime(cfg: dict) -> list[str]:
     return errors
 
 
+def _validate_execution_mode(cfg: dict) -> list[str]:
+    errors: list[str] = []
+    mode = get_execution_mode(cfg)
+
+    if mode.get("dry_run") is not True:
+        errors.append("execution mode: effective dry_run must remain true")
+    if mode.get("allow_live_orders") is not False:
+        errors.append("execution mode: effective allow_live_orders must remain false")
+    if mode.get("allow_agent_actions") is not False:
+        errors.append("execution mode: effective allow_agent_actions must remain false")
+    if mode.get("paper_only") is not True:
+        errors.append("execution mode: effective paper_only must remain true")
+    return errors
+
+
 def _validate_ci_workflow(workflow_path: Path) -> list[str]:
     errors: list[str] = []
     try:
@@ -236,6 +252,7 @@ def main() -> int:
     failures.extend(_validate_pair_policy(cfg))
     failures.extend(_validate_orchestrator_contract())
     failures.extend(_validate_production_pair_runtime(cfg))
+    failures.extend(_validate_execution_mode(cfg))
     failures.extend(_validate_ci_workflow(WORKFLOW_PATH))
 
     if failures:
@@ -251,6 +268,7 @@ def main() -> int:
     print("- pair parser and policy sanity checks validated")
     print("- orchestrator pipeline contract validated")
     print("- production pair runtime resolution validated")
+    print("- effective execution mode validated")
     print("- CI workflow production-safety gates validated")
     return 0
 

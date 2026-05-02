@@ -156,3 +156,26 @@ def test_validate_production_pair_runtime_rejects_duplicate_unordered_pairs(monk
     errors = validator._validate_production_pair_runtime(cfg)
 
     assert any("invalid or duplicate unordered pairs" in err for err in errors)
+
+
+def test_validate_execution_mode_accepts_safe_defaults():
+    cfg = _base_config()
+
+    errors = validator._validate_execution_mode(cfg)
+
+    assert errors == []
+
+
+def test_validate_execution_mode_rejects_effective_live_mode():
+    cfg = _base_config()
+    cfg["strategy"]["dry_run"] = False
+    cfg["execution"]["allow_live_orders"] = True
+    cfg["execution"]["allow_agent_actions"] = True
+    cfg["execution"]["paper_only"] = False
+    cfg["ib_enable"] = True
+
+    errors = validator._validate_execution_mode(cfg)
+
+    assert any("effective dry_run must remain true" in err for err in errors)
+    assert any("effective allow_live_orders must remain false" in err for err in errors)
+    assert any("effective allow_agent_actions must remain false" in err for err in errors)
