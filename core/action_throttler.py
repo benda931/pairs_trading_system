@@ -32,6 +32,9 @@ class ActionThrottler:
         self.max_actions_per_cycle = int(max_actions_per_cycle)
         self._actions_this_cycle = 0
 
+    def reset_cycle(self) -> None:
+        self._actions_this_cycle = 0
+
     def _load(self) -> dict:
         if not self.state_path.exists():
             return {"actions": {}}
@@ -53,15 +56,15 @@ class ActionThrottler:
         key_txt = str(key or "global").strip()
         return f"{action_txt}:{key_txt}"
 
-    def allow(self, action_type: str, key: str | None = None) -> bool:
+    def check(self, action_type: str, key: str | None = None) -> tuple[bool, str]:
         if self._actions_this_cycle >= self.max_actions_per_cycle:
-            return False
+            return False, f"max_actions_per_cycle:{self.max_actions_per_cycle}"
 
         state = self._load()
         record = (state.get("actions") or {}).get(self._state_key(action_type, key)) or {}
         last_ts_txt = record.get("last_ts")
         if not last_ts_txt:
-            return True
+            return True, "ok"
 
         try:
             last_ts = datetime.fromisoformat(str(last_ts_txt))
@@ -69,10 +72,16 @@ class ActionThrottler:
                 last_ts = last_ts.replace(tzinfo=timezone.utc)
             elapsed = (datetime.now(timezone.utc) - last_ts.astimezone(timezone.utc)).total_seconds()
         except Exception:
-            return True
+            return True, "ok"
 
         cooldown = int(self.DEFAULT_COOLDOWNS.get(str(action_type or "").strip().upper(), 300))
-        return elapsed >= cooldown
+        if elapsed >= cooldown:
+            return True, "ok"
+        return False, f"cooldown_active:{max(0, int(cooldown - elapsed))}"
+
+    def allow(self, action_type: str, key: str | None = None) -> bool:
+        allowed, _ = self.check(action_type, key=key)
+        return allowed
 
     def mark(self, action_type: str, key: str | None = None) -> None:
         state = self._load()

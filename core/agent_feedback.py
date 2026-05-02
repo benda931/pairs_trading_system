@@ -42,6 +42,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Sequence
 
+from core.action_throttler import ActionThrottler as PersistentActionThrottler
 from core.action_governance import GovernedActionRecord, TradingEnvironment
 
 logger = logging.getLogger(__name__)
@@ -88,9 +89,11 @@ class FeedbackSummary:
     n_actions_generated: int
     n_actions_executed: int
     n_actions_blocked: int
+    n_actions_throttled: int = 0
     n_actions_advisory: int = 0
     n_actions_pending_approval: int = 0
     actions: List[FeedbackAction] = field(default_factory=list)
+    throttled_actions: List[FeedbackAction] = field(default_factory=list)
     governed_records: List[GovernedActionRecord] = field(default_factory=list)
     system_state_changes: Dict[str, Any] = field(default_factory=dict)
 
@@ -375,7 +378,7 @@ class ImprovementFeedbackRules:
 # Feedback Loop Engine
 # =====================================================================
 
-class ActionThrottler:
+class LegacyInMemoryActionThrottler:
     """
     Legacy rate limiter — DEPRECATED.
 
@@ -455,9 +458,9 @@ class AgentFeedbackLoop:
         approval/human review → pre-execution snapshot → execution →
         incident creation → audit write → outcome observation registration.
 
-    When `use_governance=False`, the legacy `ActionThrottler` + direct
-    `_execute_single()` path is used. This mode exists for backward compatibility
-    in test/research environments and should NOT be used in live trading.
+      When `use_governance=False`, the persistent action throttler + direct
+      `_execute_single()` path is used. This mode exists for backward compatibility
+      in test/research environments and should NOT be used in live trading.
 
     Parameters
     ----------
@@ -492,13 +495,14 @@ class AgentFeedbackLoop:
         environment: TradingEnvironment = TradingEnvironment.PAPER,
         use_governance: bool = True,
         executor_registry: Optional[Dict[str, Any]] = None,
+        throttler: Optional[PersistentActionThrottler] = None,
     ):
         self.dry_run = dry_run
         self.environment = environment
         self.use_governance = use_governance
         self._action_history: List[FeedbackAction] = []
         self._governed_records: List[GovernedActionRecord] = []
-        self._throttle = ActionThrottler()  # Legacy fallback
+        self._throttle = throttler or PersistentActionThrottler()
 
         # Lazy-initialise GovernanceRouter on first use to avoid circular imports
         self._router = None
@@ -588,18 +592,22 @@ class AgentFeedbackLoop:
         GovernanceRouter which enforces the institutional governance matrix.
 
         When use_governance=False or GovernanceRouter is unavailable, the
-        legacy ActionThrottler + direct executor path is used.
+        persistent throttler + direct executor path is used.
 
         dry_run mode logs intent without executing or submitting approvals.
         """
         n_executed = 0
         n_blocked = 0
+        n_throttled = 0
         n_advisory = 0
         n_pending = 0
         state_changes: Dict[str, Any] = {}
         governed_records: List[GovernedActionRecord] = []
+        throttled_actions: List[FeedbackAction] = []
 
         router = self._get_router() if self.use_governance else None
+        if hasattr(self._throttle, "reset_cycle"):
+            self._throttle.reset_cycle()
 
         for action in actions:
             # Inject environment + target into parameters for governance evidence
@@ -672,17 +680,23 @@ class AgentFeedbackLoop:
                         action.action_type, exc,
                     )
                     # Fail-safe: fall through to legacy path
-                    self._execute_legacy(action, state_changes)
+                    legacy_status = self._execute_legacy(action, state_changes)
                     if action.executed:
                         n_executed += 1
+                    elif legacy_status == "throttled":
+                        n_throttled += 1
+                        throttled_actions.append(action)
                     else:
                         n_blocked += 1
 
             else:
                 # ── Legacy fallback path ───────────────────────────────
-                self._execute_legacy(action, state_changes)
+                legacy_status = self._execute_legacy(action, state_changes)
                 if action.executed:
                     n_executed += 1
+                elif legacy_status == "throttled":
+                    n_throttled += 1
+                    throttled_actions.append(action)
                 else:
                     n_blocked += 1
 
@@ -700,9 +714,11 @@ class AgentFeedbackLoop:
             n_actions_generated=len(actions),
             n_actions_executed=n_executed,
             n_actions_blocked=n_blocked,
+            n_actions_throttled=n_throttled,
             n_actions_advisory=n_advisory,
             n_actions_pending_approval=n_pending,
             actions=actions,
+            throttled_actions=throttled_actions,
             governed_records=governed_records,
             system_state_changes=state_changes,
         )
@@ -711,26 +727,27 @@ class AgentFeedbackLoop:
         self,
         action: FeedbackAction,
         state_changes: Dict[str, Any],
-    ) -> None:
-        """Legacy throttler + direct executor path (research/test environments)."""
-        self._throttle.reset_cycle()
+    ) -> str:
+        """Fallback executor path with persistent throttling."""
 
         if not action.auto_execute and action.severity not in ("EMERGENCY", "CRITICAL"):
             logger.info("[LEGACY BLOCKED] Needs approval: %s → %s",
                         action.action_type, action.reason)
-            return
+            action.execution_result = "BLOCKED: approval_required"
+            return "blocked"
 
-        allowed, throttle_reason = self._throttle.can_execute(action)
+        allowed, throttle_reason = self._check_throttle(action)
         if not allowed:
             logger.info("[LEGACY THROTTLED] %s → %s: %s",
                         action.action_type, action.target, throttle_reason)
-            return
+            action.execution_result = f"THROTTLED: {throttle_reason}"
+            return "throttled"
 
         try:
             result = self._execute_single(action)
             action.executed = True
             action.execution_result = result
-            self._throttle.record_execution(action)
+            self._mark_throttle(action)
             if action.action_type in ("KILL_SWITCH", "BLOCK_ENTRY", "DELEVERAGE"):
                 state_changes[action.action_type] = {
                     "target": action.target,
@@ -740,9 +757,29 @@ class AgentFeedbackLoop:
                 }
             logger.info("[LEGACY EXECUTED] %s → %s: %s",
                         action.action_type, action.target, result)
+            return "executed"
         except Exception as exc:
             action.execution_result = "ERROR: {}".format(exc)
             logger.error("Legacy execution failed for %s: %s", action.action_type, exc)
+            return "blocked"
+
+    @staticmethod
+    def _throttle_key(action: FeedbackAction) -> str | None:
+        action_type = str(action.action_type or "").strip().upper()
+        if action_type in {"FORCE_EXIT", "BLOCK_ENTRY"}:
+            return str(action.target or "global").strip() or "global"
+        return str(action.target or "global").strip() or "global"
+
+    def _check_throttle(self, action: FeedbackAction) -> tuple[bool, str]:
+        key = self._throttle_key(action)
+        if hasattr(self._throttle, "check"):
+            return self._throttle.check(action.action_type, key=key)
+        if self._throttle.allow(action.action_type, key=key):
+            return True, "ok"
+        return False, "throttled"
+
+    def _mark_throttle(self, action: FeedbackAction) -> None:
+        self._throttle.mark(action.action_type, key=self._throttle_key(action))
 
     def _execute_single(self, action: FeedbackAction) -> str:
         """Execute a single feedback action."""

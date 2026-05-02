@@ -168,6 +168,142 @@ class TestFeedbackLoopEngine:
         assert summary.n_actions_generated == 0
         assert summary.n_actions_executed == 0
 
+    def test_repeated_force_exit_same_pair_is_throttled(self, monkeypatch, tmp_path):
+        from core.action_throttler import ActionThrottler
+        from core.agent_feedback import AgentFeedbackLoop, FeedbackAction
+
+        throttler = ActionThrottler(state_path=tmp_path / "force_exit_throttle.json")
+        loop = AgentFeedbackLoop(dry_run=False, use_governance=False, throttler=throttler)
+        monkeypatch.setattr(loop, "_execute_single", lambda action: f"executed:{action.target}")
+
+        actions = [
+            FeedbackAction(
+                action_id="exit_1",
+                source_agent="test",
+                action_type="FORCE_EXIT",
+                severity="WARNING",
+                target="SPY/QQQ",
+            ),
+            FeedbackAction(
+                action_id="exit_2",
+                source_agent="test",
+                action_type="FORCE_EXIT",
+                severity="WARNING",
+                target="SPY/QQQ",
+            ),
+        ]
+
+        summary = loop.execute_actions(actions)
+        assert summary.n_actions_executed == 1
+        assert summary.n_actions_throttled == 1
+        assert summary.n_actions_blocked == 0
+        assert len(summary.throttled_actions) == 1
+        assert summary.throttled_actions[0].action_type == "FORCE_EXIT"
+        assert actions[1].execution_result.startswith("THROTTLED:")
+
+    def test_kill_switch_cooldown_is_respected(self, monkeypatch, tmp_path):
+        from core.action_throttler import ActionThrottler
+        from core.agent_feedback import AgentFeedbackLoop, FeedbackAction
+
+        throttler = ActionThrottler(state_path=tmp_path / "kill_switch_throttle.json")
+        loop = AgentFeedbackLoop(dry_run=False, use_governance=False, throttler=throttler)
+        monkeypatch.setattr(loop, "_execute_single", lambda action: f"executed:{action.action_type}")
+
+        first = FeedbackAction(
+            action_id="kill_1",
+            source_agent="test",
+            action_type="KILL_SWITCH",
+            severity="EMERGENCY",
+            target="system",
+        )
+        second = FeedbackAction(
+            action_id="kill_2",
+            source_agent="test",
+            action_type="KILL_SWITCH",
+            severity="EMERGENCY",
+            target="system",
+        )
+
+        first_summary = loop.execute_actions([first])
+        second_summary = loop.execute_actions([second])
+        assert first_summary.n_actions_executed == 1
+        assert second_summary.n_actions_executed == 0
+        assert second_summary.n_actions_throttled == 1
+        assert second.execution_result.startswith("THROTTLED:")
+
+    def test_max_actions_per_cycle_is_respected(self, monkeypatch, tmp_path):
+        from core.action_throttler import ActionThrottler
+        from core.agent_feedback import AgentFeedbackLoop, FeedbackAction
+
+        throttler = ActionThrottler(
+            state_path=tmp_path / "cycle_limit_throttle.json",
+            max_actions_per_cycle=1,
+        )
+        loop = AgentFeedbackLoop(dry_run=False, use_governance=False, throttler=throttler)
+        monkeypatch.setattr(loop, "_execute_single", lambda action: f"executed:{action.target}")
+
+        actions = [
+            FeedbackAction(
+                action_id="block_1",
+                source_agent="test",
+                action_type="BLOCK_ENTRY",
+                severity="CRITICAL",
+                target="SPY/QQQ",
+            ),
+            FeedbackAction(
+                action_id="block_2",
+                source_agent="test",
+                action_type="BLOCK_ENTRY",
+                severity="CRITICAL",
+                target="IWM/SPY",
+            ),
+        ]
+
+        summary = loop.execute_actions(actions)
+        assert summary.n_actions_executed == 1
+        assert summary.n_actions_throttled == 1
+        assert summary.throttled_actions[0].target == "IWM/SPY"
+
+    def test_feedback_summary_counts_throttled_and_blocked_actions(self, monkeypatch, tmp_path):
+        from core.action_throttler import ActionThrottler
+        from core.agent_feedback import AgentFeedbackLoop, FeedbackAction
+
+        throttler = ActionThrottler(state_path=tmp_path / "summary_counts_throttle.json")
+        loop = AgentFeedbackLoop(dry_run=False, use_governance=False, throttler=throttler)
+        monkeypatch.setattr(loop, "_execute_single", lambda action: f"executed:{action.target}")
+
+        actions = [
+            FeedbackAction(
+                action_id="manual_block",
+                source_agent="test",
+                action_type="BLOCK_ENTRY",
+                severity="WARNING",
+                target="portfolio",
+                auto_execute=False,
+            ),
+            FeedbackAction(
+                action_id="exit_1",
+                source_agent="test",
+                action_type="FORCE_EXIT",
+                severity="WARNING",
+                target="SPY/QQQ",
+            ),
+            FeedbackAction(
+                action_id="exit_2",
+                source_agent="test",
+                action_type="FORCE_EXIT",
+                severity="WARNING",
+                target="SPY/QQQ",
+            ),
+        ]
+
+        summary = loop.execute_actions(actions)
+        assert summary.n_actions_generated == 3
+        assert summary.n_actions_executed == 1
+        assert summary.n_actions_blocked == 1
+        assert summary.n_actions_throttled == 1
+        assert len(summary.throttled_actions) == 1
+
     def test_governance_router_factory_returns_adapter(self):
         import core.governance_router as governance_router
 
