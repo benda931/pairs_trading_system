@@ -36,7 +36,7 @@ from typing import (
 from collections.abc import Mapping, Sequence
 
 # Core contracts for Streamlit decoupling
-from core.state_provider import InMemoryStateProvider, StateProvider, get_default_state_provider
+from core.state_provider import InMemoryStateProvider, StateProvider, StreamlitStateProvider, get_default_state_provider
 
 # Fallback for json_safe
 try:  # pragma: no cover
@@ -127,6 +127,20 @@ class _StreamlitStateProvider:
             return key in st.session_state
         except Exception:
             return False
+
+
+class _StreamlitStateProvider(StreamlitStateProvider):
+    """Canonical Streamlit-backed provider used by the alert bus."""
+
+
+def _shared_state_provider() -> StateProvider:
+    global _state_provider
+    if _state_provider is None:
+        _state_provider = get_default_state_provider()
+    return _state_provider
+
+
+_get_state_provider = _shared_state_provider
 
 
 # ---------------------------------------------------------------------------

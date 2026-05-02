@@ -30,6 +30,8 @@ from typing import Any, Dict, List, Optional, Protocol, Sequence, Tuple, runtime
 import numpy as np
 import pandas as pd
 
+from core.state_provider import InMemoryStateProvider, StateProvider
+
 
 # ══════════════════════════════════════════════════════════════════
 # 1. ENUMERATIONS
@@ -955,6 +957,10 @@ class InMemoryStateProvider:
         self._store[key] = value
     def has(self, key: str) -> bool:
         return key in self._store
+
+
+# Keep the canonical implementation in core.state_provider.
+from core.state_provider import InMemoryStateProvider as InMemoryStateProvider, StateProvider as StateProvider
 
 
 @dataclass(frozen=True)
