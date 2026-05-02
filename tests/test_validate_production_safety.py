@@ -83,3 +83,48 @@ def test_validate_pair_policy_accepts_valid_production_pair():
     errors = validator._validate_pair_policy(cfg)
 
     assert errors == []
+
+
+def test_validate_ci_workflow_accepts_expected_gates(tmp_path):
+    workflow = tmp_path / "ci.yml"
+    workflow.write_text(
+        "\n".join(
+            [
+                "jobs:",
+                "  compile:",
+                "    steps:",
+                "      - run: python -m compileall .",
+                "  production-safety-tests:",
+                "    steps:",
+                "      - run: python scripts/validate_production_safety.py",
+                "      - run: python -m pytest tests/test_orchestrator_contract.py tests/test_validate_production_safety.py -q",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    errors = validator._validate_ci_workflow(workflow)
+
+    assert errors == []
+
+
+def test_validate_ci_workflow_rejects_missing_validator_gate(tmp_path):
+    workflow = tmp_path / "ci.yml"
+    workflow.write_text(
+        "\n".join(
+            [
+                "jobs:",
+                "  compile:",
+                "    steps:",
+                "      - run: python -m compileall .",
+                "  production-safety-tests:",
+                "    steps:",
+                "      - run: python -m pytest tests/test_pair_utils.py -q",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    errors = validator._validate_ci_workflow(workflow)
+
+    assert any("missing validator command" in err for err in errors)

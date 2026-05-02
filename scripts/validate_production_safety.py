@@ -7,6 +7,7 @@ from typing import Iterable
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CONFIG_PATH = REPO_ROOT / "config.json"
+WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "python-package-conda.yml"
 NEEDLE = "datetime.now(timezone.utc)" + "()"
 EXCLUDED_DIRS = {".git", "__pycache__", ".venv", "venv", "logs"}
 BLOCKED_CRYPTO_SYMBOLS = {
@@ -169,6 +170,27 @@ def _validate_orchestrator_contract() -> list[str]:
     return errors
 
 
+def _validate_ci_workflow(workflow_path: Path) -> list[str]:
+    errors: list[str] = []
+    try:
+        workflow_text = workflow_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        return [f"ci workflow: unable to read {workflow_path}: {exc}"]
+
+    required_snippets = {
+        "compile job": "compile:",
+        "production safety job": "production-safety-tests:",
+        "compileall command": "python -m compileall .",
+        "validator command": "python scripts/validate_production_safety.py",
+        "orchestrator contract test": "tests/test_orchestrator_contract.py",
+        "validator test": "tests/test_validate_production_safety.py",
+    }
+    for label, snippet in required_snippets.items():
+        if snippet not in workflow_text:
+            errors.append(f"ci workflow: missing {label} ({snippet})")
+    return errors
+
+
 def main() -> int:
     failures: list[str] = []
 
@@ -187,6 +209,7 @@ def main() -> int:
     failures.extend(_validate_config(cfg))
     failures.extend(_validate_pair_policy(cfg))
     failures.extend(_validate_orchestrator_contract())
+    failures.extend(_validate_ci_workflow(WORKFLOW_PATH))
 
     if failures:
         print("PRODUCTION SAFETY VALIDATION: FAIL")
@@ -200,6 +223,7 @@ def main() -> int:
     print("- config.json safety defaults validated")
     print("- pair parser and policy sanity checks validated")
     print("- orchestrator pipeline contract validated")
+    print("- CI workflow production-safety gates validated")
     return 0
 
 
