@@ -149,6 +149,26 @@ def _validate_pair_policy(cfg: dict) -> list[str]:
     return errors
 
 
+def _validate_orchestrator_contract() -> list[str]:
+    errors: list[str] = []
+    from core.orchestrator import PairsOrchestrator
+
+    original_reconciliation = PairsOrchestrator._run_startup_reconciliation
+    original_health = PairsOrchestrator._run_startup_health_check
+    try:
+        PairsOrchestrator._run_startup_reconciliation = lambda self: None
+        PairsOrchestrator._run_startup_health_check = lambda self: None
+        contract = PairsOrchestrator().validate_pipeline_contract()
+    finally:
+        PairsOrchestrator._run_startup_reconciliation = original_reconciliation
+        PairsOrchestrator._run_startup_health_check = original_health
+
+    if not contract.get("ok", False):
+        for err in contract.get("errors", []):
+            errors.append(f"orchestrator contract: {err}")
+    return errors
+
+
 def main() -> int:
     failures: list[str] = []
 
@@ -166,6 +186,7 @@ def main() -> int:
 
     failures.extend(_validate_config(cfg))
     failures.extend(_validate_pair_policy(cfg))
+    failures.extend(_validate_orchestrator_contract())
 
     if failures:
         print("PRODUCTION SAFETY VALIDATION: FAIL")
@@ -178,6 +199,7 @@ def main() -> int:
     print("- no top-level Streamlit imports found under core/")
     print("- config.json safety defaults validated")
     print("- pair parser and policy sanity checks validated")
+    print("- orchestrator pipeline contract validated")
     return 0
 
 

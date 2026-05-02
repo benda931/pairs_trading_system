@@ -55,6 +55,7 @@ jobs:
           tests/test_orchestrator_pair_parsing.py
           tests/test_data_freshness.py
           tests/test_orchestrator_freshness_gate.py
+          tests/test_orchestrator_contract.py
           tests/test_allocation_guard.py
           tests/test_execution_safety.py
           tests/test_feedback_dry_run.py
