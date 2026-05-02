@@ -22,10 +22,10 @@ import os
 
 import numpy as np
 import pandas as pd
-import streamlit as st
 
 from common.json_safe import make_json_safe
 from core.ib_order_router import IBOrderRouter
+from core.state_provider import StateProvider, get_default_state_provider
 from common.config_manager import load_config
 from core.fair_value_config import FairValueAPIConfig
 
@@ -75,6 +75,36 @@ def _normalize_env_value(env: str) -> str:
 
 
 APP_ENVIRONMENT: str = _normalize_env_value(_APP_ENV_RAW)
+
+_STATE_PROVIDER: Optional[StateProvider] = None
+
+
+def get_state_provider() -> StateProvider:
+    global _STATE_PROVIDER
+    if _STATE_PROVIDER is None:
+        _STATE_PROVIDER = get_default_state_provider()
+    return _STATE_PROVIDER
+
+
+def set_state_provider(provider: StateProvider) -> None:
+    global _STATE_PROVIDER
+    _STATE_PROVIDER = provider
+
+
+def _state_get(key: str, default: Any = None) -> Any:
+    return get_state_provider().get(key, default)
+
+
+def _state_set(key: str, value: Any) -> None:
+    get_state_provider().set(key, value)
+
+
+def _state_has(key: str) -> bool:
+    return get_state_provider().has(key)
+
+
+def _state_delete(key: str) -> None:
+    get_state_provider().delete(key)
 
 
 # ========= Service Protocols (typed interfaces, non-invasive) =========
@@ -471,7 +501,7 @@ class AppContext:
         # 1) Streamlit session-scoped AppContext (מועדף ל-Web).
         sess_ctx: Optional[AppContext]
         try:
-            sess_ctx = st.session_state.get("app_ctx")  # type: ignore[assignment]
+            sess_ctx = _state_get("app_ctx")  # type: ignore[assignment]
         except Exception:
             sess_ctx = None
 
@@ -519,7 +549,7 @@ class AppContext:
 
         # ננסה לקחת md_router קיים מה-Session אם כבר יש אחד
         try:
-            md_router = st.session_state.get("md_router")
+            md_router = _state_get("md_router")
         except Exception:
             md_router = None
 
@@ -550,7 +580,7 @@ class AppContext:
         cls._GLOBAL_CTX = ctx
         try:
             # לא חובה ב-CLI, אבל מוסיף עקביות ב-Web
-            st.session_state["app_ctx"] = ctx
+            _state_set("app_ctx", ctx)
         except Exception:
             pass
         return ctx
@@ -763,7 +793,7 @@ def get_app_context(
 
     if not refresh:
         try:
-            sess_ctx = st.session_state.get("app_ctx")  # type: ignore[assignment]
+            sess_ctx = _state_get("app_ctx")  # type: ignore[assignment]
         except Exception:
             sess_ctx = None
         if isinstance(sess_ctx, AppContext):
@@ -782,7 +812,7 @@ def get_app_context(
             logger.warning("get_app_context: init_services failed: %s", exc)
 
     try:
-        st.session_state["app_ctx"] = ctx
+        _state_set("app_ctx", ctx)
     except Exception:
         # לא נכשלים בסביבה ללא Streamlit
         pass
@@ -825,7 +855,7 @@ def hash_config(config: JSONDict) -> str:
 def get_feature_flags_snapshot() -> JSONDict:
     """העתק נקי של feature_flags מה-session."""
     try:
-        raw = st.session_state.get("feature_flags", {})
+        raw = _state_get("feature_flags", {})
     except Exception:
         raw = {}
     return dict(raw) if isinstance(raw, dict) else {}
@@ -849,7 +879,7 @@ def set_global_seed(seed: int) -> int:
         pass
 
     try:
-        st.session_state["global_seed"] = seed
+        _state_set("global_seed", seed)
     except Exception:
         # אם אין Streamlit context – עדיין הגדרנו random/np
         pass
@@ -865,9 +895,9 @@ def get_global_seed(default: Optional[int] = None) -> int:
     4) מה _DEF_SEED
     """
     try:
-        if "global_seed" in st.session_state:
+        if _state_has("global_seed"):
             try:
-                return int(st.session_state["global_seed"])
+                return int(_state_get("global_seed"))
             except Exception:
                 pass
     except Exception:
@@ -896,13 +926,13 @@ def ensure_run_id(seed: int) -> str:
     מוודא שיש run_id בסשן. אם אין – יוצר חדש.
     """
     try:
-        rid = st.session_state.get("run_id")
+        rid = _state_get("run_id")
     except Exception:
         rid = None
     if not rid:
         rid = _generate_run_id(int(seed))
         try:
-            st.session_state["run_id"] = rid
+            _state_set("run_id", rid)
         except Exception:
             pass
     return str(rid)
@@ -911,7 +941,7 @@ def ensure_run_id(seed: int) -> str:
 def get_current_run_id() -> Optional[str]:
     """מחזיר run_id נוכחי מה-session_state (אם קיים)."""
     try:
-        rid = st.session_state.get("run_id")
+        rid = _state_get("run_id")
     except Exception:
         rid = None
     return str(rid) if rid else None
@@ -923,7 +953,7 @@ def get_current_run_id() -> Optional[str]:
 def save_ctx_to_session(ctx: AppContext) -> None:
     """שומר ctx כ-dict JSON-safe ב-session_state['ctx']."""
     try:
-        st.session_state["ctx"] = ctx.to_dict()
+        _state_set("ctx", ctx.to_dict())
     except Exception:
         pass
 
@@ -935,7 +965,7 @@ def get_current_ctx() -> Optional[AppContext]:
     - זה מחזיר עותק חדש מה-dict; לקונטקסט ה"חי" בטאב עדיף get_app_context().
     """
     try:
-        raw = st.session_state.get("ctx")
+        raw = _state_get("ctx")
     except Exception:
         raw = None
     if not isinstance(raw, dict):
@@ -1012,7 +1042,7 @@ def _auto_infer_tags(config: JSONDict) -> TagDict:
 
     # macro_profile מטאב Macro / config
     try:
-        macro_prof = st.session_state.get("macro_profile")
+        macro_prof = _state_get("macro_profile")
     except Exception:
         macro_prof = None
     macro_prof = macro_prof or config.get("macro_profile")
@@ -1023,7 +1053,7 @@ def _auto_infer_tags(config: JSONDict) -> TagDict:
 
     # macro_meta (אם טאב Macro הריץ משהו)
     try:
-        macro_meta = st.session_state.get("macro_meta") or {}
+        macro_meta = _state_get("macro_meta") or {}
     except Exception:
         macro_meta = {}
     if isinstance(macro_meta, dict):
@@ -1035,7 +1065,7 @@ def _auto_infer_tags(config: JSONDict) -> TagDict:
 
     # matrix insights
     try:
-        gi = st.session_state.get("global_insights") or {}
+        gi = _state_get("global_insights") or {}
     except Exception:
         gi = {}
     if isinstance(gi, dict):
@@ -1162,7 +1192,7 @@ def _register_ctx_in_session_history(ctx: AppContext) -> None:
     שימושי לניתוח/השוואה מהירה בלי DB חיצוני.
     """
     try:
-        hist = st.session_state.get("_ctx_history", [])
+        hist = _state_get("_ctx_history", [])
         if not isinstance(hist, list):
             hist = []
         hist.append(
@@ -1179,7 +1209,7 @@ def _register_ctx_in_session_history(ctx: AppContext) -> None:
             }
         )
         # נגביל לגודל סביר
-        st.session_state["_ctx_history"] = hist[-200:]
+        _state_set("_ctx_history", hist[-200:])
     except Exception:
         pass
 
@@ -1214,7 +1244,7 @@ def build_ctx(
     run_id = ensure_run_id(seed_val)
 
     # risk params
-    risk_cfg = st.session_state.get("risk_capital", {}) or {}
+    risk_cfg = _state_get("risk_capital", {}) or {}
     capital = float(
         controls.get(
             "capital",
@@ -1281,7 +1311,7 @@ def build_ctx(
         section=section,
         profile=APP_PROFILE,
         environment=APP_ENVIRONMENT,
-        md_router=st.session_state.get("md_router"),
+        md_router=_state_get("md_router"),
         ctx_version=CURRENT_CTX_SCHEMA_VERSION,
         config_hash=cfg_hash,
         parent_run_id=parent_run_id,
@@ -1292,9 +1322,9 @@ def build_ctx(
         policy_status={},          # יתמלא בחלק Policy Engine
         scenario_overlay=None,
         provenance=provenance,
-        experiment_name=st.session_state.get("opt_experiment_name"),
-        experiment_group=st.session_state.get("experiment_group"),
-        run_label=st.session_state.get("bt_run_label") or controls.get("run_label"),
+        experiment_name=_state_get("opt_experiment_name"),
+        experiment_group=_state_get("experiment_group"),
+        run_label=_state_get("bt_run_label") or controls.get("run_label"),
         reward=None,
         state_features=None,
         context_notes=None,
@@ -1766,7 +1796,7 @@ def summarize_ctx_history() -> Optional[pd.DataFrame]:
     - המרה של ts ל-datetime אם קיים
     - health_score rolling mean/delta (לניתוח drift)
     """
-    hist = st.session_state.get("_ctx_history")
+    hist = _state_get("_ctx_history")
     if not isinstance(hist, list) or not hist:
         return None
 
@@ -3048,7 +3078,7 @@ def register_experiment_run(
     - wf_stability_score
     """
     try:
-        runs = st.session_state.get("_experiment_runs", [])
+        runs = _state_get("_experiment_runs", [])
         if not isinstance(runs, list):
             runs = []
 
@@ -3090,7 +3120,7 @@ def register_experiment_run(
             "extra_meta": make_json_safe(extra_meta or {}),
         }
         runs.append(record)
-        st.session_state["_experiment_runs"] = runs[-500:]
+        _state_set("_experiment_runs", runs[-500:])
     except Exception:
         pass
 
@@ -3099,7 +3129,7 @@ def get_experiment_runs_dataframe() -> Optional[pd.DataFrame]:
     """
     מחזיר DataFrame של _experiment_runs (אם קיים).
     """
-    runs = st.session_state.get("_experiment_runs")
+    runs = _state_get("_experiment_runs")
     if not isinstance(runs, list) or not runs:
         return None
     try:
@@ -3403,7 +3433,7 @@ def _build_run_metadata_index() -> Dict[str, JSONDict]:
     idx: Dict[str, JSONDict] = {}
 
     # מהיסטוריית קונטקסטים
-    hist = st.session_state.get("_ctx_history") or []
+    hist = _state_get("_ctx_history") or []
     if isinstance(hist, list):
         for row in hist:
             if not isinstance(row, dict):
@@ -3424,7 +3454,7 @@ def _build_run_metadata_index() -> Dict[str, JSONDict]:
             idx[rid] = meta
 
     # מריצות ניסוי (_experiment_runs)
-    runs = st.session_state.get("_experiment_runs") or []
+    runs = _state_get("_experiment_runs") or []
     if isinstance(runs, list):
         for rec in runs:
             if not isinstance(rec, dict):
@@ -3456,7 +3486,7 @@ def register_child_ctx(parent: AppContext, child: AppContext) -> None:
         child_id = str(child.run_id)
 
         # lineage map ב-session: parent_run_id -> [child_run_ids...]
-        lineage = st.session_state.get("_ctx_lineage", {})
+        lineage = _state_get("_ctx_lineage", {})
         if not isinstance(lineage, dict):
             lineage = {}
 
@@ -3464,7 +3494,7 @@ def register_child_ctx(parent: AppContext, child: AppContext) -> None:
         if child_id not in children:
             children.append(child_id)
         lineage[parent_id] = children
-        st.session_state["_ctx_lineage"] = lineage
+        _state_set("_ctx_lineage", lineage)
 
         # עדכון provenance של child
         if child.provenance is None:
@@ -3510,7 +3540,7 @@ def build_ctx_lineage_graph(root_run_id: str) -> JSONDict:
         "edges": [ {"parent": run_id, "child": run_id}, ... ]
     }
     """
-    lineage = st.session_state.get("_ctx_lineage", {})
+    lineage = _state_get("_ctx_lineage", {})
     if not isinstance(lineage, dict) or not lineage:
         return {"root": str(root_run_id), "nodes": [], "edges": []}
 

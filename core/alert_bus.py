@@ -1,15 +1,21 @@
 # -*- coding: utf-8 -*-
 """
-core/alert_bus.py — Dashboard Alert Bus
-========================================
+core/alert_bus.py — Dashboard Alert Bus (Streamlit-decoupled)
+===============================================================
 
 Event Bus for dashboard-level alerts and notifications.
 Extracted from root/dashboard.py (Part 32/35).
 
-Provides:
+ARCHITECTURE (Phase 2.2 refactor):
+- Core logic uses StateProvider protocol (no direct streamlit dependency)
+- If Streamlit is available AND running, uses StreamlitStateProvider
+- Otherwise falls back to InMemoryStateProvider
+- UI render functions moved to root/dashboard_alerts_bus.py
+
+Public API (stable):
 - DashboardAlert dataclass
 - emit_dashboard_alert() / get_dashboard_alerts() / clear_dashboard_alerts()
-- render_dashboard_alert_center() (Streamlit UI)
+- render_dashboard_alert_center() (shim re-exports from root/ if available)
 """
 
 from __future__ import annotations
@@ -20,6 +26,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import (
     Any,
+    Callable,
     Dict,
     List,
     Literal,
@@ -28,7 +35,8 @@ from typing import (
 
 from collections.abc import Mapping, Sequence
 
-import streamlit as st
+# Core contracts for Streamlit decoupling
+from core.state_provider import InMemoryStateProvider, StateProvider, get_default_state_provider
 
 # Fallback for json_safe
 try:  # pragma: no cover
@@ -46,6 +54,82 @@ logger = logging.getLogger(__name__)
 SESSION_KEY_ALERTS: str = "dashboard_alerts"
 
 # ---------------------------------------------------------------------------
+# State provider (decouples core from Streamlit)
+# ---------------------------------------------------------------------------
+
+# Lazy singleton — prefer Streamlit session if available, else in-memory.
+_state_provider: Optional[StateProvider] = None
+_alert_center_renderer: Optional[Callable[[int, Optional[Sequence[str]]], None]] = None
+
+
+def _get_state_provider() -> StateProvider:
+    """
+    Get the active state provider.
+
+    Priority:
+    1. Explicitly injected provider (via set_state_provider())
+    2. Streamlit session (if streamlit imported AND in runtime context)
+    3. In-memory fallback (for CLI, tests, API)
+
+    Never raises — always returns a usable provider.
+    """
+    global _state_provider
+    if _state_provider is not None:
+        return _state_provider
+
+    # Try Streamlit — but only if it's both available AND has runtime
+    try:
+        import streamlit as st  # noqa: PLC0415
+        _ = st.session_state  # Access check — raises outside Streamlit runtime
+        _state_provider = _StreamlitStateProvider()
+        return _state_provider
+    except Exception:
+        pass
+
+    # Fallback: in-memory (works in CLI, tests, API)
+    _state_provider = InMemoryStateProvider()
+    return _state_provider
+
+
+def set_state_provider(provider: StateProvider) -> None:
+    """Inject a specific state provider (for tests or custom deployments)."""
+    global _state_provider
+    _state_provider = provider
+
+
+def set_dashboard_alert_renderer(
+    renderer: Optional[Callable[[int, Optional[Sequence[str]]], None]],
+) -> None:
+    """Register a UI renderer from the root layer without importing root/ here."""
+    global _alert_center_renderer
+    _alert_center_renderer = renderer
+
+
+class _StreamlitStateProvider:
+    """Adapter that routes get/set/has to st.session_state."""
+    def get(self, key: str, default: Any = None) -> Any:
+        try:
+            import streamlit as st  # noqa: PLC0415
+            return st.session_state.get(key, default)
+        except Exception:
+            return default
+
+    def set(self, key: str, value: Any) -> None:
+        try:
+            import streamlit as st  # noqa: PLC0415
+            st.session_state[key] = value
+        except Exception:
+            pass
+
+    def has(self, key: str) -> bool:
+        try:
+            import streamlit as st  # noqa: PLC0415
+            return key in st.session_state
+        except Exception:
+            return False
+
+
+# ---------------------------------------------------------------------------
 # DashboardAlert dataclass
 # ---------------------------------------------------------------------------
 
@@ -53,31 +137,20 @@ SESSION_KEY_ALERTS: str = "dashboard_alerts"
 @dataclass
 class DashboardAlert:
     """
-    Alert / Notification ברמת דשבורד – Event Bus פנימי לסיכון, מקרו, דאטה וסוכנים.
+    Dashboard-level alert/notification — internal Event Bus.
 
-    שימושים:
-    ---------
-    - Risk Engine יכול לדווח:
-        * "Exposure limit breached" / "Kill-switch armed" וכו'.
-    - Macro Engine יכול לדווח:
-        * שינוי Regime / אירוע מקרו חשוב.
-    - Agents יכולים לדווח:
-        * פעולה בוצעה / נדחתה / נכשלה.
+    Use cases:
+    - Risk Engine: "Exposure limit breached", "Kill-switch armed"
+    - Macro Engine: regime shifts, macro events
+    - Agents: action taken, rejected, or failed
 
-    שדות:
-    -----
-    id:
-        מזהה ייחודי (UUID4 hex).
-    ts_utc:
-        טיימסטמפ ב-UTC (isoformat, seconds).
-    level:
-        רמת חשיבות: "info" / "success" / "warning" / "error".
-    source:
-        מקור: למשל "risk_engine", "macro_engine", "agent", "backtest_tab".
-    message:
-        הודעה קצרה, קריאה לבני אדם.
-    details:
-        dict אופציונלי עם שדות נוספים (pair, portfolio_id, regime, limit_name וכו').
+    Fields:
+    - id: unique identifier (UUID4 hex)
+    - ts_utc: UTC timestamp (isoformat, seconds)
+    - level: severity: "info" / "success" / "warning" / "error"
+    - source: e.g. "risk_engine", "macro_engine", "agent", "backtest_tab"
+    - message: short human-readable description
+    - details: optional dict with extra fields (pair, portfolio_id, regime, etc.)
     """
 
     id: str
@@ -89,37 +162,27 @@ class DashboardAlert:
 
 
 # ---------------------------------------------------------------------------
-# Internal helpers
+# Storage helpers (use StateProvider instead of direct st.session_state)
 # ---------------------------------------------------------------------------
 
 
 def _ensure_alerts_list() -> List[Dict[str, Any]]:
     """
-    מבטיח רשימת Alerts ב-session_state:
+    Ensure alerts list is present in state provider.
 
-        [
-            { ... DashboardAlert כ-dict JSON-friendly ... },
-            ...
-        ]
+    Returns list of DashboardAlert dicts (JSON-friendly).
     """
-    try:
-        obj = st.session_state.get(SESSION_KEY_ALERTS, [])
-    except Exception:  # pragma: no cover
-        obj = []
+    provider = _get_state_provider()
+    obj = provider.get(SESSION_KEY_ALERTS, [])
 
     if not isinstance(obj, list):
         obj = []
-        try:
-            st.session_state[SESSION_KEY_ALERTS] = obj
-        except Exception:
-            pass
+        provider.set(SESSION_KEY_ALERTS, obj)
     return obj  # type: ignore[return-value]
 
 
 def _alert_to_dict(alert: DashboardAlert) -> Dict[str, Any]:
-    """
-    המרה ל-dict JSON-friendly.
-    """
+    """Serialize to JSON-friendly dict."""
     return {
         "id": alert.id,
         "ts_utc": alert.ts_utc,
@@ -131,40 +194,18 @@ def _alert_to_dict(alert: DashboardAlert) -> Dict[str, Any]:
 
 
 def _alert_from_mapping(data: Mapping[str, Any]) -> Optional[DashboardAlert]:
-    """
-    המרה ממבנה dict ל-DashboardAlert (Best-effort, לא נכשל על שדות חסרים קטנים).
-    """
+    """Deserialize DashboardAlert from mapping. Returns None on invalid input."""
     try:
-        alert_id = str(data.get("id") or uuid.uuid4().hex)
-        ts = str(
-            data.get("ts_utc")
-            or datetime.now(timezone.utc).isoformat(timespec="seconds")
-        )
-        level_raw = str(data.get("level") or "info").lower()
-        level: Literal["info", "success", "warning", "error"]
-        if level_raw not in ("info", "success", "warning", "error"):
-            level = "info"
-        else:
-            level = level_raw  # type: ignore[assignment]
-
-        source = str(data.get("source") or "system")
-        message = str(data.get("message") or "").strip()
-        details = data.get("details") or {}
-        if not isinstance(details, Mapping):
-            details = {"value": details}
-
-        if not message:
-            return None
-
         return DashboardAlert(
-            id=alert_id,
-            ts_utc=ts,
-            level=level,
-            source=source,
-            message=message,
-            details=dict(details),
+            id=str(data.get("id", uuid.uuid4().hex)),
+            ts_utc=str(data.get("ts_utc", "")),
+            level=data.get("level", "info"),  # type: ignore[arg-type]
+            source=str(data.get("source", "unknown")),
+            message=str(data.get("message", "")),
+            details=dict(data.get("details", {})),
         )
-    except Exception:  # pragma: no cover
+    except Exception as exc:
+        logger.debug("_alert_from_mapping failed: %s", exc)
         return None
 
 
@@ -180,23 +221,23 @@ def emit_dashboard_alert(
     details: Optional[Mapping[str, Any]] = None,
 ) -> DashboardAlert:
     """
-    מוסיף Alert חדש ל-Bus הדשבורד.
+    Emit a new dashboard alert.
 
-    דוגמאות:
-    ---------
-        emit_dashboard_alert(
-            "warning",
-            "risk_engine",
-            "Exposure limit exceeded for portfolio 'core_fund'",
-            {"portfolio_id": "core_fund", "limit": "gross_exposure", "value": 1.25},
-        )
+    Parameters
+    ----------
+    level : str
+        "info" | "success" | "warning" | "error"
+    source : str
+        Origin (e.g. "risk_engine", "agent:kill_switch")
+    message : str
+        Human-readable description.
+    details : Mapping, optional
+        Extra context (JSON-serializable).
 
-        emit_dashboard_alert(
-            "error",
-            "broker",
-            "IBKR connection lost",
-            {"host": "127.0.0.1", "port": 7497},
-        )
+    Returns
+    -------
+    DashboardAlert
+        The created alert.
     """
     details_dict: Dict[str, Any] = dict(details) if isinstance(details, Mapping) else {}
     alert = DashboardAlert(
@@ -211,10 +252,7 @@ def emit_dashboard_alert(
     alerts_list = _ensure_alerts_list()
     alerts_list.append(_alert_to_dict(alert))
 
-    try:
-        st.session_state[SESSION_KEY_ALERTS] = alerts_list
-    except Exception:  # pragma: no cover
-        pass
+    _get_state_provider().set(SESSION_KEY_ALERTS, alerts_list)
 
     logger.info(
         "Dashboard alert emitted: level=%s, source=%s, message=%s",
@@ -228,7 +266,7 @@ def emit_dashboard_alert(
 
 def get_dashboard_alerts(limit: Optional[int] = None) -> List[DashboardAlert]:
     """
-    מחזיר רשימת Alerts (מהחדש לישן). אם limit סופק – מחזיר רק את ה-N האחרונים.
+    Return alerts (newest first). If limit provided, only return top N.
     """
     alerts_raw = _ensure_alerts_list()
     alerts: List[DashboardAlert] = []
@@ -246,16 +284,17 @@ def get_dashboard_alerts(limit: Optional[int] = None) -> List[DashboardAlert]:
     return alerts
 
 
-def clear_dashboard_alerts(level: Optional[str] = None, source: Optional[str] = None) -> None:
+def clear_dashboard_alerts(
+    level: Optional[str] = None,
+    source: Optional[str] = None,
+) -> None:
     """
-    מנקה Alerts מה-Bus:
+    Clear alerts from the bus.
 
-    - אם level=None ו-source=None → מנקה הכל.
-    - אם level לא None → מנקה Alerts רק ברמת level מסוימת.
-    - אם source לא None → מנקה Alerts רק מ-Source מסוים.
-
-    ניתן להשתמש גם בשילוב:
-        clear_dashboard_alerts(level="info", source="system")
+    - If level=None and source=None → clear all
+    - If level != None → clear only that level
+    - If source != None → clear only from that source
+    - Can be combined (level="info", source="system")
     """
     alerts_raw = _ensure_alerts_list()
     if not alerts_raw:
@@ -276,31 +315,12 @@ def clear_dashboard_alerts(level: Optional[str] = None, source: Optional[str] = 
                 continue
         filtered.append(item)
 
-    try:
-        st.session_state[SESSION_KEY_ALERTS] = filtered
-    except Exception:  # pragma: no cover
-        pass
+    _get_state_provider().set(SESSION_KEY_ALERTS, filtered)
 
 
 # ---------------------------------------------------------------------------
-# Streamlit UI helpers
+# UI shim — delegates to root/ (Phase 2.2: no Streamlit in core)
 # ---------------------------------------------------------------------------
-
-
-def _render_alert_badge(alert: DashboardAlert) -> None:
-    """
-    מציג Alert קטן (Badge-style) ב-UI, לשימוש על ידי Tabs/Toolbar בעתיד.
-    """
-    icon = {
-        "info": "\u2139\ufe0f",
-        "success": "\u2705",
-        "warning": "\u26a0\ufe0f",
-        "error": "\U0001f6a8",
-    }.get(alert.level, "\u2139\ufe0f")
-
-    st.write(
-        f"{icon} `{alert.ts_utc}` \u2022 **{alert.source}** \u2013 {alert.message}"
-    )
 
 
 def render_dashboard_alert_center(
@@ -308,31 +328,22 @@ def render_dashboard_alert_center(
     filter_levels: Optional[Sequence[str]] = None,
 ) -> None:
     """
-    רנדר מרכזי של Alerts (Alert Center) – לא מחובר אוטומטית ל-Shell,
-    אלא מיועד לשימוש מטאבים כמו:
-        - Home
-        - Risk
-        - Agents
-        - Logs
+    Render alert center (shim — delegates to root/dashboard_alerts_bus).
 
-    פרמטרים:
-    --------
-    max_items:
-        מספר ה-Alerts המקסימלי להצגה (ברירת מחדל: 10).
-    filter_levels:
-        אם לא None – מציג רק Alerts ש-level שלהם נמצא ברשימה (למשל ["warning", "error"]).
+    Kept for backward compatibility. The actual Streamlit rendering lives
+    in root/dashboard_alerts_bus.py (Tier 5).
+
+    If called in a non-Streamlit context, this is a no-op.
     """
-    alerts = get_dashboard_alerts(limit=max_items)
-    if filter_levels:
-        lvl_set = {lvl.lower() for lvl in filter_levels}
-        alerts = [a for a in alerts if a.level.lower() in lvl_set]
-
-    if not alerts:
-        st.caption("No dashboard alerts at the moment.")
+    renderer = _alert_center_renderer
+    if renderer is None:
+        logger.debug("render_dashboard_alert_center: UI renderer not registered")
         return
 
-    for alert in alerts:
-        _render_alert_badge(alert)
+    try:
+        renderer(max_items=max_items, filter_levels=filter_levels)
+    except Exception as exc:
+        logger.debug("render_dashboard_alert_center: UI unavailable: %s", exc)
 
 
 __all__ = [
@@ -342,4 +353,6 @@ __all__ = [
     "get_dashboard_alerts",
     "clear_dashboard_alerts",
     "render_dashboard_alert_center",
+    "set_dashboard_alert_renderer",
+    "set_state_provider",
 ]

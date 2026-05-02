@@ -19,6 +19,8 @@ import os
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
+from core.state_provider import get_default_state_provider
+
 if TYPE_CHECKING:
     pass  # AppContext forward reference
 
@@ -35,13 +37,17 @@ def _init_sql_store(ctx: Any) -> None:
         return
     try:
         from core.sql_store import SqlStore  # type: ignore
+        from core.data_refresh_diagnostics import is_external_scheduler_daemon_active
 
         cfg = getattr(ctx.settings, "config", {}) or {}
         cfg_ro = bool(cfg.get("sql_read_only", False))
+        scheduler_owned = is_external_scheduler_daemon_active()
         env_ro = os.getenv("SQL_STORE_READ_ONLY")
         env_ro_flag = env_ro is not None and env_ro.strip().lower() in ("1", "true", "yes", "on")
 
         if cfg_ro or env_ro_flag:
+            read_only = True
+        elif scheduler_owned:
             read_only = True
         else:
             read_only = ctx.environment in ("paper", "live")
@@ -51,9 +57,11 @@ def _init_sql_store(ctx: Any) -> None:
         )
         ctx.services.setdefault("sql_store", ctx.sql_store)
         logger.info(
-            "SqlStore initialised (url=%s, env=%s)",
+            "SqlStore initialised (url=%s, env=%s, read_only=%s, scheduler_owned=%s)",
             getattr(ctx.sql_store, "engine_url", None),
             getattr(ctx.sql_store, "default_env", None),
+            read_only,
+            scheduler_owned,
         )
     except Exception as exc:
         logger.warning("SqlStore init failed: %s", exc)
@@ -66,8 +74,7 @@ def _init_market_data_router(ctx: Any) -> None:
             ctx.market_data_router = ctx.md_router
         else:
             try:
-                import streamlit as st
-                sess_md = st.session_state.get("md_router")
+                sess_md = get_default_state_provider().get("md_router")
             except Exception:
                 sess_md = None
             if sess_md is not None:
@@ -137,6 +144,28 @@ def _init_agents_manager(ctx: Any) -> None:
         pass
 
 
+def _init_dashboard_service(ctx: Any) -> None:
+    """Initialize DashboardService and attach it to the context services map."""
+    if getattr(ctx, "dashboard_service", None) is not None:
+        return
+    try:
+        from root.dashboard_service_factory import create_dashboard_service  # type: ignore
+
+        service = create_dashboard_service(
+            app_ctx=ctx,
+            sql_store=getattr(ctx, "sql_store", None),
+            env=getattr(ctx, "environment", None),
+            profile=getattr(ctx, "profile", None),
+        )
+        ctx.dashboard_service = service
+        ctx.services.setdefault("dashboard_service", service)
+        ctx.services.setdefault("dashboard", service)
+        ctx.services.setdefault("dashboard_facade", service)
+        logger.info("DashboardService initialised via dashboard_service_factory")
+    except Exception as exc:
+        logger.debug("DashboardService init skipped/failed: %s", exc)
+
+
 def _init_ib_router(ctx: Any) -> None:
     """Initialize IBKR order router with safety checks."""
     if ctx.ib_router is not None:
@@ -144,7 +173,17 @@ def _init_ib_router(ctx: Any) -> None:
 
     cfg = ctx.config or {}
     ib_cfg = cfg.get("ibkr") or {}
-    enabled: bool = bool(ib_cfg.get("enabled", True))
+    legacy_ib_cfg = cfg.get("ib") or {}
+    enabled_raw = None
+    for candidate in (
+        ib_cfg.get("enabled") if isinstance(ib_cfg, dict) else None,
+        cfg.get("ib_enable"),
+        legacy_ib_cfg.get("enabled") if isinstance(legacy_ib_cfg, dict) else None,
+    ):
+        if candidate is not None:
+            enabled_raw = candidate
+            break
+    enabled: bool = True if enabled_raw is None else bool(enabled_raw)
 
     # Feature flag override
     ff = ctx.controls.get("feature_flags_snapshot", {}) if isinstance(ctx.controls, dict) else {}
@@ -224,6 +263,7 @@ def init_all_services(ctx: Any) -> None:
     _init_engines(ctx)
     _init_fair_value_api(ctx)
     _init_agents_manager(ctx)
+    _init_dashboard_service(ctx)
 
     try:
         _init_ib_router(ctx)

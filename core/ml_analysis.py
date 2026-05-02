@@ -58,10 +58,10 @@ from dataclasses import dataclass, field, asdict
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Tuple
+import importlib
 
 import numpy as np
 import pandas as pd
-import streamlit as st
 from matplotlib import pyplot as plt  # noqa: WPS433
 
 from sklearn.compose import ColumnTransformer
@@ -157,6 +157,14 @@ except Exception:
     CUDA = False
 
 SEED = int(os.environ.get("ML_ANALYSIS_SEED", "42"))
+
+
+class _StreamlitProxy:
+    def __getattr__(self, name: str) -> Any:
+        return getattr(importlib.import_module("streamlit"), name)
+
+
+st = _StreamlitProxy()
 
 
 ###############################################################################
