@@ -9,9 +9,10 @@ from common.data_freshness import FreshnessConfig, validate_pair_frames, validat
 
 def _price_frame(end: str, periods: int = 260, *, with_close: bool = True) -> pd.DataFrame:
     index = pd.date_range(end=end, periods=periods, freq="B", tz="UTC")
-    data = {"close": [100.0 + i * 0.1 for i in range(periods)]}
+    n_rows = len(index)
+    data = {"close": [100.0 + i * 0.1 for i in range(n_rows)]}
     if not with_close:
-        data = {"open": [100.0 + i * 0.1 for i in range(periods)]}
+        data = {"open": [100.0 + i * 0.1 for i in range(n_rows)]}
     return pd.DataFrame(data, index=index)
 
 
