@@ -255,7 +255,7 @@ class RiskEvent:
     category: str
     severity: float
     message: str
-    ts_utc: str = field(default_factory=lambda: datetime.now(timezone.utc)().isoformat() + "Z")
+    ts_utc: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat() + "Z")
     run_id: Optional[str] = None
     meta: JSONDict = field(default_factory=dict)
     acknowledged: bool = False
@@ -2027,7 +2027,7 @@ def compute_recent_breach_stats(
             "avg_severity": 0.0,
         }
 
-    now = now_utc or datetime.now(timezone.utc)()
+    now = now_utc or datetime.now(timezone.utc)
     df["ts_utc"] = pd.to_datetime(df["ts_utc"], errors="coerce")
     df = df.dropna(subset=["ts_utc"])
 
@@ -2367,7 +2367,7 @@ def write_risk_bundle_to_disk(
 
     try:
         payload: JSONDict = {
-            "ts": datetime.now(timezone.utc)().isoformat() + "Z",
+            "ts": datetime.now(timezone.utc).isoformat() + "Z",
             "run_id": getattr(ctx, "run_id", None),
             "ctx_summary": getattr(ctx, "short_summary", lambda: {} )(),
             "risk_dashboard": risk_dashboard,

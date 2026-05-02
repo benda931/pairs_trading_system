@@ -288,6 +288,24 @@ class RiskFeedbackRules:
                     reason=a.get("reason", "Derisking recommendation"),
                 ))
 
+        elif agent_name == "portfolio_monitor":
+            exits = output.get("exit_signals", []) or []
+            for ex in exits:
+                pair = ex.get("pair_id") or ex.get("pair") or "?"
+                severity = str(ex.get("severity", "WARNING")).upper()
+                actions.append(FeedbackAction(
+                    action_id=f"portfolio_monitor_exit_{pair}_{_ts()}",
+                    source_agent=agent_name,
+                    action_type="FORCE_EXIT",
+                    severity=severity,
+                    target=str(pair),
+                    parameters=ex,
+                    reason=(
+                        f"Portfolio monitor flagged {pair}: "
+                        f"{ex.get('reason', 'diagnostic_exit')}"
+                    ),
+                ))
+
         return actions
 
 
@@ -457,7 +475,14 @@ class AgentFeedbackLoop:
 
     # Map agent names to rule sets
     SIGNAL_AGENTS = {"regime_surveillance", "signal_analyst", "exit_oversight", "trade_lifecycle"}
-    RISK_AGENTS = {"drawdown_monitor", "exposure_monitor", "kill_switch", "derisking", "capital_budget"}
+    RISK_AGENTS = {
+        "drawdown_monitor",
+        "exposure_monitor",
+        "kill_switch",
+        "derisking",
+        "capital_budget",
+        "portfolio_monitor",
+    }
     IMPROVEMENT_AGENTS = {"gpt_signal_advisor", "gpt_model_tuner", "gpt_strategy_researcher",
                           "auto_parameter_optimizer", "auto_model_retrainer"}
 
@@ -477,6 +502,7 @@ class AgentFeedbackLoop:
 
         # Lazy-initialise GovernanceRouter on first use to avoid circular imports
         self._router = None
+        self._learning = None
         self._executor_registry = executor_registry or self._build_default_executor_registry()
 
     def process_agent_results(
@@ -637,7 +663,7 @@ class AgentFeedbackLoop:
                         n_advisory += 1
                         logger.info(
                             "[GOVERNED ADVISORY] %s → tier=%s",
-                            action.action_type, record.governance_tier.value,
+                        action.action_type, record.governance_tier.value,
                         )
 
                 except Exception as exc:
@@ -663,6 +689,7 @@ class AgentFeedbackLoop:
             self._action_history.append(action)
 
         self._governed_records.extend(governed_records)
+        self._record_governed_learning(governed_records)
 
         # Send alerts for executed actions
         self._send_feedback_alerts(actions)
@@ -962,9 +989,28 @@ class AgentFeedbackLoop:
         router = self._get_router()
         if router is not None:
             try:
-                router.evaluate_due_observations()
+                results = router.evaluate_due_observations()
+                if results:
+                    self.record_observation_results(results)
             except Exception as exc:
                 logger.warning("run_due_observations: %s", exc)
+
+    def record_observation_results(
+        self,
+        results: Sequence[tuple[GovernedActionRecord, bool, float, str]],
+    ) -> None:
+        if not results:
+            return
+        try:
+            self._get_learning().record_observation_results(results)
+        except Exception as exc:
+            logger.debug("AgentFeedbackLoop observation learning update failed: %s", exc)
+
+    def get_agent_training_recommendations(self, min_priority: Optional[str] = None):
+        return self._get_learning().get_recommendations(min_priority=min_priority)
+
+    def get_agent_training_snapshots(self):
+        return self._get_learning().list_snapshots()
 
     def get_governance_metrics(self) -> Dict[str, Any]:
         """Return current precision and demotion metrics from the GovernanceRouter."""
@@ -993,6 +1039,26 @@ class AgentFeedbackLoop:
     @property
     def governed_records(self) -> List[GovernedActionRecord]:
         return list(self._governed_records)
+
+    def _get_learning(self):
+        if self._learning is None:
+            from core.agent_learning import get_agent_learning_coordinator
+
+            self._learning = get_agent_learning_coordinator()
+        return self._learning
+
+    def _record_governed_learning(
+        self,
+        governed_records: Sequence[GovernedActionRecord],
+    ) -> None:
+        if not governed_records:
+            return
+        learning = self._get_learning()
+        for record in governed_records:
+            try:
+                learning.record_governed_action(record)
+            except Exception as exc:
+                logger.debug("AgentFeedbackLoop governed learning update failed: %s", exc)
 
 
 def _ts() -> str:

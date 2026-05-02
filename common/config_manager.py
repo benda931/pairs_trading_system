@@ -80,10 +80,15 @@ ENV_CONFIG_ROOT = "PAIRS_TRADING_CONFIG_ROOT"
 if ENV_CONFIG_ROOT in os.environ:
     PROJECT_ROOT = Path(os.environ[ENV_CONFIG_ROOT]).expanduser().resolve()
 else:
-    PROJECT_ROOT = Path(__file__).resolve().parent
+    PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 CONFIG_PATH = PROJECT_ROOT / "config.json"   # main config
 CONFIG_DIR = PROJECT_ROOT / "configs"        # versioned profiles (snapshots)
+
+
+def _resolve_default_config_path() -> Path:
+    """Return the repo-root config path only."""
+    return CONFIG_PATH
 
 
 # -------------------------------------------------------------
@@ -409,7 +414,7 @@ def load_raw_config(path: str | Path | None = None) -> Dict[str, Any]:
 
     שימושי לדיבאגר/מיגרציות, אבל לרוב עדיף להשתמש ב־load_config().
     """
-    cfg_path = Path(path) if path else CONFIG_PATH
+    cfg_path = Path(path) if path else _resolve_default_config_path()
     if not cfg_path.exists():
         return {}
     try:
@@ -427,7 +432,7 @@ def load_config(path: str | Path | None = None) -> Dict[str, Any]:
     - אם JSON שבור או ולידציה נכשלת → נכתב קובץ ברירת מחדל.
     - אם הכול תקין → dict משודרג (כולל שדות חדשים) נשמר ומוחזר.
     """
-    cfg_path = Path(path) if path else CONFIG_PATH
+    cfg_path = Path(path) if path else _resolve_default_config_path()
 
     if not cfg_path.exists():
         logger.info("Main config missing – creating default at %s", cfg_path)
@@ -500,7 +505,7 @@ def save_config(
     validate : bool
         אם True, מריץ upgrade_config_dict כדי לוודא שהקונפיג תקין לפני השמירה.
     """
-    cfg_path = Path(path) if path else CONFIG_PATH
+    cfg_path = Path(path) if path else _resolve_default_config_path()
 
     if validate:
         try:
@@ -560,7 +565,7 @@ try:
 except NameError:
     PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
-DEFAULT_CONFIG_PATH = PROJECT_ROOT / "config.json"
+DEFAULT_CONFIG_PATH = _resolve_default_config_path()
 
 
 @lru_cache()

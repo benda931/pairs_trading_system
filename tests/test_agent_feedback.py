@@ -2,6 +2,7 @@
 """Tests for core.agent_feedback — Agent Feedback Loop."""
 from __future__ import annotations
 from types import SimpleNamespace
+from core.action_governance import ActionGovernanceTier, TradingEnvironment
 
 
 class TestFeedbackActionGeneration:
@@ -89,6 +90,29 @@ class TestFeedbackActionGeneration:
             actions = RiskFeedbackRules.process(agent, {"status": "success", "output": {}})
             assert isinstance(actions, list)
 
+    def test_portfolio_monitor_generates_force_exit_actions(self):
+        from core.agent_feedback import RiskFeedbackRules
+        result = {
+            "status": "success",
+            "output": {
+                "exit_signals": [
+                    {
+                        "pair_id": "AAPL/MSFT",
+                        "reason": "CORRELATION_BREAKDOWN",
+                        "severity": "CRITICAL",
+                        "quality_grade": "D",
+                        "z_score": 1.1,
+                        "stop_loss_trigger": "SIGNAL_DECAY",
+                    }
+                ]
+            },
+        }
+        actions = RiskFeedbackRules.process("portfolio_monitor", result)
+        assert len(actions) == 1
+        assert actions[0].action_type == "FORCE_EXIT"
+        assert actions[0].severity == "CRITICAL"
+        assert actions[0].target == "AAPL/MSFT"
+
 
 class TestFeedbackLoopEngine:
     """Test the AgentFeedbackLoop orchestrator."""
@@ -144,6 +168,27 @@ class TestFeedbackLoopEngine:
         assert summary.n_actions_generated == 0
         assert summary.n_actions_executed == 0
 
+    def test_governance_router_factory_returns_adapter(self):
+        import core.governance_router as governance_router
+
+        governance_router._FEEDBACK_ROUTER_SINGLETONS.clear()
+
+        router = governance_router.get_governance_router(environment="paper", executor_registry={})
+        record = router.route(
+            action_type="BLOCK_ENTRY",
+            action_id="a1",
+            source_agent="agent_x",
+            target="XLY/XLC",
+            parameters={"reason": "test"},
+            severity="WARNING",
+        )
+
+        assert record.environment == TradingEnvironment.PAPER
+        assert record.governance_tier == ActionGovernanceTier.ADVISORY_ONLY
+        assert record.executed is False
+        metrics = router.get_precision_metrics()
+        assert any(metric.action_type == "BLOCK_ENTRY" for metric in metrics)
+
 
 class TestCycleDetector:
     """Test cycle_detector integration."""
@@ -195,3 +240,32 @@ class TestOptimalExit:
         crisis = engine.compute_exit_signal(current_z=1.0, holding_days=5, regime="CRISIS")
         assert crisis.exit_score >= normal.exit_score
         assert crisis.regime_factor > normal.regime_factor
+
+    def test_diagnostics_breakdown_accelerates_exit(self):
+        from core.optimal_exit import OptimalExitEngine
+        engine = OptimalExitEngine(half_life=15, entry_z=2.0)
+        engine.compute_optimal_boundary()
+        healthy = engine.compute_exit_signal(
+            current_z=1.1,
+            holding_days=6,
+            regime="NORMAL",
+            mr_score=0.82,
+            correlation=0.84,
+            variance_ratio=0.72,
+            data_readiness_score=0.93,
+            z_velocity=-0.08,
+        )
+        broken = engine.compute_exit_signal(
+            current_z=1.1,
+            holding_days=6,
+            regime="NORMAL",
+            mr_score=0.18,
+            correlation=0.18,
+            variance_ratio=1.24,
+            data_readiness_score=0.28,
+            z_velocity=0.42,
+        )
+        assert broken.exit_score > healthy.exit_score
+        assert broken.diagnostic_pressure > healthy.diagnostic_pressure
+        assert broken.should_exit or broken.exit_threshold >= healthy.exit_threshold
+        assert broken.reason != "HOLD"

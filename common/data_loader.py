@@ -111,6 +111,7 @@ class Settings(BaseSettings):
     WARN_GAPS_DAYS: int = Field(default=5, env="WARN_GAPS_DAYS")
     DEFAULT_FREQ_DAILY: str = Field(default="D", env="DEFAULT_FREQ_DAILY")
     ENABLE_PARQUET: bool = Field(default=True, env="ENABLE_PARQUET")
+    PREFER_SQL_STORE: bool = Field(default=True, env="PREFER_SQL_STORE")
 
     model_config = {
         "env_file": ".env",
@@ -120,6 +121,7 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+_SQL_STORE_LOADER_DISABLED: bool = False
 
 # =============================================================
 # Logging
@@ -145,6 +147,139 @@ def _data_folder(intraday: bool = False) -> Path:
     folder = settings.DATA_FOLDER / sub
     folder.mkdir(parents=True, exist_ok=True)
     return folder
+
+
+@lru_cache(maxsize=1)
+def _get_sql_store_for_loader() -> Any:
+    """Lazily initialize a read-only SqlStore for price reads when available."""
+    if _SQL_STORE_LOADER_DISABLED:
+        return None
+    if not settings.PREFER_SQL_STORE:
+        return None
+    try:
+        from core.sql_store import SqlStore
+
+        return SqlStore.from_settings({}, read_only=True)
+    except Exception as exc:
+        logger.debug("data_loader: SqlStore unavailable for loader: %s", exc)
+        return None
+
+
+def _persist_local_price_cache(symbol: str, df: pd.DataFrame, *, intraday: bool = False) -> None:
+    """Best-effort local cache update so non-SQL consumers see the same clean data."""
+    if intraday or df.empty:
+        return
+    try:
+        path = save_csv(df, symbol, intraday=intraday)
+        if settings.ENABLE_PARQUET:
+            try:
+                csv_to_parquet(symbol, intraday=intraday)
+            except Exception as exc:
+                logger.debug("data_loader: csv_to_parquet failed for %s: %s", symbol, exc)
+        logger.debug("data_loader: refreshed local cache for %s at %s", symbol, path)
+    except Exception as exc:
+        logger.debug("data_loader: failed to persist local cache for %s: %s", symbol, exc)
+
+
+def _disable_sql_store_loader(reason: str) -> None:
+    global _SQL_STORE_LOADER_DISABLED
+    if _SQL_STORE_LOADER_DISABLED:
+        return
+    _SQL_STORE_LOADER_DISABLED = True
+    logger.info("data_loader: disabling SqlStore loader path for this process (%s)", reason)
+
+
+def _tag_price_frame(df: pd.DataFrame, *, data_source: str) -> pd.DataFrame:
+    """Attach lineage metadata to a price DataFrame without mutating callers."""
+    if df is None or df.empty:
+        return df
+    out = df.copy()
+    attrs = dict(getattr(df, "attrs", {}) or {})
+    attrs["data_source"] = data_source
+    out.attrs = attrs
+    return out
+
+
+def _load_symbol_from_sql_store(
+    symbol: str,
+    *,
+    intraday: bool = False,
+    start_date: Optional[Union[datetime, date]] = None,
+    end_date: Optional[Union[datetime, date]] = None,
+) -> pd.DataFrame:
+    """
+    Load one symbol from SqlStore, which is the preferred source of truth for daily data.
+    """
+    if _SQL_STORE_LOADER_DISABLED:
+        return pd.DataFrame()
+    if intraday:
+        return pd.DataFrame()
+
+    store = _get_sql_store_for_loader()
+    if store is None or not hasattr(store, "load_price_history"):
+        return pd.DataFrame()
+
+    def _to_str(value: Optional[Union[datetime, date]]) -> Optional[str]:
+        if value is None:
+            return None
+        if isinstance(value, datetime):
+            return value.date().isoformat()
+        return value.isoformat()
+
+    env = getattr(store, "default_env", None)
+    try:
+        try:
+            df = store.load_price_history(
+                symbol,
+                env=env if isinstance(env, str) and env else None,
+                start=_to_str(start_date),
+                end=_to_str(end_date),
+                warn_on_error=False,
+            )
+        except TypeError:
+            df = store.load_price_history(
+                symbol,
+                env=env if isinstance(env, str) and env else None,
+                start=_to_str(start_date),
+                end=_to_str(end_date),
+            )
+        if df.empty and env is not None:
+            try:
+                df = store.load_price_history(
+                    symbol,
+                    env=None,
+                    start=_to_str(start_date),
+                    end=_to_str(end_date),
+                    warn_on_error=False,
+                )
+            except TypeError:
+                df = store.load_price_history(
+                    symbol,
+                    env=None,
+                    start=_to_str(start_date),
+                    end=_to_str(end_date),
+                )
+    except Exception as exc:
+        logger.debug("data_loader: SqlStore load failed for %s: %s", symbol, exc)
+        return pd.DataFrame()
+
+    last_error = None
+    try:
+        last_error = getattr(store, "get_last_error", lambda: None)()
+    except Exception:
+        last_error = None
+    if isinstance(last_error, str):
+        lowered = last_error.lower()
+        if "being used by another process" in lowered or "cannot open file" in lowered:
+            _disable_sql_store_loader("duckdb file lock detected")
+
+    if df.empty:
+        return df
+
+    df = _clean_df(df)
+    validate_price_df(df, symbol=symbol)
+    _persist_local_price_cache(symbol, df, intraday=intraday)
+    return _tag_price_frame(df, data_source="sql_store")
 
 
 def _standardise_price_columns(df: pd.DataFrame) -> pd.DataFrame:
@@ -354,7 +489,7 @@ def download_symbol(
     """
     if intraday:
         if start is None or end is None:
-            end = datetime.now(timezone.utc)()
+            end = datetime.now(timezone.utc)
             start = end - timedelta(days=settings.INTRADAY_LOOKBACK_DAYS)
         df = _download_yahoo(symbol, start=start, end=end, interval=settings.INTRADAY_INTERVAL)
         return df
@@ -392,7 +527,7 @@ def _csv_is_stale(path: Path, *, max_age_days: int) -> bool:
     if max_age_days <= 0:
         return True
     mtime = datetime.fromtimestamp(path.stat().st_mtime)
-    return mtime < datetime.now(timezone.utc)() - timedelta(days=max_age_days)
+    return mtime < datetime.now(timezone.utc) - timedelta(days=max_age_days)
 
 
 def bulk_download(
@@ -713,6 +848,8 @@ def get_price_metadata(df: pd.DataFrame, *, symbol: str = "") -> Dict[str, Any]:
             "has_nans": False,
             "freq": None,
             "intraday": None,
+            "data_source": None,
+            "age_hours": None,
         }
 
     idx = df.index
@@ -741,6 +878,8 @@ def get_price_metadata(df: pd.DataFrame, *, symbol: str = "") -> Dict[str, Any]:
         "has_nans": bool(has_nans),
         "freq": freq,
         "intraday": intraday_flag,
+        "data_source": getattr(df, "attrs", {}).get("data_source"),
+        "age_hours": _compute_data_age_hours(df),
     }
 
 # =============================================================
@@ -768,9 +907,9 @@ def _load_symbol_full_cached(symbol: str, intraday: bool = False) -> pd.DataFram
                 symbol,
                 intraday,
             )
-            df = df_pq
+            df = _tag_price_frame(df_pq, data_source="parquet_cache")
         else:
-            df = _read_local_csv(csv_path)
+            df = _tag_price_frame(_read_local_csv(csv_path), data_source="csv_cache")
 
         if df.empty:
             logger.warning(
@@ -782,6 +921,7 @@ def _load_symbol_full_cached(symbol: str, intraday: bool = False) -> pd.DataFram
                 logger.warning("load_symbol_full_cached: re-download still empty for %s", symbol)
                 return pd.DataFrame()
             save_csv(df, symbol, intraday=intraday)
+            df = _tag_price_frame(df, data_source="remote_download")
     else:
         logger.info(
             "load_symbol_full_cached: cache miss for %s (%s) — downloading",
@@ -793,6 +933,7 @@ def _load_symbol_full_cached(symbol: str, intraday: bool = False) -> pd.DataFram
             logger.warning("load_symbol_full_cached: no data for %s from remote sources", symbol)
             return pd.DataFrame()
         save_csv(df, symbol, intraday=intraday)
+        df = _tag_price_frame(df, data_source="remote_download")
 
     validate_price_df(df, symbol=symbol)
     return df
@@ -815,6 +956,25 @@ def _slice_by_dates(
     if isinstance(end_date, date) and not isinstance(end_date, datetime):
         end_date = datetime.combine(end_date, datetime.min.time())
 
+    if isinstance(df.index, pd.DatetimeIndex):
+        tz = df.index.tz
+        if start_date is not None:
+            start_ts = pd.Timestamp(start_date)
+            if tz is None and start_ts.tzinfo is not None:
+                start_date = start_ts.tz_localize(None).to_pydatetime()
+            elif tz is not None and start_ts.tzinfo is None:
+                start_date = start_ts.tz_localize(tz).to_pydatetime()
+            elif tz is not None and start_ts.tzinfo is not None:
+                start_date = start_ts.tz_convert(tz).to_pydatetime()
+        if end_date is not None:
+            end_ts = pd.Timestamp(end_date)
+            if tz is None and end_ts.tzinfo is not None:
+                end_date = end_ts.tz_localize(None).to_pydatetime()
+            elif tz is not None and end_ts.tzinfo is None:
+                end_date = end_ts.tz_localize(tz).to_pydatetime()
+            elif tz is not None and end_ts.tzinfo is not None:
+                end_date = end_ts.tz_convert(tz).to_pydatetime()
+
     if start_date is not None:
         df = df[df.index >= start_date]
     if end_date is not None:
@@ -835,6 +995,7 @@ def _apply_freq_and_fill(
         return df
 
     out = df.copy()
+    out.attrs = dict(getattr(df, "attrs", {}) or {})
 
     if freq:
         # נעשה רסמפול "אגרסיבי" אבל נשמור על close כ-last, volume כ-sum וכו' אם קיימים.
@@ -904,6 +1065,55 @@ def _compute_data_age_hours(df) -> Optional[float]:
         return None
 
 
+def _business_days_behind(
+    df,
+    *,
+    now: Optional[pd.Timestamp] = None,
+) -> Optional[int]:
+    """Return how many business days the latest daily row lags the current business day."""
+    if df is None or not hasattr(df, "empty") or df.empty:
+        return None
+    try:
+        last_ts = pd.Timestamp(df.index.max())
+        if pd.isna(last_ts):
+            return None
+        ref_now = now or pd.Timestamp.now(tz="UTC")
+        if last_ts.tzinfo is None:
+            last_ts = last_ts.tz_localize("UTC")
+        latest_day = last_ts.normalize().tz_localize(None)
+        current_day = ref_now.normalize().tz_localize(None)
+        current_business_day = pd.bdate_range(end=current_day, periods=1)[0]
+        if latest_day >= current_business_day:
+            return 0
+        return max(len(pd.bdate_range(latest_day, current_business_day)) - 1, 0)
+    except Exception:
+        return None
+
+
+def _is_stale_price_data(
+    df,
+    *,
+    intraday: bool = False,
+    threshold_hours: float = 48.0,
+    now: Optional[pd.Timestamp] = None,
+) -> bool:
+    """
+    Decide whether a price frame is stale enough to warn on.
+
+    Daily EOD series are evaluated by business-day lag so weekends and the next
+    trading morning do not trigger false stale-data alarms.
+    """
+    age_hours = _compute_data_age_hours(df)
+    if age_hours is None:
+        return False
+    if intraday:
+        return age_hours > threshold_hours
+    business_days_behind = _business_days_behind(df, now=now)
+    if business_days_behind is None:
+        return age_hours > threshold_hours
+    return business_days_behind > 1
+
+
 def load_price_data(
     symbol: str,
     start_date: Optional[Union[datetime, date]] = None,
@@ -965,7 +1175,14 @@ def load_price_data(
     if end_date is None and "end" in legacy_kwargs:
         end_date = legacy_kwargs.pop("end")
 
-    df_full = _load_symbol_full_cached(symbol, intraday=intraday)
+    df_full = _load_symbol_from_sql_store(
+        symbol,
+        intraday=intraday,
+        start_date=start_date,
+        end_date=end_date,
+    )
+    if df_full.empty:
+        df_full = _load_symbol_full_cached(symbol, intraday=intraday)
     if df_full.empty:
         return df_full
 
@@ -988,10 +1205,16 @@ def load_price_data(
     try:
         age_hours = _compute_data_age_hours(df)
         if age_hours is not None:
-            if age_hours > 48:
+            business_days_behind = None if intraday else _business_days_behind(df)
+            if _is_stale_price_data(df, intraday=intraday, threshold_hours=48.0):
+                suffix = ""
+                if business_days_behind is not None:
+                    suffix = f", business_days_behind={business_days_behind}"
                 logger.warning(
-                    "SURV-DI-001: stale price data for %s — age=%.1fh (threshold 48h)",
-                    symbol, age_hours,
+                    "SURV-DI-001: stale price data for %s — age=%.1fh (threshold 48h%s)",
+                    symbol,
+                    age_hours,
+                    suffix,
                 )
             if get_surveillance_engine is not None:
                 surv = get_surveillance_engine()
@@ -1067,8 +1290,38 @@ def load_prices_multi(
     שימושי מאוד למטריצות/קורלציות/Portfolio-level analysis.
     """
     frames: List[pd.Series] = []
+    normalized_symbols = [str(sym).strip().upper() for sym in symbols if str(sym).strip()]
 
-    for sym in symbols:
+    if not intraday and normalized_symbols:
+        store = _get_sql_store_for_loader()
+        if store is not None and hasattr(store, "load_price_history"):
+            sql_series: List[pd.Series] = []
+            for sym in normalized_symbols:
+                df_sql = _load_symbol_from_sql_store(
+                    sym,
+                    intraday=False,
+                    start_date=start_date,
+                    end_date=end_date,
+                )
+                if df_sql.empty or col not in df_sql.columns:
+                    continue
+                series = pd.to_numeric(df_sql[col], errors="coerce")
+                series.name = sym
+                sql_series.append(series)
+            if sql_series and len(sql_series) == len(normalized_symbols):
+                wide = pd.concat(sql_series, axis=1)
+                wide = _apply_freq_and_fill(wide, freq=freq, fill_method=fill_method)
+                if normalize and not wide.empty:
+                    for sym in list(wide.columns):
+                        first = pd.to_numeric(wide[sym], errors="coerce").dropna()
+                        if first.empty:
+                            continue
+                        base = float(first.iloc[0])
+                        if base != 0.0:
+                            wide[sym] = pd.to_numeric(wide[sym], errors="coerce") / base * 100.0
+                return wide
+
+    for sym in normalized_symbols:
         df = load_price_data(
             sym,
             start_date=start_date,
