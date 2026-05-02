@@ -21,6 +21,7 @@ Usage:
 from __future__ import annotations
 
 import json
+import inspect
 import logging
 import os
 import time
@@ -960,6 +961,82 @@ class PairsOrchestrator:
 
     def register_task(self, task: ScheduledTask) -> None:
         self.tasks[task.name] = task
+
+    def validate_pipeline_contract(self) -> dict[str, Any]:
+        """Audit the daily pipeline contract for critical production-safety invariants."""
+        required_order = [
+            "health_check",
+            "data_refresh",
+            "data_freshness_check",
+            "compute_signals",
+            "risk_check",
+        ]
+        task_order = list(self.tasks.keys())
+        dependencies = {
+            name: list(getattr(task, "depends_on", []) or [])
+            for name, task in self.tasks.items()
+        }
+        errors: list[str] = []
+
+        missing = [name for name in required_order if name not in self.tasks]
+        if missing:
+            errors.append(f"missing required tasks: {', '.join(missing)}")
+
+        if "compute_signals" in dependencies and "data_freshness_check" not in dependencies["compute_signals"]:
+            errors.append("compute_signals must depend on data_freshness_check")
+
+        if "data_freshness_check" in self.tasks and "data_refresh" in self.tasks:
+            freshness_deps = dependencies.get("data_freshness_check", [])
+            try:
+                refresh_idx = task_order.index("data_refresh")
+                freshness_idx = task_order.index("data_freshness_check")
+            except ValueError:
+                refresh_idx = freshness_idx = -1
+            if "data_refresh" not in freshness_deps and freshness_idx != refresh_idx + 1:
+                errors.append(
+                    "data_freshness_check must depend on data_refresh or appear immediately after data_refresh"
+                )
+
+        if "risk_check" in self.tasks and "compute_signals" in self.tasks:
+            try:
+                if task_order.index("risk_check") < task_order.index("compute_signals"):
+                    errors.append("risk_check must not run before compute_signals")
+            except ValueError:
+                pass
+
+        try:
+            parsed_pairs = _get_configured_pairs(
+                {
+                    "use_production_pairs": True,
+                    "production_pairs": ["SPY/QQQ"],
+                    "asset_policy": {
+                        "allow_crypto": False,
+                        "enforce_etf_like_in_production": False,
+                    },
+                }
+            )
+            if parsed_pairs != [("SPY", "QQQ")]:
+                errors.append("_get_configured_pairs must parse production_pairs when use_production_pairs=true")
+        except Exception as exc:
+            errors.append(f"_get_configured_pairs contract check failed: {exc}")
+
+        try:
+            pipeline_source = inspect.getsource(self.run_daily_pipeline)
+        except (OSError, TypeError):
+            pipeline_source = ""
+        if 'if name == "compute_signals" and result.status == "success":' not in pipeline_source:
+            errors.append("portfolio allocation must be guarded by compute_signals success")
+        if "run_portfolio_allocation_cycle" not in pipeline_source:
+            errors.append("run_daily_pipeline must route allocation through run_portfolio_allocation_cycle")
+        if "data_freshness_check" not in dependencies.get("compute_signals", []):
+            errors.append("freshness failure must block allocation via compute_signals dependency")
+
+        return {
+            "ok": not errors,
+            "errors": errors,
+            "task_order": task_order,
+            "dependencies": dependencies,
+        }
 
     def _execute_task(self, task: ScheduledTask, **kwargs) -> TaskResult:
         """Execute a single task with timing and error handling."""
