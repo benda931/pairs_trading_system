@@ -215,6 +215,46 @@ def test_validate_feedback_throttling_rejects_missing_persistent_guard(monkeypat
     assert any("missing cooldowns" in err for err in errors)
 
 
+def test_validate_feedback_execution_wiring_accepts_current_setup():
+    errors = validator._validate_feedback_execution_wiring()
+
+    assert errors == []
+
+
+def test_validate_feedback_execution_wiring_rejects_missing_dry_run_gate(monkeypatch, tmp_path):
+    orchestrator_path = tmp_path / "orchestrator.py"
+    feedback_path = tmp_path / "agent_feedback.py"
+    orchestrator_path.write_text(
+        "\n".join(
+            [
+                "from core.agent_feedback import AgentFeedbackLoop",
+                "def _run_feedback_loop():",
+                "    loop = AgentFeedbackLoop(dry_run=False)",
+                "    return loop.execute_actions([])",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    feedback_path.write_text(
+        "\n".join(
+            [
+                "def execute_actions(actions):",
+                "    return actions",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(validator, "ORCHESTRATOR_PATH", orchestrator_path)
+    monkeypatch.setattr(validator, "AGENT_FEEDBACK_PATH", feedback_path)
+
+    errors = validator._validate_feedback_execution_wiring()
+
+    assert any("missing execution safety import" in err for err in errors)
+    assert any("missing dry run handoff" in err for err in errors)
+    assert any("missing dry run guard" in err for err in errors)
+
+
 def test_validate_allocation_wiring_accepts_current_setup():
     errors = validator._validate_allocation_wiring()
 

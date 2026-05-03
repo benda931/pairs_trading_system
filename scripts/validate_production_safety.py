@@ -276,6 +276,48 @@ def _validate_feedback_throttling() -> list[str]:
     return errors
 
 
+def _validate_feedback_execution_wiring() -> list[str]:
+    errors: list[str] = []
+
+    try:
+        orchestrator_text = ORCHESTRATOR_PATH.read_text(encoding="utf-8")
+    except OSError as exc:
+        return [f"feedback execution wiring: unable to read {ORCHESTRATOR_PATH}: {exc}"]
+
+    try:
+        feedback_text = AGENT_FEEDBACK_PATH.read_text(encoding="utf-8")
+    except OSError as exc:
+        return [f"feedback execution wiring: unable to read {AGENT_FEEDBACK_PATH}: {exc}"]
+
+    required_orchestrator_snippets = {
+        "feedback loop import": "from core.agent_feedback import AgentFeedbackLoop",
+        "execution safety import": "from core.execution_safety import get_execution_mode",
+        "mode resolution": "mode = get_execution_mode(load_config())",
+        "dry run handoff": 'loop = AgentFeedbackLoop(dry_run=mode["dry_run"])',
+        "agent action gate": 'if not mode["allow_agent_actions"]:',
+        "feedback bus publish": 'self.bus.publish("feedback_loop", {',
+        "execution mode publish": '"execution_mode": mode',
+        "outer throttler": "throttler = ActionThrottler()",
+    }
+    for label, snippet in required_orchestrator_snippets.items():
+        if snippet not in orchestrator_text:
+            errors.append(f"feedback execution wiring: missing {label} in core/orchestrator.py ({snippet})")
+
+    required_feedback_snippets = {
+        "execute actions entrypoint": "def execute_actions(",
+        "dry run guard": "if self.dry_run:",
+        "blocked dry run result": '[DRY RUN] Would route:',
+        "legacy throttle call": "allowed, throttle_reason = self._check_throttle(action)",
+        "throttled result": 'action.execution_result = f"THROTTLED: {throttle_reason}"',
+        "approval block result": 'action.execution_result = "BLOCKED: approval_required"',
+    }
+    for label, snippet in required_feedback_snippets.items():
+        if snippet not in feedback_text:
+            errors.append(f"feedback execution wiring: missing {label} in core/agent_feedback.py ({snippet})")
+
+    return errors
+
+
 def _validate_allocation_wiring() -> list[str]:
     errors: list[str] = []
 
@@ -577,6 +619,7 @@ def main() -> int:
     failures.extend(_validate_production_pair_runtime(cfg))
     failures.extend(_validate_execution_mode(cfg))
     failures.extend(_validate_feedback_throttling())
+    failures.extend(_validate_feedback_execution_wiring())
     failures.extend(_validate_allocation_wiring())
     failures.extend(_validate_promotion_workflow())
     failures.extend(_validate_state_provider_wiring())
@@ -599,6 +642,7 @@ def main() -> int:
     print("- production pair runtime resolution validated")
     print("- effective execution mode validated")
     print("- feedback throttling wiring validated")
+    print("- feedback execution safety wiring validated")
     print("- allocation idempotency wiring validated")
     print("- promotion workflow gates validated")
     print("- state-provider decoupling wiring validated")
