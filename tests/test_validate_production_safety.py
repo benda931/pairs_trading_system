@@ -328,3 +328,50 @@ def test_validate_state_provider_wiring_rejects_direct_streamlit(monkeypatch, tm
 
     assert any("must not access st.session_state directly" in err for err in errors)
     assert any("must not import streamlit directly" in err for err in errors)
+
+
+def test_validate_data_freshness_wiring_accepts_current_setup():
+    errors = validator._validate_data_freshness_wiring()
+
+    assert errors == []
+
+
+def test_validate_data_freshness_wiring_rejects_missing_pipeline_gate(monkeypatch, tmp_path):
+    freshness_path = tmp_path / "data_freshness.py"
+    orchestrator_path = tmp_path / "orchestrator.py"
+    gate_test_path = tmp_path / "test_orchestrator_freshness_gate.py"
+
+    freshness_path.write_text(
+        "\n".join(
+            [
+                "class DataFreshnessError(RuntimeError): pass",
+                "class FreshnessConfig: pass",
+                "def validate_price_frame(*args, **kwargs): return {}",
+                "def validate_pair_frames(*args, **kwargs): return {}",
+                "def load_price_data_guarded(*args, **kwargs): return None",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    orchestrator_path.write_text(
+        "\n".join(
+            [
+                "from common.data_freshness import FreshnessConfig",
+                'order = ["health_check", "data_refresh", "compute_signals", "risk_check"]',
+            ]
+        ),
+        encoding="utf-8",
+    )
+    gate_test_path.write_text(
+        "def test_placeholder():\n    assert True\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(validator, "DATA_FRESHNESS_PATH", freshness_path)
+    monkeypatch.setattr(validator, "ORCHESTRATOR_PATH", orchestrator_path)
+    monkeypatch.setattr(validator, "FRESHNESS_GATE_TEST_PATH", gate_test_path)
+
+    errors = validator._validate_data_freshness_wiring()
+
+    assert any("missing freshness import" in err or "missing freshness task" in err for err in errors)
+    assert any("missing failed blocks compute" in err for err in errors)

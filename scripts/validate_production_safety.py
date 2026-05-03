@@ -17,6 +17,8 @@ PROMOTION_SCRIPT_PATH = REPO_ROOT / "scripts" / "promote_pairs_to_production.py"
 SELECTION_SCRIPT_PATH = REPO_ROOT / "scripts" / "select_top_pairs_from_ranked_csv.py"
 STATE_PROVIDER_PATH = REPO_ROOT / "core" / "state_provider.py"
 APP_CONTEXT_PATH = REPO_ROOT / "core" / "app_context.py"
+DATA_FRESHNESS_PATH = REPO_ROOT / "common" / "data_freshness.py"
+FRESHNESS_GATE_TEST_PATH = REPO_ROOT / "tests" / "test_orchestrator_freshness_gate.py"
 NEEDLE = "datetime.now(timezone.utc)" + "()"
 EXCLUDED_DIRS = {".git", "__pycache__", ".venv", "venv", "logs"}
 BLOCKED_CRYPTO_SYMBOLS = {
@@ -422,6 +424,66 @@ def _validate_state_provider_wiring() -> list[str]:
     return errors
 
 
+def _validate_data_freshness_wiring() -> list[str]:
+    errors: list[str] = []
+
+    try:
+        freshness_text = DATA_FRESHNESS_PATH.read_text(encoding="utf-8")
+    except OSError as exc:
+        return [f"data freshness wiring: unable to read {DATA_FRESHNESS_PATH}: {exc}"]
+
+    try:
+        orchestrator_text = ORCHESTRATOR_PATH.read_text(encoding="utf-8")
+    except OSError as exc:
+        return [f"data freshness wiring: unable to read {ORCHESTRATOR_PATH}: {exc}"]
+
+    try:
+        gate_test_text = FRESHNESS_GATE_TEST_PATH.read_text(encoding="utf-8")
+    except OSError as exc:
+        return [f"data freshness wiring: unable to read {FRESHNESS_GATE_TEST_PATH}: {exc}"]
+
+    required_freshness_snippets = {
+        "freshness error": "class DataFreshnessError(RuntimeError):",
+        "freshness config": "class FreshnessConfig:",
+        "frame validator": "def validate_price_frame(",
+        "pair validator": "def validate_pair_frames(",
+        "guarded loader": "def load_price_data_guarded(",
+        "all stale reason": '"reason"] = "stale_data"',
+        "leg mismatch reason": '"reason"] = "leg_date_mismatch"',
+    }
+    for label, snippet in required_freshness_snippets.items():
+        if snippet not in freshness_text:
+            errors.append(f"data freshness wiring: missing {label} in common/data_freshness.py ({snippet})")
+
+    required_orchestrator_snippets = {
+        "freshness import": "from common.data_freshness import FreshnessConfig, validate_pair_frames",
+        "freshness task": 'name="data_freshness_check"',
+        "freshness dependency": 'depends_on=["data_refresh"]',
+        "compute dependency": 'depends_on=["data_freshness_check"]',
+        "failed reason": 'reason = "all_pairs_stale_or_invalid"',
+        "fresh pairs override reset": "self._fresh_pairs_override = None",
+        "fresh pairs override update": "orchestrator._fresh_pairs_override = list(passed_pairs)",
+        "freshness bus publish": 'orchestrator.bus.publish("data_freshness", payload)',
+        "compute override use": 'getattr(orchestrator, "_fresh_pairs_override", None) is not None',
+        "pipeline order": 'order = ["health_check", "data_refresh", "data_freshness_check", "compute_signals", "risk_check"]',
+    }
+    for label, snippet in required_orchestrator_snippets.items():
+        if snippet not in orchestrator_text:
+            errors.append(f"data freshness wiring: missing {label} in core/orchestrator.py ({snippet})")
+
+    required_gate_test_snippets = {
+        "failed blocks compute": "test_data_freshness_check_fails_and_blocks_compute_signals",
+        "all stale blocks allocation": "test_run_daily_pipeline_all_pairs_stale_skips_compute_signals_and_allocation",
+        "partial pass uses only passed pairs": "test_run_daily_pipeline_partial_freshness_uses_only_passed_pairs",
+        "all pass continues": "test_run_daily_pipeline_all_pass_continues_normally",
+    }
+    for label, snippet in required_gate_test_snippets.items():
+        if snippet not in gate_test_text:
+            errors.append(f"data freshness wiring: missing {label} coverage in tests/test_orchestrator_freshness_gate.py ({snippet})")
+
+    return errors
+
+
 def _validate_ci_workflow(workflow_path: Path) -> list[str]:
     errors: list[str] = []
     try:
@@ -467,6 +529,7 @@ def main() -> int:
     failures.extend(_validate_allocation_wiring())
     failures.extend(_validate_promotion_workflow())
     failures.extend(_validate_state_provider_wiring())
+    failures.extend(_validate_data_freshness_wiring())
     failures.extend(_validate_ci_workflow(WORKFLOW_PATH))
 
     if failures:
@@ -487,6 +550,7 @@ def main() -> int:
     print("- allocation idempotency wiring validated")
     print("- promotion workflow gates validated")
     print("- state-provider decoupling wiring validated")
+    print("- data freshness gating wiring validated")
     print("- CI workflow production-safety gates validated")
     return 0
 
