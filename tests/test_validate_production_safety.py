@@ -97,7 +97,7 @@ def test_validate_ci_workflow_accepts_expected_gates(tmp_path):
                 "  production-safety-tests:",
                 "    steps:",
                 "      - run: python scripts/validate_production_safety.py",
-                "      - run: python -m pytest tests/test_orchestrator_contract.py tests/test_validate_production_safety.py -q",
+                "      - run: python -m pytest tests/test_pair_utils.py tests/test_config_manager_paths.py tests/test_config_manager_mutation.py tests/test_orchestrator_pair_parsing.py tests/test_data_freshness.py tests/test_orchestrator_freshness_gate.py tests/test_orchestrator_contract.py tests/test_allocation_guard.py tests/test_execution_safety.py tests/test_feedback_dry_run.py tests/test_promote_pairs_to_production.py tests/test_state_provider.py tests/test_agent_feedback.py tests/test_validate_production_safety.py -q",
             ]
         ),
         encoding="utf-8",
@@ -375,3 +375,66 @@ def test_validate_data_freshness_wiring_rejects_missing_pipeline_gate(monkeypatc
 
     assert any("missing freshness import" in err or "missing freshness task" in err for err in errors)
     assert any("missing failed blocks compute" in err for err in errors)
+
+
+def test_validate_config_governance_wiring_accepts_current_setup():
+    errors = validator._validate_config_governance_wiring()
+
+    assert errors == []
+
+
+def test_validate_config_governance_wiring_rejects_common_config_path(monkeypatch, tmp_path):
+    config_manager_path = tmp_path / "config_manager.py"
+    promotion_path = tmp_path / "promote_pairs_to_production.py"
+    config_manager_path.write_text(
+        "\n".join(
+            [
+                "from pathlib import Path",
+                'PROJECT_ROOT = Path(__file__).resolve().parent',
+                'CONFIG_PATH = PROJECT_ROOT / \"common\" / \"config.json\"',
+                'CONFIG_DIR = PROJECT_ROOT / \"configs\"',
+            ]
+        ),
+        encoding="utf-8",
+    )
+    promotion_path.write_text(
+        "\n".join(
+            [
+                "def run():",
+                "    return None",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(validator, "CONFIG_MANAGER_PATH", config_manager_path)
+    monkeypatch.setattr(validator, "PROMOTION_SCRIPT_PATH", promotion_path)
+
+    errors = validator._validate_config_governance_wiring()
+
+    assert any("must not point at common/config.json" in err for err in errors)
+    assert any("promotion script missing mutate config usage" in err for err in errors)
+
+
+def test_validate_ci_workflow_requires_full_safety_suite(tmp_path):
+    workflow = tmp_path / "ci.yml"
+    workflow.write_text(
+        "\n".join(
+            [
+                "jobs:",
+                "  compile:",
+                "    steps:",
+                "      - run: python -m compileall .",
+                "  production-safety-tests:",
+                "    steps:",
+                "      - run: python scripts/validate_production_safety.py",
+                "      - run: python -m pytest tests/test_pair_utils.py tests/test_validate_production_safety.py -q",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    errors = validator._validate_ci_workflow(workflow)
+
+    assert any("missing config manager mutation test" in err for err in errors)
+    assert any("missing agent feedback test" in err for err in errors)

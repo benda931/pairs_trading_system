@@ -13,6 +13,7 @@ AGENT_FEEDBACK_PATH = REPO_ROOT / "core" / "agent_feedback.py"
 ACTION_THROTTLER_PATH = REPO_ROOT / "core" / "action_throttler.py"
 ORCHESTRATOR_PATH = REPO_ROOT / "core" / "orchestrator.py"
 ALLOCATION_GUARD_PATH = REPO_ROOT / "core" / "allocation_guard.py"
+CONFIG_MANAGER_PATH = REPO_ROOT / "common" / "config_manager.py"
 PROMOTION_SCRIPT_PATH = REPO_ROOT / "scripts" / "promote_pairs_to_production.py"
 SELECTION_SCRIPT_PATH = REPO_ROOT / "scripts" / "select_top_pairs_from_ranked_csv.py"
 STATE_PROVIDER_PATH = REPO_ROOT / "core" / "state_provider.py"
@@ -484,6 +485,46 @@ def _validate_data_freshness_wiring() -> list[str]:
     return errors
 
 
+def _validate_config_governance_wiring() -> list[str]:
+    errors: list[str] = []
+
+    try:
+        config_manager_text = CONFIG_MANAGER_PATH.read_text(encoding="utf-8")
+    except OSError as exc:
+        return [f"config governance wiring: unable to read {CONFIG_MANAGER_PATH}: {exc}"]
+
+    try:
+        promotion_text = PROMOTION_SCRIPT_PATH.read_text(encoding="utf-8")
+    except OSError as exc:
+        return [f"config governance wiring: unable to read {PROMOTION_SCRIPT_PATH}: {exc}"]
+
+    required_config_manager_snippets = {
+        "repo-root project path": "PROJECT_ROOT = Path(__file__).resolve().parent.parent",
+        "repo-root config path": 'CONFIG_PATH = PROJECT_ROOT / "config.json"',
+        "repo-root config dir": 'CONFIG_DIR = PROJECT_ROOT / "configs"',
+        "config path resolver": "def resolve_config_path(",
+        "config backup helper": "def backup_config(",
+        "config mutate helper": "def mutate_config(",
+    }
+    for label, snippet in required_config_manager_snippets.items():
+        if snippet not in config_manager_text:
+            errors.append(f"config governance wiring: missing {label} in common/config_manager.py ({snippet})")
+
+    required_promotion_snippets = {
+        "mutate config usage": "mutate_config(",
+        "promotion backup enabled": "backup=True",
+        "promotion backup label": 'backup_label="pre_production_update"',
+    }
+    for label, snippet in required_promotion_snippets.items():
+        if snippet not in promotion_text:
+            errors.append(f"config governance wiring: promotion script missing {label} ({snippet})")
+
+    if 'CONFIG_PATH = PROJECT_ROOT / "common" / "config.json"' in config_manager_text:
+        errors.append("config governance wiring: config manager must not point at common/config.json")
+
+    return errors
+
+
 def _validate_ci_workflow(workflow_path: Path) -> list[str]:
     errors: list[str] = []
     try:
@@ -496,7 +537,17 @@ def _validate_ci_workflow(workflow_path: Path) -> list[str]:
         "production safety job": "production-safety-tests:",
         "compileall command": "python -m compileall .",
         "validator command": "python scripts/validate_production_safety.py",
+        "pair utils test": "tests/test_pair_utils.py",
+        "config manager paths test": "tests/test_config_manager_paths.py",
+        "config manager mutation test": "tests/test_config_manager_mutation.py",
+        "orchestrator freshness gate test": "tests/test_orchestrator_freshness_gate.py",
         "orchestrator contract test": "tests/test_orchestrator_contract.py",
+        "allocation guard test": "tests/test_allocation_guard.py",
+        "execution safety test": "tests/test_execution_safety.py",
+        "feedback dry run test": "tests/test_feedback_dry_run.py",
+        "promotion workflow test": "tests/test_promote_pairs_to_production.py",
+        "state provider test": "tests/test_state_provider.py",
+        "agent feedback test": "tests/test_agent_feedback.py",
         "validator test": "tests/test_validate_production_safety.py",
     }
     for label, snippet in required_snippets.items():
@@ -530,6 +581,7 @@ def main() -> int:
     failures.extend(_validate_promotion_workflow())
     failures.extend(_validate_state_provider_wiring())
     failures.extend(_validate_data_freshness_wiring())
+    failures.extend(_validate_config_governance_wiring())
     failures.extend(_validate_ci_workflow(WORKFLOW_PATH))
 
     if failures:
@@ -551,6 +603,7 @@ def main() -> int:
     print("- promotion workflow gates validated")
     print("- state-provider decoupling wiring validated")
     print("- data freshness gating wiring validated")
+    print("- config governance wiring validated")
     print("- CI workflow production-safety gates validated")
     return 0
 
